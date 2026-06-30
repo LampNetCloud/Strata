@@ -1,0 +1,14 @@
+[package]
+name = "lampnet-strata"
+version = "0.10.0"
+edition = "2024"
+description = "Strata — tầng lưu trữ tiến hóa: hồ sơ bất biến mà tiến hóa được (version chain + field-Merkle + anchor + audit-log)."
+license = "Apache-2.0"
+repository = "https://github.com/DucTiger/Strata"
+
+[dependencies]
+lampnet-merkle-anchor = { git = "https://github.com/LampNetCloud/lampnet-hivemind.git", branch = "claude/strata-storage" }
+blake3 = { version = "1.5", features = ["rayon"] }
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+rand = "0.8"
+bech32 = "0.11"
