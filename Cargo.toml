@@ -7,7 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/DucTiger/Strata"
 
 [dependencies]
-lampnet-merkle-anchor = { git = "https://github.com/LampNetCloud/lampnet-hivemind.git", branch = "claude/strata-storage" }
+lampnet-merkle-anchor = { git = "https://github.com/LampNetCloud/lampnet-hivemind.git" }
 blake3 = { version = "1.5", features = ["rayon"] }
 ed25519-dalek = { version = "2.0", features = ["rand_core"] }
 rand = "0.8"
