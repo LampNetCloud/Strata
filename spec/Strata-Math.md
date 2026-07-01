@@ -324,7 +324,12 @@ seq_mới > seq_cũ
 
 Hai thứ cùng nhau: chữ ký chứng *ai làm*, policy chứng *người đó được phép làm gì*. Phiên bản chỉ hợp lệ khi cả hai đạt.
 
-> **SPEC-TODO (INV-E4 phạm vi V1)**: V1 thực thi **mức chain** — `policy_hash` cam kết tập `author_did` được phép, mọi author hợp lệ sửa được **mọi trường**. Phần "bằng chứng quyền field-level" (entry `(author_did, field_key, perm)` + Merkle-proof dưới `policy_hash`) **deferred** sang phiên bản sau; INV-E4 vẫn giữ nguyên trong danh sách, chỉ thu hẹp phạm vi cài đặt V1 để spec ↔ code trung thực.
+**Hai chế độ đã cài đặt (spec ↔ code trung thực):**
+
+- **V1 (mức-chain)** — `chain::Policy`: `policy_hash = H_dom("LN/STRATA/policy/v1", ‖(did‖pk sort))` cam kết tập `author_did` được phép; mọi author hợp lệ sửa **mọi trường**. Enforce: `chain::StrataChain::check_auth`.
+- **V2 (field-level)** — `field_policy::FieldPolicy`: `policy_hash` = Merkle-root cây các entry `(author_did, field_key)` (leaf `= H_dom("LN/STRATA/policy/field/leaf/v1", author_did ‖ u32_be(len(field_key)) ‖ field_key)`, node `= H_dom("LN/STRATA/policy/field/node/v1", left ‖ right)`, dup-leaf guard). Khi sửa một trường, author kèm `FieldAuthProof` = Merkle-proof rằng entry `(author_did, field_key)` nằm dưới `policy_hash` (tương tự field-proof §6). Verifier (`check_auth_fielded` / `append_version_fielded`) kiểm: (a) `version.policy_hash == FieldPolicy.policy_hash()` (Mệnh đề 6); (b) sig hợp lệ bởi `author_did`; (c) MỖI trường thay đổi có `FieldAuthProof` verify được với `author_did == version.author_did` và đúng `field_key` dưới `version.policy_hash`. Trường thiếu bằng chứng ⇒ `FieldPolicyDenied`; bằng chứng trỏ sai commit ⇒ `FieldProofPolicyMismatch`.
+
+Nhờ commit hash, tập quyền không thể bị sửa lén mà không đổi `policy_hash` → đổi `core` → đổi `version_hash` → sig fail. Bằng chứng "mượn của author khác" bị chặn vì proof gắn cứng `author_did`.
 
 ---
 

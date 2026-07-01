@@ -18,24 +18,27 @@
 //! - [`state`]  — INV-E6 (field-proof không lộ trường khác), CHỐT-4.
 //! - [`version`]— CHỐT-1 (version_hash KHÔNG gồm sig), canonical encoding §1.7.
 //! - [`chain`]  — INV-E1/E2/E3/E4/E7 (hash-link, seq đơn điệu, append-only, sig+policy, anchor).
+//! - [`field_policy`] — INV-E4 field-level (quyền ghi MỨC TRƯỜNG + bằng chứng quyền dưới policy_hash).
 //! - [`audit`]  — INV-E3 (audit-log append-only bất biến).
 //! - [`privacy`]— INV-E9 mức code (padding/decoy chống suy luận loại qua kích thước).
 
 pub mod audit;
 pub mod chain;
+pub mod field_policy;
 pub mod privacy;
 pub mod refid;
 pub mod state;
 pub mod version;
 
 pub use audit::{AuditAction, AuditEntry, AuditLog};
-pub use chain::{StrataAnchor, StrataChain, StrataError, Policy};
+pub use chain::{Policy, StrataAnchor, StrataChain, StrataError};
+pub use field_policy::{FieldAuthProof, FieldPolicy};
 pub use refid::gen_ref_id;
-pub use state::{build_state_root, prove_field, verify_field_proof, FieldProof};
-pub use version::{StrataVersion, Hash32};
+pub use state::{FieldProof, build_state_root, prove_field, verify_field_proof};
+pub use version::{Hash32, StrataVersion};
 
 /// Re-export tiện dụng từ sub-primitive nền.
-pub use lampnet_merkle_anchor::{hash, mmr, Blake3Hasher, DomainHasher};
+pub use lampnet_merkle_anchor::{Blake3Hasher, DomainHasher, hash, mmr};
 
 /// Encode `u32` big-endian (length-prefix cho trường biến độ dài — §1.7 quy tắc 3).
 #[inline]

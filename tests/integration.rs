@@ -3,8 +3,9 @@
 use ed25519_dalek::SigningKey;
 use lampnet_strata::{
     audit::{AuditAction, AuditEntry, AuditLog},
-    chain::{StrataChain, StrataError, Policy},
-    privacy::{decoy_sizes, pad_to_bucket, BUCKETS},
+    chain::{Policy, StrataChain, StrataError},
+    field_policy::FieldPolicy,
+    privacy::{BUCKETS, decoy_sizes, pad_to_bucket},
     refid::{decode_ref_id, gen_ref_id, gen_ref_id_raw},
     state::{build_state_root, prove_field, verify_field_proof},
     version::StrataVersion,
@@ -16,7 +17,10 @@ struct Author {
     sk: SigningKey,
 }
 fn author(tag: u8) -> Author {
-    Author { did: [tag; 32], sk: SigningKey::generate(&mut OsRng) }
+    Author {
+        did: [tag; 32],
+        sk: SigningKey::generate(&mut OsRng),
+    }
 }
 fn policy(authors: &[&Author]) -> Policy {
     let mut p = Policy::new();
@@ -47,12 +51,18 @@ fn full_lifecycle_static_append_structured() {
     let ph = pol.policy_hash();
     let ref_id = gen_ref_id_raw(&alice.did, &[9u8; 32]);
 
-    let f0 = vec![(b"name".to_vec(), b"cid_name".to_vec()), (b"dob".to_vec(), b"cid_dob".to_vec())];
+    let f0 = vec![
+        (b"name".to_vec(), b"cid_name".to_vec()),
+        (b"dob".to_vec(), b"cid_dob".to_vec()),
+    ];
     let v0 = signed(0, [0u8; 32], 100, &alice, ph, &f0);
     let mut chain = StrataChain::genesis(ref_id, v0, &pol).unwrap();
 
     // #2: thêm version (cập nhật field "name").
-    let f1 = vec![(b"name".to_vec(), b"cid_name2".to_vec()), (b"dob".to_vec(), b"cid_dob".to_vec())];
+    let f1 = vec![
+        (b"name".to_vec(), b"cid_name2".to_vec()),
+        (b"dob".to_vec(), b"cid_dob".to_vec()),
+    ];
     let v1 = signed(1, chain.head_version_hash(), 200, &alice, ph, &f1);
     chain.append_version(v1, &pol).unwrap();
 
@@ -115,7 +125,10 @@ fn inv_e1_redteam_tamper_history() {
     let mut chain = StrataChain::genesis([0xAB; 32], v0, &pol).unwrap();
     // version mới phải nối đúng head; prev_hash bịa → reject.
     let bad = signed(1, [0x77; 32], 200, &a, ph, &f);
-    assert!(matches!(chain.append_version(bad, &pol), Err(StrataError::HashLinkBroken { .. })));
+    assert!(matches!(
+        chain.append_version(bad, &pol),
+        Err(StrataError::HashLinkBroken { .. })
+    ));
 }
 
 /// INV-E7 red-team: rollback anchor bị từ chối.
@@ -130,7 +143,10 @@ fn inv_e7_redteam_rollback() {
     let v1 = signed(1, chain.head_version_hash(), 200, &a, ph, &f);
     chain.append_version(v1, &pol).unwrap();
     chain.publish_anchor().unwrap(); // seq 1 đã neo
-    assert!(matches!(chain.publish_anchor(), Err(StrataError::AnchorRollback { .. })));
+    assert!(matches!(
+        chain.publish_anchor(),
+        Err(StrataError::AnchorRollback { .. })
+    ));
 }
 
 /// INV-E4 red-team: type/sig — author ngoài policy bị chặn.
@@ -144,7 +160,10 @@ fn inv_e4_redteam_unauthorized_author() {
     let v0 = signed(0, [0u8; 32], 100, &owner, ph, &f);
     let mut chain = StrataChain::genesis([0xAB; 32], v0, &pol).unwrap();
     let v1 = signed(1, chain.head_version_hash(), 200, &attacker, ph, &f);
-    assert!(matches!(chain.append_version(v1, &pol), Err(StrataError::PolicyDenied)));
+    assert!(matches!(
+        chain.append_version(v1, &pol),
+        Err(StrataError::PolicyDenied)
+    ));
 }
 
 /// INV-E3 (kế thừa merkle-anchor): proof cũ verify dưới root mới.
@@ -157,24 +176,42 @@ fn inv_e3_append_only_old_proof_valid() {
     let v0 = signed(0, [0u8; 32], 100, &a, ph, &f);
     let mut chain = StrataChain::genesis([0xAB; 32], v0, &pol).unwrap();
     let (p0, s0, vh0) = chain.prove_version(0).unwrap();
-    assert!(StrataChain::verify_version(chain.mmr_root(), &vh0, 0, s0, &p0));
+    assert!(StrataChain::verify_version(
+        chain.mmr_root(),
+        &vh0,
+        0,
+        s0,
+        &p0
+    ));
 
     for seq in 1..5u64 {
         let v = signed(seq, chain.head_version_hash(), 100 + seq * 10, &a, ph, &f);
         chain.append_version(v, &pol).unwrap();
     }
     let (p0b, s0b, vh0b) = chain.prove_version(0).unwrap();
-    assert!(StrataChain::verify_version(chain.mmr_root(), &vh0b, 0, s0b, &p0b));
+    assert!(StrataChain::verify_version(
+        chain.mmr_root(),
+        &vh0b,
+        0,
+        s0b,
+        &p0b
+    ));
 }
 
 /// INV-E8 (kế thừa): dup-leaf / determinism của state tree — second-preimage guard.
 #[test]
 fn inv_e8_state_tree_dup_leaf_and_determinism() {
     // Hai trường giá trị giống nhau nhưng key khác → leaf khác (key trộn vào leaf).
-    let f = vec![(b"a".to_vec(), b"same".to_vec()), (b"b".to_vec(), b"same".to_vec())];
+    let f = vec![
+        (b"a".to_vec(), b"same".to_vec()),
+        (b"b".to_vec(), b"same".to_vec()),
+    ];
     let r1 = build_state_root(&f);
     // Đảo thứ tự nhập → cùng root (sort theo key).
-    let f2 = vec![(b"b".to_vec(), b"same".to_vec()), (b"a".to_vec(), b"same".to_vec())];
+    let f2 = vec![
+        (b"b".to_vec(), b"same".to_vec()),
+        (b"a".to_vec(), b"same".to_vec()),
+    ];
     assert_eq!(r1, build_state_root(&f2));
     // Số trường lẻ (carry, không copy lá cuối) vẫn cho proof verify.
     let f3 = vec![
@@ -261,4 +298,86 @@ fn determinism_roots_independent_of_sig_nonce() {
         (c.mmr_root(), build_state_root(&f))
     };
     assert_eq!(build(), build());
+}
+
+/// INV-E4 **field-level** (V2) — end-to-end qua `append_version_fielded`.
+///
+/// Kịch bản hồ sơ bệnh án: bác sĩ (author1) được ghi `diagnosis`; y tá (author2)
+/// được ghi `phone`. Red-team: y tá cố ghi `diagnosis` → PHẢI bị chặn.
+#[test]
+fn inv_e4_field_level_authorized_and_redteam() {
+    let doctor = author(1);
+    let nurse = author(2);
+
+    // FieldPolicy: doctor→diagnosis, nurse→phone. policy_hash cam kết đúng tập quyền.
+    let mut fp = FieldPolicy::new();
+    fp.grant_with_key(doctor.did, doctor.sk.verifying_key(), b"diagnosis");
+    fp.grant_with_key(nurse.did, nurse.sk.verifying_key(), b"phone");
+    let ph = fp.policy_hash();
+
+    // Genesis: doctor ghi diagnosis (có bằng chứng quyền).
+    let f0 = vec![(b"diagnosis".to_vec(), b"cid_diag".to_vec())];
+    let v0 = signed(0, [0u8; 32], 100, &doctor, ph, &f0);
+    let proof_doc = fp.prove(&doctor.did, b"diagnosis").unwrap();
+    let mut chain = StrataChain::genesis_fielded(
+        [0xAB; 32],
+        v0,
+        &fp,
+        &[b"diagnosis"],
+        std::slice::from_ref(&proof_doc),
+    )
+    .expect("doctor ghi diagnosis hợp lệ");
+    assert_eq!(chain.len(), 1);
+
+    // Hợp lệ: nurse ghi phone (có bằng chứng quyền phone).
+    let f1 = vec![(b"phone".to_vec(), b"cid_phone".to_vec())];
+    let v1 = signed(1, chain.head_version_hash(), 200, &nurse, ph, &f1);
+    let proof_nurse_phone = fp.prove(&nurse.did, b"phone").unwrap();
+    assert!(
+        chain
+            .append_version_fielded(
+                v1,
+                &fp,
+                &[b"phone"],
+                std::slice::from_ref(&proof_nurse_phone)
+            )
+            .is_ok()
+    );
+    assert_eq!(chain.len(), 2);
+
+    // RED-TEAM 1: nurse cố ghi diagnosis (KHÔNG có quyền). FieldPolicy không sinh proof.
+    assert!(
+        fp.prove(&nurse.did, b"diagnosis").is_none(),
+        "policy không được cấp proof cho quyền không tồn tại"
+    );
+
+    // Nurse cố lách: đính kèm proof phone của mình cho lần ghi diagnosis → bị chặn.
+    let f2 = vec![(b"diagnosis".to_vec(), b"cid_FAKE_diag".to_vec())];
+    let v2 = signed(2, chain.head_version_hash(), 300, &nurse, ph, &f2);
+    let res = chain.append_version_fielded(
+        v2,
+        &fp,
+        &[b"diagnosis"],
+        std::slice::from_ref(&proof_nurse_phone), // proof sai trường
+    );
+    assert!(
+        matches!(res, Err(StrataError::FieldPolicyDenied { ref field_key }) if field_key == b"diagnosis"),
+        "ghi trường không có quyền phải bị FieldPolicyDenied, got {res:?}"
+    );
+    assert_eq!(chain.len(), 2, "version giả không được thêm");
+
+    // RED-TEAM 2: nurse mượn proof diagnosis HỢP LỆ của doctor nhưng ký bằng khoá nurse.
+    // proof.author_did = doctor ≠ v.author_did = nurse → FieldPolicyDenied.
+    let v3 = signed(2, chain.head_version_hash(), 300, &nurse, ph, &f2);
+    let res2 = chain.append_version_fielded(
+        v3,
+        &fp,
+        &[b"diagnosis"],
+        std::slice::from_ref(&proof_doc), // proof của doctor, không phải nurse
+    );
+    assert!(
+        matches!(res2, Err(StrataError::FieldPolicyDenied { .. })),
+        "mượn proof người khác phải bị chặn, got {res2:?}"
+    );
+    assert_eq!(chain.len(), 2);
 }

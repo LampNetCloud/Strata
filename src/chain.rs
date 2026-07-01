@@ -8,10 +8,11 @@
 //! - INV-E4: `verify_strict` chữ ký bởi `author_did` + author được policy cho phép.
 //! - INV-E7: `anchor.seq` đơn điệu — neo lại version cũ bị từ chối.
 
-use crate::version::{StrataVersion, Hash32};
+use crate::field_policy::{FieldAuthProof, FieldPolicy};
+use crate::version::{Hash32, StrataVersion};
 use ed25519_dalek::VerifyingKey;
-use lampnet_merkle_anchor::mmr::{verify as mmr_verify, InclusionProof, Mmr};
 use lampnet_merkle_anchor::Blake3Hasher;
+use lampnet_merkle_anchor::mmr::{InclusionProof, Mmr, verify as mmr_verify};
 use std::collections::BTreeMap;
 
 /// Lỗi vòng đời Strata (mọi vi phạm invariant trả lỗi rõ).
@@ -36,6 +37,10 @@ pub enum StrataError {
     AnchorRollback { current: u64, attempted: u64 },
     /// Overflow seq (đạt u64::MAX).
     SeqOverflow,
+    /// INV-E4 field-level: author không có quyền ghi trường này (bằng chứng thiếu/sai).
+    FieldPolicyDenied { field_key: Vec<u8> },
+    /// INV-E4 field-level: bằng chứng quyền trỏ sai `policy_hash` (không khớp version).
+    FieldProofPolicyMismatch { field_key: Vec<u8> },
 }
 
 impl std::fmt::Display for StrataError {
@@ -49,9 +54,9 @@ impl std::error::Error for StrataError {}
 /// (INV-E4). `policy_hash` = `H_dom("LN/STRATA/ver/v1"…)`? Không — đây là cam kết tập
 /// author; ta băm danh sách author đã sort để mọi version tham chiếu cùng giá trị.
 ///
-// SPEC-TODO(INV-E4 field-level): V1 = phân quyền MỨC CHAIN (tập author được phép
-// sửa toàn bộ Strata). Field-level perm (mỗi (author, field, perm) + Merkle proof
-// dưới policy_hash) deferred sang phiên bản sau.
+// INV-E4 (V1 — mức CHAIN): tập author được phép sửa toàn bộ Strata; mọi author hợp lệ
+// sửa mọi trường. Nâng cấp field-level (mỗi (author, field) + Merkle proof dưới
+// policy_hash) đã có ở [`crate::field_policy::FieldPolicy`] + `check_auth_fielded`.
 #[derive(Debug, Clone, Default)]
 pub struct Policy {
     allowed: BTreeMap<[u8; 32], VerifyingKey>,
@@ -60,7 +65,9 @@ pub struct Policy {
 impl Policy {
     /// Policy rỗng.
     pub fn new() -> Self {
-        Self { allowed: BTreeMap::new() }
+        Self {
+            allowed: BTreeMap::new(),
+        }
     }
 
     /// Thêm một author được phép: `author_did → pubkey` (mô phỏng key-registry CHỐT-5).
@@ -143,17 +150,32 @@ impl Clone for StrataChain {
 impl StrataChain {
     /// Genesis: tạo chain với version seq=0 đã ký + được policy cho phép.
     /// `v0` phải có seq=0, prev_hash=0^32, sig hợp lệ, author trong policy.
-    pub fn genesis(ref_id: Hash32, v0: StrataVersion, policy: &Policy) -> Result<Self, StrataError> {
+    pub fn genesis(
+        ref_id: Hash32,
+        v0: StrataVersion,
+        policy: &Policy,
+    ) -> Result<Self, StrataError> {
         if v0.seq != 0 {
-            return Err(StrataError::SeqNotMonotonic { expected: 0, got: v0.seq });
+            return Err(StrataError::SeqNotMonotonic {
+                expected: 0,
+                got: v0.seq,
+            });
         }
         if v0.prev_hash != [0u8; 32] {
-            return Err(StrataError::HashLinkBroken { expected: [0u8; 32], got: v0.prev_hash });
+            return Err(StrataError::HashLinkBroken {
+                expected: [0u8; 32],
+                got: v0.prev_hash,
+            });
         }
         Self::check_auth(&v0, policy)?;
         let mut mmr = Mmr::<Blake3Hasher>::new();
         mmr.append(&v0.version_hash());
-        Ok(Self { ref_id, mmr, versions: vec![v0], last_anchor_seq: None })
+        Ok(Self {
+            ref_id,
+            mmr,
+            versions: vec![v0],
+            last_anchor_seq: None,
+        })
     }
 
     /// Append một version mới (seq = head+1). Enforce INV-E1/E2/E4 + đơn điệu ts.
@@ -162,16 +184,25 @@ impl StrataChain {
         // INV-E2: seq +1 đúng (overflow-check).
         let expected_seq = head.seq.checked_add(1).ok_or(StrataError::SeqOverflow)?;
         if v.seq != expected_seq {
-            return Err(StrataError::SeqNotMonotonic { expected: expected_seq, got: v.seq });
+            return Err(StrataError::SeqNotMonotonic {
+                expected: expected_seq,
+                got: v.seq,
+            });
         }
         // INV-E1: hash-linked — chỉ nối từ head (chống fork).
         let head_vh = head.version_hash();
         if v.prev_hash != head_vh {
-            return Err(StrataError::HashLinkBroken { expected: head_vh, got: v.prev_hash });
+            return Err(StrataError::HashLinkBroken {
+                expected: head_vh,
+                got: v.prev_hash,
+            });
         }
         // Đơn điệu thời gian (cho "giá trị tại t").
         if v.ts < head.ts {
-            return Err(StrataError::TimestampRegress { prev: head.ts, got: v.ts });
+            return Err(StrataError::TimestampRegress {
+                prev: head.ts,
+                got: v.ts,
+            });
         }
         // INV-E4: chữ ký + policy.
         Self::check_auth(&v, policy)?;
@@ -181,26 +212,163 @@ impl StrataChain {
         Ok(())
     }
 
-    /// INV-E4: phân giải Did→pubkey, verify_strict, kiểm author trong policy.
-    ///
-    // SPEC-TODO(INV-E4 field-level): V1 chỉ phân quyền MỨC CHAIN — mọi author
-    // hợp lệ trong policy được sửa MỌI trường. Field-level perm (entry
-    // (author, field, perm) + Merkle proof dưới policy_hash) là việc sau (deferred).
+    /// INV-E4 (V1 — mức CHAIN): phân giải Did→pubkey, verify_strict, kiểm author trong
+    /// policy. Mọi author hợp lệ sửa MỌI trường. Cần quyền MỨC TRƯỜNG → dùng
+    /// [`StrataChain::append_version_fielded`] + [`crate::field_policy::FieldPolicy`].
     fn check_auth(v: &StrataVersion, policy: &Policy) -> Result<(), StrataError> {
         // INV-E4 (cốt lõi): version PHẢI commit đúng cam kết policy đang thực thi.
         // Thiếu kiểm này → author commit policy_hash giả mà verifier không phát hiện
         // → Mệnh đề 6 (Strata-Math §7.2) sụp đổ.
         let expected = policy.policy_hash();
         if v.policy_hash != expected {
-            return Err(StrataError::PolicyHashMismatch { expected, got: v.policy_hash });
+            return Err(StrataError::PolicyHashMismatch {
+                expected,
+                got: v.policy_hash,
+            });
         }
         if !policy.is_allowed(&v.author_did) {
             return Err(StrataError::PolicyDenied);
         }
-        let pk = policy.resolve(&v.author_did).ok_or(StrataError::UnknownAuthor)?;
+        let pk = policy
+            .resolve(&v.author_did)
+            .ok_or(StrataError::UnknownAuthor)?;
         if !v.verify_sig(pk) {
             return Err(StrataError::BadSignature);
         }
+        Ok(())
+    }
+
+    /// INV-E4 **field-level** (V2): thực thi quyền MỨC TRƯỜNG thay cho mức-chain.
+    ///
+    /// So với [`StrataChain::check_auth`] (V1: author sửa mọi trường), phiên bản này
+    /// buộc author kèm bằng chứng quyền cho TỪNG trường đang sửa (`changed_fields`):
+    /// - `version.policy_hash` phải khớp `fpolicy.policy_hash()` (Mệnh đề 6);
+    /// - sig hợp lệ bởi khoá của `author_did` (CHỐT-5, key-registry của FieldPolicy);
+    /// - mỗi `field_key ∈ changed_fields` có một [`FieldAuthProof`] verify được dưới
+    ///   `version.policy_hash`, với `author_did == v.author_did` và đúng `field_key`.
+    ///
+    /// Bằng chứng bảo đảm author có entry `(author_did, field_key)` nằm dưới cam kết
+    /// `policy_hash` — không ai tự cấp quyền lén (đổi tập quyền → đổi policy_hash →
+    /// đổi core → sig fail). Trường KHÔNG có bằng chứng hợp lệ ⇒ `FieldPolicyDenied`.
+    fn check_auth_fielded(
+        v: &StrataVersion,
+        fpolicy: &FieldPolicy,
+        changed_fields: &[&[u8]],
+        proofs: &[FieldAuthProof],
+    ) -> Result<(), StrataError> {
+        // (a) version PHẢI commit đúng cam kết policy field-level đang thực thi.
+        let expected = fpolicy.policy_hash();
+        if v.policy_hash != expected {
+            return Err(StrataError::PolicyHashMismatch {
+                expected,
+                got: v.policy_hash,
+            });
+        }
+        // (b) sig hợp lệ bởi khoá của author (INV-E4 phần chữ ký).
+        let pk = fpolicy
+            .resolve(&v.author_did)
+            .ok_or(StrataError::UnknownAuthor)?;
+        if !v.verify_sig(pk) {
+            return Err(StrataError::BadSignature);
+        }
+        // (c) mỗi trường thay đổi phải có bằng chứng quyền hợp lệ của CHÍNH author này.
+        for field_key in changed_fields {
+            let ok = proofs.iter().any(|p| {
+                p.field_key.as_slice() == *field_key
+                    && p.author_did == v.author_did
+                    && p.policy_hash == v.policy_hash
+                    && p.verify()
+            });
+            if !ok {
+                // Phân biệt: có proof đúng trường nhưng sai policy_hash → mismatch;
+                // ngược lại → thiếu quyền.
+                let has_wrong_ph = proofs.iter().any(|p| {
+                    p.field_key.as_slice() == *field_key
+                        && p.author_did == v.author_did
+                        && p.policy_hash != v.policy_hash
+                });
+                return Err(if has_wrong_ph {
+                    StrataError::FieldProofPolicyMismatch {
+                        field_key: field_key.to_vec(),
+                    }
+                } else {
+                    StrataError::FieldPolicyDenied {
+                        field_key: field_key.to_vec(),
+                    }
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Genesis với thực thi INV-E4 **field-level** (xem [`StrataChain::check_auth_fielded`]).
+    /// `changed_fields` = tập trường author ghi ở genesis; mỗi trường cần một proof.
+    pub fn genesis_fielded(
+        ref_id: Hash32,
+        v0: StrataVersion,
+        fpolicy: &FieldPolicy,
+        changed_fields: &[&[u8]],
+        proofs: &[FieldAuthProof],
+    ) -> Result<Self, StrataError> {
+        if v0.seq != 0 {
+            return Err(StrataError::SeqNotMonotonic {
+                expected: 0,
+                got: v0.seq,
+            });
+        }
+        if v0.prev_hash != [0u8; 32] {
+            return Err(StrataError::HashLinkBroken {
+                expected: [0u8; 32],
+                got: v0.prev_hash,
+            });
+        }
+        Self::check_auth_fielded(&v0, fpolicy, changed_fields, proofs)?;
+        let mut mmr = Mmr::<Blake3Hasher>::new();
+        mmr.append(&v0.version_hash());
+        Ok(Self {
+            ref_id,
+            mmr,
+            versions: vec![v0],
+            last_anchor_seq: None,
+        })
+    }
+
+    /// Append với thực thi INV-E4 **field-level** (V2). Kiểm INV-E1/E2 + đơn điệu ts
+    /// như [`StrataChain::append_version`], nhưng phần quyền dùng
+    /// [`StrataChain::check_auth_fielded`]: author phải chứng minh quyền cho MỖI trường
+    /// trong `changed_fields`.
+    pub fn append_version_fielded(
+        &mut self,
+        v: StrataVersion,
+        fpolicy: &FieldPolicy,
+        changed_fields: &[&[u8]],
+        proofs: &[FieldAuthProof],
+    ) -> Result<(), StrataError> {
+        let head = self.head();
+        let expected_seq = head.seq.checked_add(1).ok_or(StrataError::SeqOverflow)?;
+        if v.seq != expected_seq {
+            return Err(StrataError::SeqNotMonotonic {
+                expected: expected_seq,
+                got: v.seq,
+            });
+        }
+        let head_vh = head.version_hash();
+        if v.prev_hash != head_vh {
+            return Err(StrataError::HashLinkBroken {
+                expected: head_vh,
+                got: v.prev_hash,
+            });
+        }
+        if v.ts < head.ts {
+            return Err(StrataError::TimestampRegress {
+                prev: head.ts,
+                got: v.ts,
+            });
+        }
+        Self::check_auth_fielded(&v, fpolicy, changed_fields, proofs)?;
+
+        self.mmr.append(&v.version_hash());
+        self.versions.push(v);
         Ok(())
     }
 
@@ -252,7 +420,10 @@ impl StrataChain {
         if let Some(prev) = self.last_anchor_seq
             && a.seq <= prev
         {
-            return Err(StrataError::AnchorRollback { current: prev, attempted: a.seq });
+            return Err(StrataError::AnchorRollback {
+                current: prev,
+                attempted: a.seq,
+            });
         }
         self.last_anchor_seq = Some(a.seq);
         Ok(a)
@@ -264,7 +435,11 @@ impl StrataChain {
             return None;
         }
         let proof = self.mmr.prove(seq as usize);
-        Some((proof, self.mmr.len(), self.versions[seq as usize].version_hash()))
+        Some((
+            proof,
+            self.mmr.len(),
+            self.versions[seq as usize].version_hash(),
+        ))
     }
 
     /// Verify một version-proof dưới một `root` cho trước (merkle-anchor verify).
@@ -312,7 +487,10 @@ mod tests {
         sk: SigningKey,
     }
     fn mk_author(tag: u8) -> Author {
-        Author { did: [tag; 32], sk: SigningKey::generate(&mut OsRng) }
+        Author {
+            did: [tag; 32],
+            sk: SigningKey::generate(&mut OsRng),
+        }
     }
 
     fn policy_with(authors: &[&Author]) -> Policy {
@@ -374,7 +552,10 @@ mod tests {
         let mut tampered_v0 = signed(0, [0u8; 32], 100, &a, ph);
         tampered_v0.ts = 999; // đổi quá khứ
         let tampered_vh = tampered_v0.version_hash();
-        assert_ne!(tampered_vh, head_vh, "version_hash phải đổi khi sửa quá khứ");
+        assert_ne!(
+            tampered_vh, head_vh,
+            "version_hash phải đổi khi sửa quá khứ"
+        );
         // v1.prev_hash (tính trên genesis gốc) != version_hash genesis-tampered.
         assert_ne!(chain.version(1).unwrap().prev_hash, tampered_vh);
     }
@@ -387,7 +568,10 @@ mod tests {
         let v = signed(2, chain.head_version_hash(), 200, &a, ph); // nhảy 0→2
         assert!(matches!(
             chain.append_version(v, &pol),
-            Err(StrataError::SeqNotMonotonic { expected: 1, got: 2 })
+            Err(StrataError::SeqNotMonotonic {
+                expected: 1,
+                got: 2
+            })
         ));
     }
 
@@ -424,7 +608,9 @@ mod tests {
         let (proof0b, size0b, vh0b) = chain.prove_version(0).unwrap();
         let root_new = chain.mmr_root();
         assert_ne!(root0, root_new, "root phải đổi khi mở rộng");
-        assert!(StrataChain::verify_version(root_new, &vh0b, 0, size0b, &proof0b));
+        assert!(StrataChain::verify_version(
+            root_new, &vh0b, 0, size0b, &proof0b
+        ));
     }
 
     #[test]
@@ -435,9 +621,20 @@ mod tests {
         // Ký bởi author a nhưng giả mạo: dùng khoá khác trong khi did là của a.
         let imposter = SigningKey::generate(&mut OsRng);
         let sr = build_state_root(&[(b"k".to_vec(), b"v".to_vec())]);
-        let mut v = StrataVersion::unsigned(1, chain.head_version_hash(), b"cid".to_vec(), sr, a.did, ph, 200);
+        let mut v = StrataVersion::unsigned(
+            1,
+            chain.head_version_hash(),
+            b"cid".to_vec(),
+            sr,
+            a.did,
+            ph,
+            200,
+        );
         v.sign(&imposter); // sig của khoá khác, did vẫn = a.did
-        assert!(matches!(chain.append_version(v, &pol), Err(StrataError::BadSignature)));
+        assert!(matches!(
+            chain.append_version(v, &pol),
+            Err(StrataError::BadSignature)
+        ));
     }
 
     #[test]
@@ -447,7 +644,10 @@ mod tests {
         let ph = pol.policy_hash();
         let outsider = mk_author(2); // KHÔNG trong policy
         let v = signed(1, chain.head_version_hash(), 200, &outsider, ph);
-        assert!(matches!(chain.append_version(v, &pol), Err(StrataError::PolicyDenied)));
+        assert!(matches!(
+            chain.append_version(v, &pol),
+            Err(StrataError::PolicyDenied)
+        ));
     }
 
     #[test]
@@ -460,7 +660,10 @@ mod tests {
         // Tạo một biến thể sig "bẻ": thêm L vào nửa scalar S (byte 32..64) để non-canonical.
         // Đơn giản hơn: flip 1 bit trong sig → verify_strict reject.
         v.sig[40] ^= 0x01;
-        assert!(matches!(chain.append_version(v, &pol), Err(StrataError::BadSignature)));
+        assert!(matches!(
+            chain.append_version(v, &pol),
+            Err(StrataError::BadSignature)
+        ));
     }
 
     #[test]
@@ -486,10 +689,13 @@ mod tests {
         let v1 = signed(1, chain.head_version_hash(), 200, &a, ph);
         chain.append_version(v1, &pol).unwrap();
         chain.publish_anchor().unwrap(); // seq 1
-                                         // Mô phỏng indexer thấy lại anchor seq 1 (đã neo) → rollback.
+        // Mô phỏng indexer thấy lại anchor seq 1 (đã neo) → rollback.
         assert!(matches!(
             chain.publish_anchor(),
-            Err(StrataError::AnchorRollback { current: 1, attempted: 1 })
+            Err(StrataError::AnchorRollback {
+                current: 1,
+                attempted: 1
+            })
         ));
     }
 

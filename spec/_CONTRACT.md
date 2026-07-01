@@ -37,7 +37,9 @@
 |---|---|
 | Sinh ref_id | `LN/STRATA/ref/v1` |
 | Băm version (core) | `LN/STRATA/ver/v1` |
-| Policy commitment (tập author) | `LN/STRATA/policy/v1` |
+| Policy commitment (tập author — V1 mức-chain) | `LN/STRATA/policy/v1` |
+| Policy field-level: entry leaf `(author_did, field_key)` | `LN/STRATA/policy/field/leaf/v1` |
+| Policy field-level: internal node | `LN/STRATA/policy/field/node/v1` |
 | MMR leaf | `LN/STRATA/mmr/leaf/v1` |
 | MMR internal node | `LN/STRATA/mmr/node/v1` |
 | MMR root (bag + n) | `LN/STRATA/mmr/root/v1` |
@@ -71,7 +73,7 @@ Ghi chú bắt buộc nêu trong cả 3 file:
 - **INV-E1** (hash-linked): version seq=k có `prev_hash == version_hash(seq=k-1)`. seq=0: `prev_hash = 0^32`.
 - **INV-E2** (đơn điệu seq): seq tăng đúng +1, không nhảy, không lùi.
 - **INV-E3** (append-only history): thêm version chỉ MỞ RỘNG mmr; mọi inclusion-proof cũ vẫn đúng dưới root mới.
-- **INV-E4** (quyền + chữ ký): `sig` hợp lệ bởi khóa của `author_did`, và `author_did` được `policy_hash` cho phép sửa phần tương ứng.
+- **INV-E4** (quyền + chữ ký): `sig` hợp lệ bởi khóa của `author_did`, và `author_did` được `policy_hash` cho phép sửa phần tương ứng. Hai chế độ đã cài đặt: **V1 mức-chain** (`chain::Policy` cam kết tập author; mọi author sửa mọi trường — `check_auth`) và **V2 field-level** (`field_policy::FieldPolicy` cam kết cây các entry `(author_did, field_key)`; mỗi trường sửa cần một `FieldAuthProof` dưới `policy_hash` — `check_auth_fielded` / `append_version_fielded`).
 - **INV-E5** (CID không lộ loại): `ref_id`/`content_cid` là hash thuần; KHÔNG nhúng nhãn loại/độ nhạy (sửa lỗi leak Vault/Bulk hiện tại).
 - **INV-E6** (field-privacy): proof một trường từ `state_root` KHÔNG tiết lộ trường khác.
 - **INV-E7** (chống rollback): anchor on-chain đơn điệu theo `seq`; không thể neo lại version cũ.

@@ -117,7 +117,15 @@ mod tests {
     #[test]
     fn canonical_core_excludes_sig() {
         // CHỐT-1: đổi sig KHÔNG đổi version_hash.
-        let mut v = StrataVersion::unsigned(0, [0u8; 32], b"cid".to_vec(), [1u8; 32], [2u8; 32], [3u8; 32], 100);
+        let mut v = StrataVersion::unsigned(
+            0,
+            [0u8; 32],
+            b"cid".to_vec(),
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            100,
+        );
         let vh1 = v.version_hash();
         v.sig = [0xAB; 64];
         let vh2 = v.version_hash();
@@ -128,7 +136,15 @@ mod tests {
     fn sign_then_verify_strict() {
         let sk = mk_key();
         let pk = sk.verifying_key();
-        let mut v = StrataVersion::unsigned(0, [0u8; 32], b"x".to_vec(), [1u8; 32], [2u8; 32], [3u8; 32], 1);
+        let mut v = StrataVersion::unsigned(
+            0,
+            [0u8; 32],
+            b"x".to_vec(),
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            1,
+        );
         v.sign(&sk);
         assert!(v.verify_sig(&pk));
     }
@@ -138,7 +154,15 @@ mod tests {
         // INV-E4: chữ ký bởi khóa khác → từ chối.
         let sk = mk_key();
         let other = mk_key();
-        let mut v = StrataVersion::unsigned(0, [0u8; 32], b"x".to_vec(), [1u8; 32], [2u8; 32], [3u8; 32], 1);
+        let mut v = StrataVersion::unsigned(
+            0,
+            [0u8; 32],
+            b"x".to_vec(),
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            1,
+        );
         v.sign(&sk);
         assert!(!v.verify_sig(&other.verifying_key()));
     }
@@ -148,7 +172,15 @@ mod tests {
         // Đổi 1 trường core sau khi ký → version_hash đổi → verify fail.
         let sk = mk_key();
         let pk = sk.verifying_key();
-        let mut v = StrataVersion::unsigned(0, [0u8; 32], b"x".to_vec(), [1u8; 32], [2u8; 32], [3u8; 32], 1);
+        let mut v = StrataVersion::unsigned(
+            0,
+            [0u8; 32],
+            b"x".to_vec(),
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            1,
+        );
         v.sign(&sk);
         v.ts = 999; // tamper
         assert!(!v.verify_sig(&pk));
@@ -157,8 +189,24 @@ mod tests {
     #[test]
     fn canonical_length_prefix_avoids_concat_ambiguity() {
         // ("ab", root X) vs ("a", root bắt đầu 'b'…) — length-prefix chống nhập nhằng nối chuỗi.
-        let a = StrataVersion::unsigned(0, [0u8; 32], b"ab".to_vec(), [0u8; 32], [0u8; 32], [0u8; 32], 0);
-        let b = StrataVersion::unsigned(0, [0u8; 32], b"a".to_vec(), [0u8; 32], [0u8; 32], [0u8; 32], 0);
+        let a = StrataVersion::unsigned(
+            0,
+            [0u8; 32],
+            b"ab".to_vec(),
+            [0u8; 32],
+            [0u8; 32],
+            [0u8; 32],
+            0,
+        );
+        let b = StrataVersion::unsigned(
+            0,
+            [0u8; 32],
+            b"a".to_vec(),
+            [0u8; 32],
+            [0u8; 32],
+            [0u8; 32],
+            0,
+        );
         assert_ne!(a.version_hash(), b.version_hash());
     }
 }

@@ -4,7 +4,7 @@
 //! nhãn loại/độ nhạy (sửa lỗi CID leak Vault/Bulk). Biểu diễn công khai `lnref1…`
 //! (bech32m HRP "lnref"). KHÔNG đổi qua các phiên bản.
 
-use lampnet_merkle_anchor::hash::{h_dom, Hash32};
+use lampnet_merkle_anchor::hash::{Hash32, h_dom};
 
 /// Tag domain sinh ref_id (CHỐT-2 — copy nguyên văn bảng domain-tag).
 pub const TAG_REF: &str = "LN/STRATA/ref/v1";

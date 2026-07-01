@@ -7,8 +7,8 @@
 use crate::chain::StrataError;
 use crate::u32_be;
 use crate::version::Hash32;
-use lampnet_merkle_anchor::mmr::{verify as mmr_verify, InclusionProof, Mmr};
 use lampnet_merkle_anchor::Blake3Hasher;
+use lampnet_merkle_anchor::mmr::{InclusionProof, Mmr, verify as mmr_verify};
 
 /// Loại sự kiện audit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +102,11 @@ impl Clone for AuditLog {
         for e in &self.entries {
             mmr.append(&e.leaf_bytes());
         }
-        Self { mmr, entries: self.entries.clone(), last_ts: self.last_ts }
+        Self {
+            mmr,
+            entries: self.entries.clone(),
+            last_ts: self.last_ts,
+        }
     }
 }
 
@@ -115,7 +119,11 @@ impl Default for AuditLog {
 impl AuditLog {
     /// Log rỗng.
     pub fn new() -> Self {
-        Self { mmr: Mmr::new(), entries: Vec::new(), last_ts: 0 }
+        Self {
+            mmr: Mmr::new(),
+            entries: Vec::new(),
+            last_ts: 0,
+        }
     }
 
     /// Append một entry truy cập, ENFORCE `created_ts` đơn điệu không-giảm (M2).
@@ -123,7 +131,10 @@ impl AuditLog {
     /// → [`StrataError::TimestampRegress`]. Append-only — không sửa entry cũ.
     pub fn append_access(&mut self, entry: AuditEntry) -> Result<usize, StrataError> {
         if entry.created_ts < self.last_ts {
-            return Err(StrataError::TimestampRegress { prev: self.last_ts, got: entry.created_ts });
+            return Err(StrataError::TimestampRegress {
+                prev: self.last_ts,
+                got: entry.created_ts,
+            });
         }
         let idx = self.entries.len();
         self.last_ts = entry.created_ts;
@@ -157,7 +168,11 @@ impl AuditLog {
         if idx >= self.entries.len() {
             return None;
         }
-        Some((self.mmr.prove(idx), self.mmr.len(), self.entries[idx].leaf_bytes()))
+        Some((
+            self.mmr.prove(idx),
+            self.mmr.len(),
+            self.entries[idx].leaf_bytes(),
+        ))
     }
 
     /// Verify một audit-proof dưới `root`.
@@ -189,7 +204,8 @@ mod tests {
     #[test]
     fn append_and_prove() {
         let mut log = AuditLog::new();
-        log.append_access(entry(100, 1, AuditAction::Create)).unwrap();
+        log.append_access(entry(100, 1, AuditAction::Create))
+            .unwrap();
         log.append_access(entry(200, 2, AuditAction::Read)).unwrap();
         log.append_access(entry(300, 3, AuditAction::Sign)).unwrap();
         assert_eq!(log.len(), 3);
@@ -202,7 +218,8 @@ mod tests {
     fn append_only_old_proof_survives_growth() {
         // INV-E3: proof entry cũ vẫn verify dưới root sau khi append thêm.
         let mut log = AuditLog::new();
-        log.append_access(entry(100, 1, AuditAction::Create)).unwrap();
+        log.append_access(entry(100, 1, AuditAction::Create))
+            .unwrap();
         let (proof0, size0, leaf0) = log.prove(0).unwrap();
         assert!(AuditLog::verify(log.root(), &leaf0, 0, size0, &proof0));
 
@@ -215,7 +232,8 @@ mod tests {
     #[test]
     fn tampered_entry_fails_verify() {
         let mut log = AuditLog::new();
-        log.append_access(entry(100, 1, AuditAction::Create)).unwrap();
+        log.append_access(entry(100, 1, AuditAction::Create))
+            .unwrap();
         let (proof, size, _leaf) = log.prove(0).unwrap();
         // Verify với leaf KHÁC (entry bị đổi) → fail.
         let tampered = entry(100, 9, AuditAction::Create).leaf_bytes();
@@ -225,7 +243,8 @@ mod tests {
     #[test]
     fn root_changes_on_append() {
         let mut log = AuditLog::new();
-        log.append_access(entry(100, 1, AuditAction::Create)).unwrap();
+        log.append_access(entry(100, 1, AuditAction::Create))
+            .unwrap();
         let r0 = log.root();
         log.append_access(entry(200, 1, AuditAction::Read)).unwrap();
         assert_ne!(r0, log.root());
@@ -235,7 +254,8 @@ mod tests {
     fn ts_equal_allowed() {
         // M2: ts bằng entry trước (không-giảm) → chấp nhận.
         let mut log = AuditLog::new();
-        log.append_access(entry(100, 1, AuditAction::Create)).unwrap();
+        log.append_access(entry(100, 1, AuditAction::Create))
+            .unwrap();
         assert!(log.append_access(entry(100, 2, AuditAction::Read)).is_ok());
         assert_eq!(log.len(), 2);
     }
@@ -244,10 +264,17 @@ mod tests {
     fn ts_regress_rejected() {
         // M2: ts lùi (< entry trước) → TimestampRegress, log KHÔNG đổi.
         let mut log = AuditLog::new();
-        log.append_access(entry(200, 1, AuditAction::Create)).unwrap();
+        log.append_access(entry(200, 1, AuditAction::Create))
+            .unwrap();
         let root_before = log.root();
         let res = log.append_access(entry(100, 2, AuditAction::Read));
-        assert!(matches!(res, Err(StrataError::TimestampRegress { prev: 200, got: 100 })));
+        assert!(matches!(
+            res,
+            Err(StrataError::TimestampRegress {
+                prev: 200,
+                got: 100
+            })
+        ));
         assert_eq!(log.len(), 1, "entry vi phạm KHÔNG được ghi");
         assert_eq!(log.root(), root_before, "root không đổi sau từ chối");
     }

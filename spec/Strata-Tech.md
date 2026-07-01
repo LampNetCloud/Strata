@@ -406,7 +406,9 @@ append_version(strata_ref, prev_version, new_content_cid, new_state_fields,
 
 Kiểm tra bắt buộc trước khi chấp nhận (validator off-chain): `prev_hash` khớp head (chống nhánh song song), `seq == head_seq+1` (INV-E2), `ts >= prev.ts` (đơn điệu thời gian — cho "giá trị tại t"), sig hợp lệ + policy cho phép (INV-E4), và `v.policy_hash == policy.policy_hash()` (chống commit bộ quyền giả — Mệnh đề 6).
 
-> **SPEC-TODO (INV-E4 phạm vi V1)**: V1 = phân quyền **mức chain** (mọi author trong `Policy` sửa được mọi trường); field-level perm (entry `(author_did, field_key, perm)` + Merkle-proof dưới `policy_hash`) **deferred**. Code (`chain.rs::check_auth`) hiện chỉ kiểm tập author + khớp `policy_hash`.
+> **INV-E4 — hai chế độ (đã cài đặt)**:
+> - **V1 mức-chain**: `chain::Policy` cam kết tập author; `chain.rs::check_auth` kiểm tập author + khớp `policy_hash`. `append_version` / `genesis`.
+> - **V2 field-level**: `field_policy::FieldPolicy` cam kết cây Merkle các entry `(author_did, field_key)`; khi sửa trường, author kèm `FieldAuthProof` (Merkle-proof entry dưới `policy_hash`). `chain.rs::check_auth_fielded` kiểm `policy_hash` khớp + sig + MỖI trường thay đổi có bằng chứng quyền hợp lệ của chính author. API: `append_version_fielded` / `genesis_fielded`. Lỗi: `FieldPolicyDenied { field_key }`, `FieldProofPolicyMismatch { field_key }`.
 
 ### §3.3 `extend_mmr` + cập nhật head
 

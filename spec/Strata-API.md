@@ -121,7 +121,9 @@ chain.append_version(v, &policy)?;            // &mut self; nối từ head, MMR
 
 `append_version` enforce theo thứ tự: seq == head+1 (overflow→`SeqOverflow`); `prev_hash == head_version_hash` (chống fork → `HashLinkBroken`); `ts >= head.ts` (`TimestampRegress`); `policy_hash` khớp (`PolicyHashMismatch`); author∈policy (`PolicyDenied`); `verify_strict` sig (`BadSignature`); Did phân giải được (`UnknownAuthor`).
 
-> **SPEC-TODO (INV-E4 phạm vi V1):** phân quyền MỨC CHAIN — mọi author trong `Policy` sửa được mọi trường. Field-level perm (entry `(author, field, perm)` + Merkle-proof dưới `policy_hash`) deferred. `check_auth` hiện chỉ kiểm tập author + khớp `policy_hash`.
+> **INV-E4 — hai chế độ (đã có code):**
+> - **V1 mức-chain** (`append_version` / `genesis` + `chain::Policy`): mọi author trong `Policy` sửa mọi trường; `check_auth` kiểm tập author + khớp `policy_hash`.
+> - **V2 field-level** (`append_version_fielded` / `genesis_fielded` + `field_policy::FieldPolicy` + `FieldAuthProof`): mỗi trường sửa cần một bằng chứng quyền `(author_did, field_key)` dưới `policy_hash`. `check_auth_fielded` kiểm `policy_hash` khớp (`PolicyHashMismatch`) + sig (`BadSignature`/`UnknownAuthor`) + MỖI trường có bằng chứng hợp lệ của chính author (thiếu → `FieldPolicyDenied { field_key }`; proof sai commit → `FieldProofPolicyMismatch { field_key }`).
 
 ### §2.3 `read_head` — giá trị mới nhất (loại #3)
 
@@ -410,7 +412,7 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
 
 **Vẫn cần quyết định (không phải việc code thuần):**
 1. **Backend neo mặc định** (Settlement metadata vs Mosaic UTxO) + OriLife 1454/1455 có hội tụ không — liên-nền-tảng, anh + GreenSun.
-2. **INV-E4 field-level perm** — V1 chỉ mức-chain; nâng field-level khi cần (deferred, đã ghi SPEC-TODO ở code + Tech §7.2).
+2. **INV-E4 field-level perm** — ĐÃ CÀI ĐẶT trong crate (`field_policy::FieldPolicy` + `append_version_fielded`); còn lại là quyết định vận hành: mỗi loại Strata (học bạ, sổ bệnh…) chọn bộ entry `(author_did, field_key)` nào — thuộc cấu hình platform, không phải core.
 3. **Mirage mode `EncryptedDistributed`** (mã hóa ∧ repair) — Tech §4.3; tới khi có, dữ liệu nhạy cảm CHƯA đạt INV-E9 (mã hóa có, repair chưa). Việc của Mirage, không phải Strata core.
 
 ---

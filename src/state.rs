@@ -16,7 +16,7 @@
 //! trường khác (sibling đã băm).
 
 use crate::u32_be;
-use lampnet_merkle_anchor::hash::{h_dom, Hash32};
+use lampnet_merkle_anchor::hash::{Hash32, h_dom};
 
 /// Tag băm giá trị trường (CHỐT-2).
 pub const TAG_STATE_FVAL: &str = "LN/STRATA/state/fval/v1";
@@ -199,7 +199,10 @@ mod tests {
         let mut p = prove_field(&f, b"diagnosis").unwrap();
         p.value = b"cid_FAKE".to_vec();
         p.fvh = fval_hash(&p.value); // khai báo fvh khớp value giả
-        assert!(!verify_field_proof(&p), "value giả phải fail (root không khớp)");
+        assert!(
+            !verify_field_proof(&p),
+            "value giả phải fail (root không khớp)"
+        );
     }
 
     #[test]
@@ -213,8 +216,16 @@ mod tests {
                 continue;
             }
             for (sib, _) in &p.siblings {
-                assert_ne!(sib.as_slice(), val.as_slice(), "sibling không được là value thô");
-                assert_ne!(sib.as_slice(), k.as_slice(), "sibling không được là key thô");
+                assert_ne!(
+                    sib.as_slice(),
+                    val.as_slice(),
+                    "sibling không được là value thô"
+                );
+                assert_ne!(
+                    sib.as_slice(),
+                    k.as_slice(),
+                    "sibling không được là key thô"
+                );
             }
         }
     }

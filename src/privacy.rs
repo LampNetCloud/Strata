@@ -86,6 +86,10 @@ mod tests {
         for s in a {
             assert!(BUCKETS.contains(&s), "decoy phải thuộc bucket hợp lệ");
         }
-        assert_ne!(decoy_sizes(42, 8), decoy_sizes(43, 8), "seed khác → dãy khác");
+        assert_ne!(
+            decoy_sizes(42, 8),
+            decoy_sizes(43, 8),
+            "seed khác → dãy khác"
+        );
     }
 }
