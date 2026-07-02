@@ -417,6 +417,235 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
 
 ---
 
+## §8. Bổ sung để implement S1/S2/S3 tới HOÀN THÀNH (bàn giao Thịnh)
+
+> Phần này lấp GAP còn lại giữa "spec đủ để hiểu" và "spec đủ để một dev mới code xong không hỏi lại". §1–§7 đủ cho lớp lõi thuần; ba việc bàn giao S1 (anchor→Mosaic CIP-68), S2 (DerivedIndex/columnar), S3 (BatchPolicy/checkpoint) cần chốt thêm: byte-layout on-chain, error-semantics adapter, tham số/domain-tag, tiêu chí test, và ranh giới liên-module. Mọi tên/tag/invariant vẫn theo `_CONTRACT.md`; đây là mở-rộng, KHÔNG sửa phần đã audit.
+
+### §8.0 Đối chiếu `StrataError` — code có 11 biến thể (đính chính §1)
+
+`§1` liệt kê 9 biến thể `StrataError`; **code thật có 11** (`chain.rs:19-44`), thêm hai biến thể field-level và biến thể có **payload struct**. Bảng chuẩn đầy đủ (dùng cho §3.1 và mọi map HTTP):
+
+| Biến thể (payload) | INV | HTTP (bổ sung §3.1) |
+|---|---|---|
+| `HashLinkBroken { expected: H32, got: H32 }` | E1 | 409 |
+| `SeqNotMonotonic { expected: u64, got: u64 }` | E2 | 422 |
+| `SeqOverflow` (không payload) | E2 | 422 |
+| `BadSignature` | E4 | 403 |
+| `PolicyDenied` | E4 | 403 |
+| `PolicyHashMismatch { expected: H32, got: H32 }` | E4 | 403 |
+| `UnknownAuthor` | E4/CHỐT-5 | 424 |
+| `TimestampRegress { prev: u64, got: u64 }` | — | 422 |
+| `AnchorRollback { current: u64, attempted: u64 }` | E7 | 409 |
+| `FieldPolicyDenied { field_key: Vec<u8> }` | E4 field-level | 403 |
+| `FieldProofPolicyMismatch { field_key: Vec<u8> }` | E4 field-level | 403 |
+
+- Body lỗi HTTP: `{ "error":"<variant>", "detail":{ <các trường payload hex/số> } }`. VD `HashLinkBroken` → `detail:{ "expected":"<hex32>", "got":"<hex32>" }`; `FieldPolicyDenied` → `detail:{ "field_key":"<hex>" }`.
+- **Case biên bắt buộc xử lý ở daemon (không phải `StrataError` core, nhưng phải trả lỗi rõ, KHÔNG panic):**
+  - `ref` không tồn tại → 404 `{ "error":"RefNotFound" }`.
+  - `seq`/`key` không tồn tại (core trả `None` từ `version`/`prove_version`/`prove_field`/`version_at`) → 404 `{ "error":"NotFound" }`.
+  - `version_at(t)` với `t < ts(genesis)` → core trả `None` → 404 (KHÔNG 500).
+  - Body sai schema / hex sai độ dài (H32 ≠ 64 hex char, sig ≠ 128 hex char) → 400 `{ "error":"BadRequest", "detail":{...} }` TRƯỚC khi vào core.
+  - `state_fields` có `key` trùng → daemon từ chối 400 (core `prove_field` chỉ trả lần xuất hiện đầu sau sort; trùng key = ngữ nghĩa mơ hồ). **Chốt:** key trong một version PHẢI duy nhất.
+
+### §8.1 S1 — `AnchorSink → Mosaic` (CIP-68): byte-layout datum + resolve
+
+Interface trait ở §4.1 đủ hình dạng, nhưng THIẾU ba thứ để code chạy được: (a) byte-layout datum CIP-68 map từ anchor 4 trường; (b) error-semantics đủ mọi case; (c) thuật toán resolve ngược. Chốt dưới đây.
+
+**(a) Map anchor 4 trường → datum CIP-68 (Lựa chọn A, Tech §5.4).** CIP-68 datum là `Constr 0 [ <metadata: Map>, <version: Int>, <extra> ]`. Strata dùng `extra` (field thứ 3, plutus-data tự do) mang anchor; `metadata` map để tối thiểu, `version = 1`:
+
+```
+StrataAnchorDatum = Constr 0 [
+  metadata : Map [ (b"name", b"LN-STRATA-ANCHOR") ],     // CIP-68 bắt buộc có metadata map
+  version  : 1,                                          // CIP-68 datum version
+  extra    : Constr 0 [
+     ref_id            : Bytes(32),   // anchor.ref_id  — bất biến (INV-E5)
+     head_version_hash : Bytes(32),   // anchor.head_version_hash
+     mmr_root          : Bytes(32),   // anchor.mmr_root — cam kết lịch sử
+     seq               : Int          // anchor.seq (u64 → Int, KHÔNG âm)
+  ]
+]
+```
+
+- **Thứ tự trường trong `extra` CHỐT theo canonical anchor** `(ref_id, head_version_hash, mmr_root, seq)` — đúng thứ tự `StrataAnchor` (`_CONTRACT.md`). Validator §5.4 kiểm `datum_out.seq == datum_in.seq+1` đọc field thứ 4 của `extra`.
+- **`seq` là `Int`**: Plutus `Int` không giới hạn `u64`; adapter PHẢI reject `seq > u64::MAX` (không xảy ra vì core dùng `u64`) và reject `Int` âm khi resolve về `u64`.
+- **Byte-size on-chain:** 3×32 bytes + Int(≤8B) trong `extra` + overhead map metadata ~40B ≈ **~180–200 byte datum** (so 104B commitment thuần) — vẫn nhỏ, đủ min-ADA `1_500_000` lovelace (§4.3). Metadata map cố ý tối thiểu để không đội phí; KHÔNG nhét thêm field nào (giữ INV-E5 — không lộ loại).
+- **Backend Settlement (Lựa chọn B, metadata label 1234):** payload = `{ "ref_id":"<hex32>", "head_version_hash":"<hex32>", "mmr_root":"<hex32>", "seq":<int> }`, KHÔNG có metadata map CIP-68 (metadata thuần). Cùng 4 trường, cùng thứ tự.
+
+**(b) Error-semantics `AnchorSink` (mở rộng §4.1 `AnchorError`).** §4.1 mới có 3 biến thể; đủ cho case biên cần:
+
+```rust
+pub enum AnchorError {
+    NotConfigured,                 // backend chưa cấu hình (thiếu key/URL)
+    Rejected(String),              // backend/validator từ chối (VD seq' != seq+1 on-chain)
+    Network(String),               // lỗi mạng/timeout — RETRYABLE
+    RollbackAttempt { on_chain_seq: u64, attempted: u64 },  // INV-E7 backend phát hiện anchor cũ hơn
+    DatumTooLarge { bytes: usize }, // datum vượt maxTxSize/protocol param
+    InsufficientAda { need: u64, have: u64 }, // backend UTxO (Mosaic A), min-ADA không đủ
+}
+```
+
+- **Idempotency (bắt buộc):** `publish` cùng một anchor `seq` hai lần (retry sau `Network`) KHÔNG được tạo hai tx spend-recreate. Adapter phải: query on-chain seq hiện tại TRƯỚC khi build tx; nếu `on_chain_seq >= anchor.seq` → trả `Ok(None)` (đã neo) HOẶC `Err(RollbackAttempt)` nếu `on_chain_seq > anchor.seq`. Chốt: `on_chain_seq == anchor.seq` → `Ok(None)` (idempotent no-op); `on_chain_seq > anchor.seq` → `RollbackAttempt`.
+- **Phân tầng retryable:** chỉ `Network(_)` retry (backoff). `Rejected`/`RollbackAttempt`/`DatumTooLarge`/`InsufficientAda` là fail cứng — KHÔNG retry, trả lên daemon.
+- **INV-E7 hai lớp (nhắc lại §4.3, chốt cách verify):** core `publish_anchor()` chặn rollback trong-tiến-trình; adapter chặn rollback cross-process bằng query on-chain seq (Mosaic A: validator; Settlement B: indexer từ chối `seq ≤ seq đã thấy`). **Cả hai lớp đều phải test riêng.**
+
+**(c) Resolve ngược `anchor on-chain → verify mmr_root khớp chain`.** THÊM method vào trait (S1 DoD yêu cầu "proof resolvable on-chain"):
+
+```rust
+pub trait AnchorSink {
+    fn publish(&self, anchor: &StrataAnchor, priority: AnchorPriority)
+        -> Result<Option<AnchorReceipt>, AnchorError>;
+    /// Đọc anchor mới nhất on-chain cho một ref_id. None nếu chưa neo bao giờ.
+    fn resolve(&self, ref_id: &Hash32) -> Result<Option<StrataAnchor>, AnchorError>;
+}
+```
+
+Thuật toán verify (daemon-side, sau `resolve`):
+```
+on_chain = sink.resolve(ref_id)?          // đọc datum/metadata → dựng lại StrataAnchor 4 trường
+assert on_chain.ref_id == chain.ref_id     // định danh khớp
+assert on_chain.seq   <= chain.head().seq  // on-chain KHÔNG được đi trước local (nếu > → local stale, đồng bộ lại)
+// Chứng minh version tại on_chain.seq thuộc lịch sử local, root khớp cái đã neo:
+let (proof, size, vh) = chain.prove_version(on_chain.seq).ok_or(SeqMissing)?
+assert vh == on_chain.head_version_hash    // head đã neo == version local tại seq đó
+assert StrataChain::verify_version(on_chain.mmr_root, &vh, on_chain.seq, size_at_that_seq, &proof)
+// LƯU Ý: verify dưới mmr_root ĐÃ NEO (on_chain.mmr_root), với mmr_size TẠI THỜI ĐIỂM neo,
+// KHÔNG phải mmr_size hiện tại — vì INV-E3 bảo đảm proof cũ vẫn đúng dưới root mới, nhưng
+// verify dưới root CŨ cần size CŨ. Daemon phải lưu (seq → mmr_size) tại mỗi lần publish_anchor.
+```
+
+> **GAP CẦN CHỐT (anh + GreenSun):** `resolve` cần daemon lưu `(seq → mmr_size)` tại mỗi lần neo để verify dưới root cũ. `StrataChain` core KHÔNG lưu lịch sử size (chỉ size hiện tại `mmr.len()`). **Chốt:** daemon giữ bảng `anchored: Vec<(seq, mmr_root, mmr_size)>` (nhỏ: 1 dòng/lần neo). Đây là state daemon, KHÔNG thêm vào core thuần.
+
+**Tiêu chí test S1 (mở rộng DoD Handoff-Issues A/S1):**
+1. `map_anchor_to_datum` round-trip: `anchor → datum → parse → anchor'`, assert `anchor == anchor'` (4 trường khớp bit).
+2. Preview: neo 1 version thật → tx hash → `resolve` → assert `datum.mmr_root == chain.mmr_root()` + `datum.head_version_hash == chain.head_version_hash()`.
+3. **INV-E7 on-chain (Mosaic A):** neo seq=1 → cố neo lại datum seq=0/seq=1 → validator/adapter reject (`RollbackAttempt`). Assert tx thứ hai fail.
+4. **INV-E7 idempotent:** gọi `publish(seq=1)` hai lần → lần hai trả `Ok(None)`, KHÔNG tạo tx mới (assert số tx = 1).
+5. Resolve sau append: neo seq=1, append tới seq=5 (chưa neo) → `resolve` vẫn trả seq=1; verify proof version seq=1 dưới `on_chain.mmr_root` (size cũ) PASS; version seq=5 chưa neo → không có anchor.
+6. `DatumTooLarge`/`InsufficientAda`: mock backend từ chối → adapter trả đúng biến thể, KHÔNG panic.
+
+### §8.2 S2 — `DerivedIndex` / columnar query: kiểu đủ để code + FieldProof xuyên version
+
+§5.4 nêu trait `DerivedIndex` nhưng để `VersionLog`, `Query`, `Seq` **chưa định nghĩa** — dev mới không code được. Chốt kiểu tối thiểu:
+
+```rust
+pub type Seq = u64;
+/// Log = SSoT. View chỉ-đọc của chuỗi version (daemon cấp từ StrataChain).
+pub trait VersionLog {
+    fn len(&self) -> u64;
+    fn version(&self, seq: Seq) -> Option<&StrataVersion>;   // đọc canonical
+    fn mmr_root(&self) -> Hash32;
+    /// Field-value tại một version (đọc từ state_fields đã lưu kèm version off-chain).
+    fn field_value_at(&self, seq: Seq, key: &[u8]) -> Option<Vec<u8>>;
+}
+pub enum Query {
+    FieldEquals { key: Vec<u8>, value: Vec<u8> },  // "field X == v" xuyên version
+    FieldLatest { key: Vec<u8> },                  // giá trị mới nhất của field X (head)
+    SenderRange { sender: [u8;32], from_ts: u64, to_ts: u64 }, // index nóng (Math §13)
+}
+```
+
+**FieldProof xuyên version (GAP cốt lõi S2 — chưa có trong §2.5).** `prove_field` hiện chỉ chứng minh field trong `state_root` của MỘT tập fields (một version). S2 cần "value của field X tại version k, có proof về `state_root` đã ký + version k thuộc lịch sử". Đây là **proof hai tầng ghép sẵn** (KHÔNG primitive mới):
+
+```
+query "field X tại version k" trả:
+  1. FieldProof (state.rs::prove_field)  → chứng minh (X, value) ∈ state_root(v_k)
+  2. state_root(v_k) chính là StrataVersion.state_root của v_k (đọc canonical, đã băm vào version_hash)
+  3. InclusionProof (chain.prove_version(k)) → chứng minh v_k ∈ mmr_root đã neo
+Verifier ghép: verify_field_proof(fp) ∧ fp.state_root == v_k.state_root ∧ verify_version(root, vh_k, k, size, ip)
+```
+
+- **Chốt:** engine KHÔNG cần commitment mới; nó chỉ **ghép** `FieldProof` + `InclusionProof` sẵn có. `lookup` trả `Vec<Seq>` (vị trí), client tự lấy hai proof rồi verify. INV-E6 (field-privacy) giữ nguyên vì mỗi proof độc lập.
+- **Ranh giới ghi vòng (INV cứng §7.5):** columnar engine CHỈ đọc `VersionLog`; KHÔNG có method chạm `Mmr::append`. Trait cố tình không có `write_back`.
+
+**Tham số/ngưỡng (chốt để test có số):**
+- `replay` phải **tất định**: cùng `VersionLog` → cùng index byte-chính-xác (test `index_replay_root_bit_exact`, §5.4).
+- Ngưỡng "khi nào bật columnar vs full-scan": theo đo thực, KHÔNG hard-code; nhưng test benchmark PHẢI báo cáo query-time vs số version tại `n ∈ {1e2, 1e3, 1e4, 1e5}`.
+
+**Tiêu chí test S2:**
+1. `query_field_at_version`: query field `X` ở version k → ghép proof → verify về `mmr_root`. PASS.
+2. `oracle_vs_bruteforce`: kết quả `lookup(FieldEquals{X,v})` KHỚP full-scan tuyến tính trên toàn log (đối chiếu tập `Seq`).
+3. `index_replay_root_bit_exact`: xóa index → `replay(log)` → mọi `state_root` + `mmr_root` khớp BIT (chốt chặn ghi-vòng).
+4. `field_privacy_preserved`: proof field `X` tại version k KHÔNG chứa key/value field khác (tái dùng assert `state.rs::field_proof_no_leak_other_fields`, mở rộng xuyên version).
+5. `benchmark_query_scaling`: bảng query-time theo `n` (số thật, không assert ngưỡng cứng).
+
+### §8.3 S3 — `BatchPolicy` / checkpoint sub-MMR: thuật toán đóng epoch + inclusion hai tầng
+
+§5.3 + Tech §7.2-7.3 có `BatchPolicy` struct + điều kiện đóng epoch, nhưng THIẾU: (a) sub-MMR dựng từ primitive nào; (b) entry-bytes canonical; (c) verify inclusion hai tầng cụ thể. Chốt:
+
+**(a) Sub-MMR = `lampnet_merkle_anchor::mmr::Mmr<Blake3Hasher>` — KHÔNG primitive mới.** `Mmr::append(leaf_data)` tự băm `leaf_hash(TAG_LEAF, leaf_data)` nội tại (`mmr.rs:60`). Entry vào sub-MMR:
+
+```rust
+// entry_bytes canonical (chốt — length-prefixed, chống ambiguity như version.rs §1.7):
+// entry_bytes = u64_be(entry_seq) ‖ u32_be(len(payload)) ‖ payload
+// (payload = giá trị đo / CRDT-op serialize tất định)
+let mut sub = Mmr::<Blake3Hasher>::new();
+for e in epoch_entries { sub.append(&entry_bytes(e)); }   // KHÔNG tự băm — Mmr::append băm rồi
+let checkpoint_state_root = sub.root();                    // commit n (CHỐT-3) sẵn trong Mmr::root
+```
+
+> **GAP domain-tag:** `_CONTRACT.md` liệt kê tag `LN/STRATA/entry/v1` cho "batch entry (sub-MMR gộp lô)", NHƯNG `Mmr::append` dùng `TAG_LEAF` = `LN/STRATA/mmr/leaf/v1` (cứng trong merkle-anchor). Hai khả năng: (1) sub-MMR entry băm PHỦ ĐẦU bằng `H_dom("LN/STRATA/entry/v1", entry_bytes)` RỒI mới `sub.append(hashed)` (tách miền entry khỏi version-leaf); (2) dùng thẳng `TAG_LEAF` và bỏ `entry/v1`. **Chốt (đề xuất):** phương án (1) — `sub.append(&h_dom("LN/STRATA/entry/v1", &entry_bytes(e)))` để miền entry tách khỏi miền version-hash (một entry KHÔNG được nhầm là một version-hash). Điều này BẢO TOÀN `entry/v1` trong bảng CHỐT-2. **Cần anh xác nhận** phương án (1) trước khi code (ảnh hưởng byte-layout on đã-neo).
+
+**(b) Checkpoint = một `append_version` bình thường:**
+```
+content_cid = gen_content_cid(batch_entries_serialized)   // batch đẩy qua Mirage
+state_root  = checkpoint_state_root (sub-MMR root ở trên)
+→ chain.append_version(v_checkpoint, &policy)              // v_checkpoint như mọi version khác
+```
+Không có API mới ở core; `BatchPolicy` + vòng gộp là **lớp daemon** (§5.3 [SPEC-TODO]).
+
+**(c) Inclusion hai tầng (verify một entry thuộc checkpoint đã neo):**
+```
+tầng dưới: sub_proof = sub_mmr.prove(entry_index)
+           verify(checkpoint_state_root, entry_leaf_hash, entry_index, sub_size, sub_proof)
+tầng trên: (ver_proof, size, vh) = chain.prove_version(checkpoint_seq)
+           verify_version(anchored_mmr_root, vh, checkpoint_seq, size, ver_proof)
+ghép:      checkpoint version v.state_root == checkpoint_state_root (đọc canonical v)
+```
+Entry i được chứng minh "∈ checkpoint ∈ lịch sử đã neo" bằng hai `O(log)` proof. **Chốt lưu:** daemon PHẢI giữ sub-MMR leaves của mỗi epoch (hoặc batch blob qua Mirage) để sinh `sub_proof` sau này — nếu vứt leaves sau checkpoint thì mất khả năng prove entry lẻ (chỉ còn prove cả checkpoint). Đây là quyết định lưu-trữ tầng (c)/(d) theo giá trị.
+
+**Tham số `BatchPolicy` (chốt default để test tất định):**
+- `epoch_secs = 3600` (khớp `EPOCH_DURATION_SECS` Reward).
+- `max_entries` — chốt số cụ thể để test "checkpoint sớm khi vượt". **Đề xuất `max_entries = 10_000`** (~2,7 entry/giây trong 1 giờ; sub-MMR 10k leaf ≈ 320KB hash trong RAM, chấp nhận được). **Cần anh chốt** nếu ProofChat có tần suất khác.
+- `flush_on_idle` — **đề xuất 300** giây (5 phút im lặng → đóng epoch sớm).
+
+**Tiêu chí test S3:**
+1. `checkpoint_1000_versions`: gộp 1000 entry → 1 checkpoint → 1 anchor; assert số anchor = 1 (không phải 1000).
+2. `prove_entry_in_checkpoint`: prove entry bất kỳ i ∈ [0,1000) thuộc checkpoint; assert `sub_proof` size ~`log2(1000)×32B ≈ 320B` (khớp "640B/1tr version" spec ở quy mô lớn hơn — báo cáo số thật).
+3. `two_tier_inclusion`: ghép sub-proof + version-proof → verify về `mmr_root` đã neo. PASS.
+4. `close_on_max_entries`: bơm `max_entries+1` entry → assert checkpoint đóng tại `max_entries` (không chờ hết `epoch_secs`).
+5. `close_on_idle`: dừng bơm `flush_on_idle` giây → assert checkpoint đóng.
+6. `entry_bytes_canonical`: hai entry khác payload cùng độ dài → leaf khác (length-prefix + entry/v1 tag tách miền).
+7. (nếu làm CRDT §7.4) `crdt_deterministic_state_root`: cùng tập op, thứ tự nhận khác → cùng `checkpoint_state_root`.
+
+### §8.4 Ranh giới liên-module (chốt để không code lấn)
+
+| Cạnh | Ai giữ gì | Hợp đồng dữ liệu |
+|---|---|---|
+| **Strata ↔ Mirage** | Mirage lưu byte (`content_cid`, batch blob, value inline lớn); Strata chỉ giữ CID 32B thuần | `content_cid = gen_content_cid(bytes)` BLAKE3 thuần, KHÔNG class byte (INV-E5/CHỐT-4). Strata gọi Mirage `/internal/fetch/:cid` để lấy byte; KHÔNG băm hộ Mirage. Dữ liệu nhạy cảm cần mode `EncryptedDistributed` (Mirage backlog) → tới khi có, INV-E9 CHƯA đạt. |
+| **Strata ↔ Mosaic** | Mosaic giữ tx on-chain + validator INV-E7; Strata giữ logic chain + sinh anchor 104B | Strata gọi `AnchorSink.publish/resolve` (§4.1 + §8.1c); KHÔNG tự dựng tx Cardano trong Strata core. Datum layout §8.1a. |
+| **Strata ↔ VeData-Query** | VeData-Query đọc nhanh (columnar/index untrusted); Strata là SSoT (log+MMR) | Query trả `Vec<Seq>` (vị trí); VeData verify bằng `FieldProof`+`InclusionProof` (§8.2). CẤM query ghi ngược MMR (§7.5). VeData dùng `lampnet-merkle-anchor<Sha3>` cho chuỗi RIÊNG (A22), KHÔNG trộn `<Blake3>` của Strata. |
+| **Strata ↔ Stamp** | Stamp gán `anchor_priority` (SSoT); Strata theo cadence | `AnchorPriority` 4-enum = Stamp 4-enum (`Immediate/Milestone/BatchDaily/NoAnchor`). Trường `stamp.*` vào `state_fields`, KHÔNG vào định danh (Stamp-Strata-Mapping §4). |
+
+### §8.5 INV-E1..E9 — cách verify (chốt cho mỗi invariant có test)
+
+`_CONTRACT.md` định nghĩa INV; đây là **cách verify** từng cái (để dev biết viết test nào). Đa số đã có test trong crate; ba cái phụ thuộc backend/daemon chưa có test đầy đủ — đánh dấu ⚠.
+
+| INV | Cách verify | Test hiện có |
+|---|---|---|
+| E1 hash-linked | tamper version quá khứ → `version_hash` đổi → `prev_hash` version sau không khớp | `chain.rs::inv_e1_*` ✅ |
+| E2 seq đơn điệu | seq nhảy/lùi → `SeqNotMonotonic` | `chain.rs::inv_e2_*` ✅ |
+| E3 append-only | proof cũ verify dưới root MỚI | `chain.rs::inv_e3_old_proof_valid_under_new_root` ✅ |
+| E4 quyền+sig | sai khóa/malleable/không-policy/policy_hash-giả → lỗi tương ứng | `chain.rs::inv_e4_*` (V1+V2) ✅ |
+| E5 CID không lộ loại | cùng (author,nonce) khác "loại" → cùng ref_id | `refid.rs::ref_id_depends_only_on_hash_not_type_label` ✅ |
+| E6 field-privacy | proof field X không chứa key/value field khác | `state.rs::field_proof_no_leak_other_fields` ✅ |
+| E7 chống rollback | (core) neo lại seq cũ → `AnchorRollback`; (on-chain) validator/adapter reject | core ✅ `inv_e7_*`; **⚠ on-chain chưa test** (S1 test #3/#4) |
+| E8 hashing an toàn | dup-leaf guard (carry, KHÔNG copy) + RFC6962 prefix + domain-sep | `state.rs::single_field_tree` + `mmr_tests.rs::{dup_leaf_guard_no_collision, second_preimage_leaf_vs_node_distinct, inclusion_n3/n7}` (lá lẻ carry, CVE-2012-2459) ✅ đã xác nhận |
+| E9 mã hóa+tái-phân-tán nhạy cảm | content nhạy cảm mã hóa (AES-256-GCM) ∧ repair (Mirage `EncryptedDistributed`) | **⚠ CHƯA đạt** — mã hóa có (Vault), repair CHƯA (Mirage backlog). Test E9 đầy đủ BỊ CHẶN tới khi Mirage có mode. `privacy.rs` chỉ cover padding/decoy (chống suy loại qua size), KHÔNG phải E9 đầy đủ. |
+
+> **GAP CẦN CHỐT (không phải code thuần):** (1) E7 on-chain phụ thuộc backend Mosaic/Settlement — chờ chốt backend mặc định (anh + GreenSun, §4.3). (2) E9 đầy đủ phụ thuộc Mirage `EncryptedDistributed` (Mirage backlog) — testnet tạm chấp nhận Vault-local + cảnh báo "no repair", ghi rõ ở DoD dữ liệu nhạy cảm. (E8 đã có test lá lẻ carry trong `mmr_tests.rs` — không còn là gap.)
+
+---
+
 ## Liên kết
 - `_CONTRACT.md` — khế ước (INV-E1..E9, domain-tag, CHỐT-1..5). Nguồn chuẩn.
 - `Strata-Math.md` — toán + chứng minh (MMR §4, state §6, composite §12, gộp lô §8, truy vấn §13, MST §14).
