@@ -26,6 +26,7 @@
 
 pub mod audit;
 pub mod chain;
+pub mod derived_index;
 pub mod field_policy;
 pub mod privacy;
 pub mod refid;
@@ -34,6 +35,10 @@ pub mod version;
 
 pub use audit::{AuditAction, AuditEntry, AuditLog};
 pub use chain::{Policy, StrataAnchor, StrataChain, StrataError};
+pub use derived_index::{
+    ColumnarIndex, CompositeFieldProof, DerivedIndex, InMemoryVersionLog, LogError, Query, Seq,
+    VersionLog, brute_force, verify_composite,
+};
 pub use field_policy::{FieldAuthProof, FieldPolicy};
 pub use refid::gen_ref_id;
 pub use state::{FieldProof, build_state_root, prove_field, verify_field_proof};
