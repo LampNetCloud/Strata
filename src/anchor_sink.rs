@@ -1,0 +1,632 @@
+//! S1 — `AnchorSink` adapter: `Strata.anchor → Mosaic` (CIP-68). Issue #1 [P0].
+//!
+//! Map `StrataAnchor` (4 trường, 104 byte — `chain.rs`, `_CONTRACT.md` phương án A)
+//! → datum CIP-68 `Constr 0 [metadata, version, extra]` (~180–200B, `Strata-API §8.1a`),
+//! `resolve()` verify ngược, + logic idempotency/rollback (§8.1b).
+//!
+//! **Ranh giới issue #1:** "Strata giữ logic chain; **Mosaic giữ tx; KHÔNG dựng tx neo
+//! trong Strata**". Vì vậy seam ra Mosaic = trait [`MosaicBackend`] trao đổi **[`PlutusData`]**
+//! (Strata map anchor↔datum; Mosaic/Lucid lo CBOR↔tx↔Preview). Codec CBOR ở đây chỉ để
+//! **đặc tả byte + size-guard**; on-chain byte cuối do tầng Mosaic (Phase 2) sinh/kiểm.
+//!
+//! Verify ngược (§8.1c) cần `mmr_size` TẠI lúc neo → daemon giữ bảng
+//! [`AnchoredTable`] `(seq, mmr_root, mmr_size)` (KHÔNG thêm vào core thuần).
+
+use crate::chain::{StrataAnchor, StrataChain};
+use crate::version::Hash32;
+use lampnet_merkle_anchor::mmr::InclusionProof;
+
+// ────────────────────────────────────────────────────────────────────────────
+// §4.1 — trait + kiểu (daemon-side, ngoài core thuần)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Cadence đẩy neo — khớp Stamp anchor_priority (Stamp-Strata-Mapping §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorPriority {
+    /// Đẩy mỗi version (Mosaic A, giá trị cao + finality).
+    Immediate,
+    /// Mốc/epoch.
+    Milestone,
+    /// Gom ngày (settlement metadata).
+    BatchDaily,
+    /// KHÔNG đẩy — sống ở tầng (a)/(b).
+    NoAnchor,
+}
+
+/// Backend nào thực đẩy on-chain (chọn liên-nền-tảng — Aladin chốt sau).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorBackend {
+    /// LampNet settlement, metadata label 1234.
+    Settlement,
+    /// VeData Mosaic, reference-UTxO CIP-68.
+    Mosaic,
+}
+
+/// Biên nhận một lần neo thành công.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorReceipt {
+    pub txid: String,
+    pub backend: AnchorBackend,
+    pub slot: Option<u64>,
+}
+
+/// Lỗi adapter (§8.1b — 6 biến thể phủ hết case biên).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnchorError {
+    /// Backend chưa cấu hình (thiếu key/URL).
+    NotConfigured,
+    /// Backend/validator từ chối (VD `seq' != seq+1` on-chain).
+    Rejected(String),
+    /// Lỗi mạng/timeout — RETRYABLE (chỉ biến thể này được retry).
+    Network(String),
+    /// INV-E7: backend phát hiện anchor cũ hơn on-chain (fail cứng).
+    RollbackAttempt { on_chain_seq: u64, attempted: u64 },
+    /// Datum vượt maxTxSize/protocol param (fail cứng).
+    DatumTooLarge { bytes: usize },
+    /// Backend UTxO (Mosaic A): min-ADA không đủ (fail cứng).
+    InsufficientAda { need: u64, have: u64 },
+}
+
+impl AnchorError {
+    /// Chỉ `Network(_)` là retryable (§8.1b — phân tầng retry).
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, AnchorError::Network(_))
+    }
+}
+
+impl std::fmt::Display for AnchorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for AnchorError {}
+
+/// Adapter một-đường: nhận `StrataAnchor` (đã enforce INV-E7 ở core), đẩy on-chain.
+/// Core KHÔNG biết Cardano; adapter sống ở daemon. Một trait, nhiều backend.
+pub trait AnchorSink {
+    /// Đẩy commitment. Trả `Ok(None)` nếu `priority == NoAnchor` HOẶC đã neo idempotent.
+    fn publish(
+        &self,
+        anchor: &StrataAnchor,
+        priority: AnchorPriority,
+    ) -> Result<Option<AnchorReceipt>, AnchorError>;
+
+    /// Đọc anchor mới nhất on-chain cho `ref_id`. `None` nếu chưa neo bao giờ.
+    fn resolve(&self, ref_id: &Hash32) -> Result<Option<StrataAnchor>, AnchorError>;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// §8.1a — PlutusData tối thiểu + datum CIP-68
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Metadata CIP-68 bắt buộc (tối thiểu để không đội phí / lộ loại — INV-E5).
+pub const ANCHOR_NAME: &[u8] = b"LN-STRATA-ANCHOR";
+/// CIP-68 datum version.
+pub const ANCHOR_DATUM_VERSION: i128 = 1;
+
+/// Subset PlutusData đủ cho datum anchor. Encode CBOR theo quy ước ledger Cardano
+/// (`Constr` alt 0..6 → tag `121+alt`; danh sách trường non-empty = mảng indefinite).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlutusData {
+    /// Constructor: (alternative, fields).
+    Constr(u64, Vec<PlutusData>),
+    /// Map (definite-length) — dùng cho `metadata`.
+    Map(Vec<(PlutusData, PlutusData)>),
+    /// Integer (Plutus không giới hạn u64; ta chỉ dùng `seq`/`version` ≥ 0).
+    Int(i128),
+    /// Byte string.
+    Bytes(Vec<u8>),
+}
+
+/// Map anchor 4 trường → datum CIP-68 (thứ tự `extra` = canonical `StrataAnchor`).
+pub fn map_anchor_to_datum(a: &StrataAnchor) -> PlutusData {
+    let extra = PlutusData::Constr(
+        0,
+        vec![
+            PlutusData::Bytes(a.ref_id.to_vec()),
+            PlutusData::Bytes(a.head_version_hash.to_vec()),
+            PlutusData::Bytes(a.mmr_root.to_vec()),
+            PlutusData::Int(a.seq as i128),
+        ],
+    );
+    let metadata = PlutusData::Map(vec![(
+        PlutusData::Bytes(b"name".to_vec()),
+        PlutusData::Bytes(ANCHOR_NAME.to_vec()),
+    )]);
+    PlutusData::Constr(
+        0,
+        vec![metadata, PlutusData::Int(ANCHOR_DATUM_VERSION), extra],
+    )
+}
+
+/// Lỗi parse datum → anchor (đủ để biết vì sao datum không hợp lệ).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatumError {
+    /// Cấu trúc không phải `Constr 0 [meta, version, extra]`.
+    Shape(&'static str),
+    /// `version` khác `ANCHOR_DATUM_VERSION`.
+    BadVersion(i128),
+    /// Trường bytes sai độ dài (kỳ vọng 32).
+    BadHashLen { field: &'static str, len: usize },
+    /// `seq` âm hoặc vượt `u64` (§8.1a — Plutus Int không giới hạn).
+    SeqOutOfRange(i128),
+}
+
+fn as_hash32(d: &PlutusData, field: &'static str) -> Result<Hash32, DatumError> {
+    match d {
+        PlutusData::Bytes(b) if b.len() == 32 => {
+            let mut h = [0u8; 32];
+            h.copy_from_slice(b);
+            Ok(h)
+        }
+        PlutusData::Bytes(b) => Err(DatumError::BadHashLen {
+            field,
+            len: b.len(),
+        }),
+        _ => Err(DatumError::Shape(field)),
+    }
+}
+
+/// Parse datum CIP-68 → anchor 4 trường. Nghịch của [`map_anchor_to_datum`].
+pub fn parse_datum_to_anchor(d: &PlutusData) -> Result<StrataAnchor, DatumError> {
+    let top = match d {
+        PlutusData::Constr(0, fields) if fields.len() == 3 => fields,
+        _ => {
+            return Err(DatumError::Shape(
+                "top must be Constr 0 [meta, version, extra]",
+            ));
+        }
+    };
+    // fields[0] = metadata (không dùng để dựng anchor — chỉ CIP-68 bắt buộc có).
+    match &top[1] {
+        PlutusData::Int(v) if *v == ANCHOR_DATUM_VERSION => {}
+        PlutusData::Int(v) => return Err(DatumError::BadVersion(*v)),
+        _ => return Err(DatumError::Shape("version must be Int")),
+    }
+    let extra = match &top[2] {
+        PlutusData::Constr(0, e) if e.len() == 4 => e,
+        _ => return Err(DatumError::Shape("extra must be Constr 0 [4 fields]")),
+    };
+    let ref_id = as_hash32(&extra[0], "ref_id")?;
+    let head_version_hash = as_hash32(&extra[1], "head_version_hash")?;
+    let mmr_root = as_hash32(&extra[2], "mmr_root")?;
+    let seq = match &extra[3] {
+        PlutusData::Int(s) if *s >= 0 && *s <= u64::MAX as i128 => *s as u64,
+        PlutusData::Int(s) => return Err(DatumError::SeqOutOfRange(*s)),
+        _ => return Err(DatumError::Shape("seq must be Int")),
+    };
+    Ok(StrataAnchor {
+        ref_id,
+        head_version_hash,
+        mmr_root,
+        seq,
+    })
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// CBOR (ledger Cardano `Data`) — đặc tả byte + size-guard. Round-trip nội bộ.
+// ────────────────────────────────────────────────────────────────────────────
+
+impl PlutusData {
+    /// Encode CBOR theo quy ước `Data` của ledger Cardano:
+    /// - `Constr` alt 0..6 → tag `121+alt`; alt 7..127 → `1280+(alt-7)`; khác → tag 102.
+    /// - danh sách trường Constr non-empty = mảng **indefinite** (`0x9f…0xff`); rỗng = `0x80`.
+    /// - `Map` = definite-length; `Int` ≥ 0 = major-0 uint; `Bytes` = major-2.
+    pub fn to_cbor(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.encode(&mut out);
+        out
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            PlutusData::Int(i) => {
+                debug_assert!(*i >= 0, "chỉ encode Int không âm trong datum anchor");
+                encode_uint(*i as u64, 0, out);
+            }
+            PlutusData::Bytes(b) => {
+                encode_uint(b.len() as u64, 2, out);
+                out.extend_from_slice(b);
+            }
+            PlutusData::Map(pairs) => {
+                encode_uint(pairs.len() as u64, 5, out);
+                for (k, v) in pairs {
+                    k.encode(out);
+                    v.encode(out);
+                }
+            }
+            PlutusData::Constr(alt, fields) => {
+                let tag: u64 = match *alt {
+                    0..=6 => 121 + *alt,
+                    7..=127 => 1280 + (*alt - 7),
+                    _ => 102,
+                };
+                // tag (major 6)
+                encode_uint(tag, 6, out);
+                if *alt > 127 {
+                    // tag 102 → array [alt, fields]
+                    out.push(0x82); // array(2)
+                    encode_uint(*alt, 0, out);
+                }
+                encode_field_list(fields, out);
+            }
+        }
+    }
+
+    /// Decode một `PlutusData` từ CBOR (nghịch của [`to_cbor`]). Trả phần dư chưa đọc.
+    pub fn from_cbor(bytes: &[u8]) -> Result<PlutusData, CborError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let d = c.read_data()?;
+        Ok(d)
+    }
+
+    /// Detailed-schema JSON của cardano-cli (`--tx-out-inline-datum-value/-file`) — dạng
+    /// tx-builder Mosaic (cardano-cli/Lucid) nạp thẳng. `Constr`→`{constructor,fields}`,
+    /// `Int`→`{int}`, `Bytes`→`{bytes:<hex>}`, `Map`→`{map:[{k,v}]}`. cardano-cli tự
+    /// canonical-hoá CBOR khi build tx → không lo byte-layout ở tầng Strata.
+    pub fn to_detailed_json(&self) -> String {
+        match self {
+            PlutusData::Int(i) => format!("{{\"int\":{i}}}"),
+            PlutusData::Bytes(b) => format!("{{\"bytes\":\"{}\"}}", hex_encode(b)),
+            PlutusData::Constr(alt, fields) => {
+                let fs: Vec<String> = fields.iter().map(PlutusData::to_detailed_json).collect();
+                format!("{{\"constructor\":{alt},\"fields\":[{}]}}", fs.join(","))
+            }
+            PlutusData::Map(pairs) => {
+                let ps: Vec<String> = pairs
+                    .iter()
+                    .map(|(k, v)| {
+                        format!(
+                            "{{\"k\":{},\"v\":{}}}",
+                            k.to_detailed_json(),
+                            v.to_detailed_json()
+                        )
+                    })
+                    .collect();
+                format!("{{\"map\":[{}]}}", ps.join(","))
+            }
+        }
+    }
+}
+
+/// Hex thường (lowercase) — tránh thêm dep chỉ để encode hex.
+fn hex_encode(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len() * 2);
+    for x in b {
+        s.push_str(&format!("{x:02x}"));
+    }
+    s
+}
+
+/// Danh sách trường Constr: rỗng = `0x80`; non-empty = indefinite `0x9f … 0xff`.
+fn encode_field_list(fields: &[PlutusData], out: &mut Vec<u8>) {
+    if fields.is_empty() {
+        out.push(0x80);
+        return;
+    }
+    out.push(0x9f);
+    for f in fields {
+        f.encode(out);
+    }
+    out.push(0xff);
+}
+
+/// Encode giá trị `major`-type với đối số `n` theo quy tắc CBOR (0..23 inline).
+fn encode_uint(n: u64, major: u8, out: &mut Vec<u8>) {
+    let m = major << 5;
+    if n < 24 {
+        out.push(m | (n as u8));
+    } else if n <= u8::MAX as u64 {
+        out.push(m | 24);
+        out.push(n as u8);
+    } else if n <= u16::MAX as u64 {
+        out.push(m | 25);
+        out.extend_from_slice(&(n as u16).to_be_bytes());
+    } else if n <= u32::MAX as u64 {
+        out.push(m | 26);
+        out.extend_from_slice(&(n as u32).to_be_bytes());
+    } else {
+        out.push(m | 27);
+        out.extend_from_slice(&n.to_be_bytes());
+    }
+}
+
+/// Lỗi decode CBOR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CborError {
+    Eof,
+    Unsupported(u8),
+    BadTag(u64),
+}
+
+struct Cursor<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl Cursor<'_> {
+    fn byte(&mut self) -> Result<u8, CborError> {
+        let v = *self.b.get(self.i).ok_or(CborError::Eof)?;
+        self.i += 1;
+        Ok(v)
+    }
+    fn take(&mut self, n: usize) -> Result<&[u8], CborError> {
+        let end = self.i.checked_add(n).ok_or(CborError::Eof)?;
+        let s = self.b.get(self.i..end).ok_or(CborError::Eof)?;
+        self.i = end;
+        Ok(s)
+    }
+    /// Đọc đối số uint sau byte đầu (`ai` = 5 bit thấp).
+    fn read_arg(&mut self, ai: u8) -> Result<u64, CborError> {
+        Ok(match ai {
+            0..=23 => ai as u64,
+            24 => self.byte()? as u64,
+            25 => u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as u64,
+            26 => u32::from_be_bytes(self.take(4)?.try_into().unwrap()) as u64,
+            27 => u64::from_be_bytes(self.take(8)?.try_into().unwrap()),
+            _ => return Err(CborError::Unsupported(ai)),
+        })
+    }
+    fn read_data(&mut self) -> Result<PlutusData, CborError> {
+        let head = self.byte()?;
+        let major = head >> 5;
+        let ai = head & 0x1f;
+        match major {
+            0 => Ok(PlutusData::Int(self.read_arg(ai)? as i128)),
+            2 => {
+                let n = self.read_arg(ai)? as usize;
+                Ok(PlutusData::Bytes(self.take(n)?.to_vec()))
+            }
+            5 => {
+                let n = self.read_arg(ai)? as usize;
+                let mut pairs = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let k = self.read_data()?;
+                    let v = self.read_data()?;
+                    pairs.push((k, v));
+                }
+                Ok(PlutusData::Map(pairs))
+            }
+            6 => {
+                let tag = self.read_arg(ai)?;
+                let (alt, has_prefix_alt) = match tag {
+                    121..=127 => (tag - 121, false),
+                    1280..=1400 => (tag - 1280 + 7, false),
+                    102 => (0, true),
+                    _ => return Err(CborError::BadTag(tag)),
+                };
+                if has_prefix_alt {
+                    // array(2) [alt, fields]
+                    let _ = self.byte()?; // 0x82
+                    let a = self.read_arg_data_int()?;
+                    let fields = self.read_field_list()?;
+                    Ok(PlutusData::Constr(a, fields))
+                } else {
+                    let fields = self.read_field_list()?;
+                    Ok(PlutusData::Constr(alt, fields))
+                }
+            }
+            _ => Err(CborError::Unsupported(head)),
+        }
+    }
+    fn read_arg_data_int(&mut self) -> Result<u64, CborError> {
+        let head = self.byte()?;
+        if head >> 5 != 0 {
+            return Err(CborError::Unsupported(head));
+        }
+        self.read_arg(head & 0x1f)
+    }
+    /// Đọc danh sách trường Constr: `0x80` rỗng, hoặc indefinite `0x9f…0xff`.
+    fn read_field_list(&mut self) -> Result<Vec<PlutusData>, CborError> {
+        let head = self.byte()?;
+        match head {
+            0x80 => Ok(Vec::new()),
+            0x9f => {
+                let mut v = Vec::new();
+                loop {
+                    if *self.b.get(self.i).ok_or(CborError::Eof)? == 0xff {
+                        self.i += 1;
+                        break;
+                    }
+                    v.push(self.read_data()?);
+                }
+                Ok(v)
+            }
+            // definite array n (major 4) — chấp nhận để robust.
+            h if h >> 5 == 4 => {
+                let n = self.read_arg(h & 0x1f)? as usize;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(self.read_data()?);
+                }
+                Ok(v)
+            }
+            other => Err(CborError::Unsupported(other)),
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// §8.1b — MosaicAnchorSink (seam Mosaic = MosaicBackend) + idempotency/rollback
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Seam ra Mosaic (VeData). Ranh giới issue #1: **Mosaic dựng+submit tx**, Strata chỉ
+/// map datum + gọi. Real impl gọi Mosaic SDK/Lucid (Phase 2); test dùng mock.
+pub trait MosaicBackend {
+    /// `seq` on-chain hiện tại của `ref_id` (None = chưa neo). Cho idempotency/rollback.
+    fn on_chain_seq(&self, ref_id: &Hash32) -> Result<Option<u64>, AnchorError>;
+    /// Mosaic dựng reference-UTxO CIP-68 spend-recreate từ datum + submit. Trả receipt.
+    fn submit_anchor(&self, datum: &PlutusData) -> Result<AnchorReceipt, AnchorError>;
+    /// Đọc datum anchor mới nhất on-chain cho `ref_id`.
+    fn read_anchor(&self, ref_id: &Hash32) -> Result<Option<PlutusData>, AnchorError>;
+}
+
+/// `AnchorSink` backend Mosaic (CIP-68). Bọc một [`MosaicBackend`] I/O.
+pub struct MosaicAnchorSink<B: MosaicBackend> {
+    backend: B,
+}
+
+impl<B: MosaicBackend> MosaicAnchorSink<B> {
+    pub fn new(backend: B) -> Self {
+        Self { backend }
+    }
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+}
+
+impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
+    fn publish(
+        &self,
+        anchor: &StrataAnchor,
+        priority: AnchorPriority,
+    ) -> Result<Option<AnchorReceipt>, AnchorError> {
+        if priority == AnchorPriority::NoAnchor {
+            return Ok(None); // sống tầng (a)/(b), không đẩy
+        }
+        // Idempotency + rollback cross-process (§8.1b): query on-chain seq TRƯỚC khi build.
+        match self.backend.on_chain_seq(&anchor.ref_id)? {
+            Some(s) if s == anchor.seq => return Ok(None), // đã neo — no-op idempotent
+            Some(s) if s > anchor.seq => {
+                return Err(AnchorError::RollbackAttempt {
+                    on_chain_seq: s,
+                    attempted: anchor.seq,
+                });
+            }
+            _ => {}
+        }
+        let datum = map_anchor_to_datum(anchor);
+        self.backend.submit_anchor(&datum).map(Some)
+    }
+
+    fn resolve(&self, ref_id: &Hash32) -> Result<Option<StrataAnchor>, AnchorError> {
+        match self.backend.read_anchor(ref_id)? {
+            None => Ok(None),
+            Some(datum) => parse_datum_to_anchor(&datum)
+                .map(Some)
+                .map_err(|e| AnchorError::Rejected(format!("datum không hợp lệ: {e:?}"))),
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// §8.1c — bảng daemon `(seq, mmr_root, mmr_size)` + verify ngược
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Một dòng neo — đủ để verify version dưới root CŨ. Lưu `proof` + `mmr_size` TẠI lúc
+/// neo, vì proof của MMR phụ thuộc size: proof sinh ở size mới KHÔNG verify dưới root cũ.
+#[derive(Debug, Clone)]
+pub struct AnchorRecord {
+    pub seq: u64,
+    pub mmr_root: Hash32,
+    pub mmr_size: u64,
+    pub version_hash: Hash32,
+    pub proof: InclusionProof,
+}
+
+/// State daemon: mỗi lần `publish_anchor()` lưu một [`AnchorRecord`] để verify dưới root
+/// CŨ (core chỉ giữ size/proof hiện tại). Nhỏ: 1 dòng/lần neo. KHÔNG thêm vào core thuần.
+#[derive(Debug, Clone, Default)]
+pub struct AnchoredTable {
+    rows: Vec<AnchorRecord>,
+}
+
+impl AnchoredTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Ghi một lần neo — lấy `(proof, size, version_hash)` từ `chain` TẠI thời điểm neo
+    /// (§8.1c). Gọi NGAY sau `publish_anchor()`, TRƯỚC khi append thêm version. Trả
+    /// `false` nếu seq của anchor không có trong chain (không xảy ra với anchor hợp lệ).
+    pub fn record_anchor(&mut self, chain: &StrataChain, anchor: &StrataAnchor) -> bool {
+        match chain.prove_version(anchor.seq) {
+            Some((proof, mmr_size, version_hash)) => {
+                self.rows.push(AnchorRecord {
+                    seq: anchor.seq,
+                    mmr_root: anchor.mmr_root,
+                    mmr_size,
+                    version_hash,
+                    proof,
+                });
+                true
+            }
+            None => false,
+        }
+    }
+    /// Dòng neo tại `seq` (None nếu seq đó chưa từng neo).
+    pub fn get(&self, seq: u64) -> Option<&AnchorRecord> {
+        self.rows.iter().find(|r| r.seq == seq)
+    }
+    /// Lần neo mới nhất.
+    pub fn latest(&self) -> Option<&AnchorRecord> {
+        self.rows.last()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+/// Lỗi verify ngược (daemon-side).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyError {
+    /// `on_chain.ref_id` khác chain local.
+    RefIdMismatch,
+    /// on-chain đi TRƯỚC local (local stale — cần đồng bộ lại).
+    OnChainAhead { on_chain: u64, local: u64 },
+    /// Không có version tại `seq` on-chain trong local.
+    SeqMissing(u64),
+    /// `head_version_hash` on-chain khác version local tại seq đó (local đã diverge).
+    HeadMismatch,
+    /// Daemon chưa lưu dòng neo cho seq đó (bảng thiếu — hoặc seq chưa neo).
+    NotAnchored(u64),
+    /// Inclusion-proof không verify dưới `mmr_root` đã neo.
+    ProofFail,
+}
+
+/// Verify anchor on-chain (đã `resolve`) khớp lịch sử local (§8.1c): version tại
+/// `on_chain.seq` thuộc `on_chain.mmr_root` (dưới `mmr_size` + `proof` TẠI lúc neo), và
+/// local chưa diverge (version local tại seq == `head_version_hash` đã neo).
+pub fn verify_resolved(
+    chain: &StrataChain,
+    on_chain: &StrataAnchor,
+    table: &AnchoredTable,
+) -> Result<(), VerifyError> {
+    if on_chain.ref_id != chain.anchor().ref_id {
+        return Err(VerifyError::RefIdMismatch);
+    }
+    let local_head = chain.head().seq;
+    if on_chain.seq > local_head {
+        return Err(VerifyError::OnChainAhead {
+            on_chain: on_chain.seq,
+            local: local_head,
+        });
+    }
+    // Local version tại seq phải khớp head đã neo (chống divergence).
+    let local_vh = chain
+        .version(on_chain.seq)
+        .map(|v| v.version_hash())
+        .ok_or(VerifyError::SeqMissing(on_chain.seq))?;
+    if local_vh != on_chain.head_version_hash {
+        return Err(VerifyError::HeadMismatch);
+    }
+    // Verify dưới root+size+proof ĐÃ NEO (không phải size hiện tại).
+    let rec = table
+        .get(on_chain.seq)
+        .ok_or(VerifyError::NotAnchored(on_chain.seq))?;
+    if rec.version_hash != on_chain.head_version_hash {
+        return Err(VerifyError::HeadMismatch);
+    }
+    if !StrataChain::verify_version(
+        on_chain.mmr_root,
+        &on_chain.head_version_hash,
+        on_chain.seq,
+        rec.mmr_size,
+        &rec.proof,
+    ) {
+        return Err(VerifyError::ProofFail);
+    }
+    Ok(())
+}
