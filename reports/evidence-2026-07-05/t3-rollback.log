@@ -1,0 +1,2 @@
+T3 resolve on-chain (Blockfrost, lọc input=publisher): Some((4, "e867da2aab781ba0f869f9f63957cc59fafcca01b83b27961ee2da7770cca9fe"))
+T3 rollback: RollbackAttempt { on_chain_seq: 4, attempted: 1 } — PASS (không tx nào được build, submitter chưa bị gọi)

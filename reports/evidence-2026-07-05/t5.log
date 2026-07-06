@@ -1,0 +1,24 @@
+T5 create lô → lnref1cerf82c58tv24jguj4tzaesmvkt4wjl3q84txtwgsrkulr72pm4sf5hsa8
+T5 event 01 → 200 trong 0.27ms (seq=1)
+T5 event 02 → 200 trong 0.21ms (seq=2)
+T5 event 03 → 200 trong 0.22ms (seq=3)
+T5 event 04 → 200 trong 0.22ms (seq=4)
+T5 event 05 → 200 trong 0.19ms (seq=5)
+T5 event 06 → 200 trong 0.20ms (seq=6)
+T5 event 07 → 200 trong 0.22ms (seq=7)
+T5 event 08 → 200 trong 0.21ms (seq=8)
+T5 event 09 → 200 trong 0.21ms (seq=9)
+T5 event 10 → 200 trong 0.20ms (seq=10)
+T5 event 11 → 200 trong 0.19ms (seq=11)
+T5 event 12 → 200 trong 0.19ms (seq=12)
+T5 event 13 → 200 trong 0.18ms (seq=13)
+T5 event 14 → 200 trong 0.18ms (seq=14)
+T5 event 15 → 200 trong 0.18ms (seq=15)
+T5 event 16 → 200 trong 0.20ms (seq=16)
+T5 event 17 → 200 trong 0.19ms (seq=17)
+T5 event 18 → 200 trong 0.18ms (seq=18)
+T5 event 19 → 200 trong 0.18ms (seq=19)
+T5 event 20 → 200 trong 0.19ms (seq=20)
+T5 latency (ms): [0.27, 0.21, 0.22, 0.22, 0.19, 0.2, 0.22, 0.21, 0.21, 0.2, 0.19, 0.19, 0.18, 0.18, 0.18, 0.2, 0.19, 0.18, 0.18, 0.19]
+T5 p50=0.19ms p95=0.22ms max=0.27ms — yêu cầu p50 < 200ms: PASS
+T5 head seq=20 mmr_root="a7ee4d9f5c0165dab6ca1b5f733e3aa47437c8bb6d95ff5a0b2f40bb5ee440af"
