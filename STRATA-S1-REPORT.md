@@ -65,17 +65,52 @@ Explorer: `https://preview.cardanoscan.io/transaction/<txid>`
 
 ---
 
-## 4. Còn lại (để đạt DoD đầy đủ)
+## 4. Validator Aiken (test #3 INV-E7 on-chain) — ✅ CODE-COMPLETE + **ON-CHAIN THẬT** (VeData/Code)
 
-- **Validator Aiken** enforce `seq'==seq+1` on-chain (reference-UTxO spend-recreate) → cho **test #3 reject rollback ON-CHAIN** (hiện INV-E7 mới ở tầng adapter + off-chain). Lift lớn — phase riêng.
-- **Tx-builder Mosaic "proper" (TS Lucid/CSL)** trong VeData/Code thay PoC cardano-cli. `MosaicBackend` (Rust) gọi sang qua subprocess/HTTP.
-- **Aladin chốt** backend mặc định Settlement vs Mosaic (quyết định liên-nền-tảng, KHÔNG chặn phần Strata/Mosaic đã làm).
+Enforce INV-E7 on-chain đã hiện thực ở **VeData/Code** (đúng ranh giới "Mosaic giữ validator"):
+- `mosaic/aiken/validators/strata_anchor.ak` (Plutus V3) + lib `mosaic/aiken/lib/strata/anchor.ak`.
+- State-thread reference-UTxO spend-recreate: `seq' == seq+1` (T4) + `ref_id` bất biến + single-successor (T2) + value-preserved (T5) + datum CIP-68 hợp lệ (T3).
+- **9 test validator + 12 test lib** (`aiken check`: toàn project **156 pass**), gồm **test #3**: `spend_rejects_rollback` (seq 1→0), `spend_rejects_replay_same_seq` (1→1), `spend_rejects_seq_skip` (1→3).
+- `aiken build` → **script hash `1c7c7ca8ff353a2475697ab9219a3d961de6923cea2cf9b8b99f58ca`** (deployable).
+
+### 4.1 Deploy Preview + test #3 SPEND-RECREATE ON-CHAIN THẬT (2026-07-06) ✅
+
+Đóng DoD "test #3 on-chain thật": neo anchor tại **script-address** rồi thử advance/rollback trên **L1 Cardano Preview thật** (reuse rig node M6: cardano-node synced 100% + ví/key alice + `cardano-cli`, thay Lucid cho PoC). Anchor dùng đúng bộ giá trị của §3 (cùng "chain" Strata: `ref_id=365e4a…`, `mmr_root=3d0b68…`).
+
+| Thứ | Giá trị |
+|---|---|
+| Script address (Preview) | `addr_test1wqw8cl9glu6n5fr4d9atjgv68ktpme5j8n4ze7dchx043jst02nh7` |
+| Script hash | `1c7c7ca8ff353a2475697ab9219a3d961de6923cea2cf9b8b99f58ca` |
+| Ví fund/collateral | alice `addr_test1vzj38jr34pe6xcnwgdx9svpg5gnapavwda3jk0gdfqtex7qkewhel` |
+
+**Bảng giao dịch** — explorer `https://preview.cardanoscan.io/transaction/<txid>`:
+
+| Case | seq | Kỳ vọng | Kết quả on-chain | TxId |
+|---|---|---|---|---|
+| Seed | → 1 | UTxO anchor tại script addr | ✅ confirmed, datum `seq=1` | `5309c8d88d4f9b90d488b4300f74cba9c680d74f6846c992ae978bbe53e829e7#0` |
+| **Happy** | 1 → 2 | submit OK (INV-E7 pass) | ✅ confirmed, datum `seq=2`; UTxO `seq=1` **đã tiêu** | `c57f55ec9df32e5c770f5480b475a4f51b602615bccecbed6ed6dbb4fc96a754#0` |
+| **Reject** | 1 → 0 | **node reject** (rollback) | ✅ **node từ chối** — không lên chain | `9446a86bda5a09f099fe3deed284d200034c11267470bc7521f1be731effe078` |
+
+**Bằng chứng reject (rollback 1→0):** node trả `ValidationTagMismatch (IsValid True) (FailedUnexpectedly (PlutusFailure "The PlutusV3 script failed… CekError… 'error'"))` cho `ScriptHash 1c7c7ca8…`. TxInfo xác nhận input datum `seq=1` → output datum `seq=0`, redeemer `<0>` → validator `error` tại `anchor.seq_advances` (0 ≠ 1+1). Tx `isValid=True` (mô phỏng kẻ tấn công cố neo lùi) → node từ chối ở phase-2, UTxO `seq=1` **không bị tiêu**.
+
+**Ex-units happy path (đo bằng `calculate-plutus-script-cost online`):** memory `164,782` / steps `60,272,198` (nhẹ, cách xa trần). Driver tái lập lưu tại `~/vedata-node/strata-test3/` + `~/vedata-node/test3-spend-recreate.sh` (ngoài repo — như `anchor-cip68.sh`).
+
+*(Nhánh replay `seq 1→1` và skip `seq 1→3` cùng đi qua guard `seq_advances` như rollback — đã phủ ở `aiken check`; on-chain chứng minh 1 đại diện `1→0` là đủ cho DoD test #3.)*
+
+## 5. Còn lại (để đạt DoD đầy đủ)
+
+- ~~Deploy validator lên Preview + spend-recreate THẬT~~ → ✅ **XONG 2026-07-06** (§4.1: happy `1→2` OK / reject `1→0` node từ chối, tx hash Preview thật).
+- **Tx-builder Mosaic "proper" (TS Lucid/CSL)** trong VeData/Code thay PoC cardano-cli; `MosaicBackend` (Rust) gọi sang.
+- **Aladin chốt** backend mặc định Settlement vs Mosaic (KHÔNG chặn phần đã làm).
 
 ---
 
-## 5. Phụ lục — script PoC phía Mosaic (`~/vedata-node/anchor-cip68.sh`)
+## 6. Phụ lục — script PoC phía Mosaic (`~/vedata-node/`)
 
 > Lưu vết (giống `boot-m6live.sh`). File thật ở `~/vedata-node/` (ngoài repo — tham chiếu path local + `credentials/`), **không** đưa vào code tree. PoC dùng cardano-cli thay Lucid; bản proper là tx-builder TS trong VeData/Code.
+>
+> - `anchor-cip68.sh` — neo CIP-68 tại ví + resolve (test #2, §3).
+> - `test3-spend-recreate.sh` — deploy strata_anchor + test #3 spend-recreate on-chain (§4.1): seed seq=1 → happy 1→2 (OK) → reject 1→0 (node từ chối). Artifact tạm ở `~/vedata-node/strata-test3/` (`script.addr`, `strata_anchor.plutus`, datum/redeemer JSON, `*.raw/*.signed`, `reject-submit.log`).
 
 ```bash
 #!/usr/bin/env bash
