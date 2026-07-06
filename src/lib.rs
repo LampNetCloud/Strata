@@ -20,11 +20,13 @@
 //! - [`chain`]  — INV-E1/E2/E3/E4/E7 (hash-link, seq đơn điệu, append-only, sig+policy, anchor).
 //! - [`field_policy`] — INV-E4 field-level (quyền ghi MỨC TRƯỜNG + bằng chứng quyền dưới policy_hash).
 //! - [`audit`]  — INV-E3 (audit-log append-only bất biến).
+//! - [`batch`]  — S3: checkpoint sub-MMR (gộp lô epoch → neo 1 lần) + inclusion 2 tầng; kế thừa INV-E3/E7.
 //! - [`privacy`]— INV-E9 mức code (padding/decoy chống suy luận loại qua kích thước).
 //!
 //! Gộp lô S3 (sub-MMR epoch + checkpoint) + AnchorSink S1: xem PR #7 / #6 (Thịnh) — hợp nhất 2026-07-07.
 
 pub mod audit;
+pub mod batch;
 pub mod chain;
 pub mod derived_index;
 pub mod field_policy;
@@ -34,6 +36,10 @@ pub mod state;
 pub mod version;
 
 pub use audit::{AuditAction, AuditEntry, AuditLog};
+pub use batch::{
+    BatchPolicy, Checkpoint, CloseReason, TwoTierProof, entry_bytes, entry_leaf, proof_hash_bytes,
+    verify_two_tier,
+};
 pub use chain::{Policy, StrataAnchor, StrataChain, StrataError};
 pub use derived_index::{
     ColumnarIndex, CompositeFieldProof, DerivedIndex, InMemoryVersionLog, LogError, Query, Seq,
