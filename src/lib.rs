@@ -20,9 +20,11 @@
 //! - [`chain`]  — INV-E1/E2/E3/E4/E7 (hash-link, seq đơn điệu, append-only, sig+policy, anchor).
 //! - [`field_policy`] — INV-E4 field-level (quyền ghi MỨC TRƯỜNG + bằng chứng quyền dưới policy_hash).
 //! - [`audit`]  — INV-E3 (audit-log append-only bất biến).
+//! - [`batch`]  — gộp lô tần suất cao (§8): sub-MMR epoch + checkpoint, proof hai tầng.
 //! - [`privacy`]— INV-E9 mức code (padding/decoy chống suy luận loại qua kích thước).
 
 pub mod audit;
+pub mod batch;
 pub mod chain;
 pub mod field_policy;
 pub mod privacy;
@@ -31,6 +33,10 @@ pub mod state;
 pub mod version;
 
 pub use audit::{AuditAction, AuditEntry, AuditLog};
+pub use batch::{
+    BatchEntry, BatchError, BatchPolicy, ClosedEpoch, EpochAccumulator, entry_leaf_data,
+    parse_entries, verify_entry, verify_entry_two_tier,
+};
 pub use chain::{Policy, StrataAnchor, StrataChain, StrataError};
 pub use field_policy::{FieldAuthProof, FieldPolicy};
 pub use refid::gen_ref_id;

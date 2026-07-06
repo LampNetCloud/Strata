@@ -683,7 +683,7 @@ Proof một entry: sub-MMR inclusion (entry ∈ epoch checkpoint) + MMR inclusio
 pub struct BatchPolicy {
     pub epoch_secs:      u64,    // checkpoint mỗi epoch (mặc định 3600)
     pub max_entries:     u32,    // ép checkpoint sớm nếu vượt (chống sub-MMR phình RAM)
-    pub flush_on_idle:   u64,    // checkpoint nếu im lặng N giây (đóng epoch sớm khi ngừng đo)
+    pub flush_max_age:   u64,    // checkpoint khi TUỔI entry cũ nhất ≥ N giây (đổi từ flush_on_idle — xem Strata-API §5.3)
 }
 ```
 

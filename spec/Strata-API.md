@@ -343,7 +343,7 @@ Trục 2 (tần-suất/giá-trị) quyết tầng, độc lập loại MECE (Fea
 | Tầng | Trạng thái lưu | Điều kiện VÀO tầng | Điều kiện LÊN tầng trên |
 |---|---|---|---|
 | **(a) Nóng cục bộ** | `StrataChain`/`AuditLog` trong RAM + WAL local của node tạo | mọi version/event mới, giá trị thấp/tạm | đủ `BatchPolicy.epoch_secs` HOẶC `max_entries` (§5.3) → (b) |
-| **(b) Checkpoint gộp lô** | sub-MMR epoch → **một** version checkpoint (`content_cid`=batch CID, `state_root`=sub-MMR root) | cuối epoch / vượt `max_entries` / `flush_on_idle` | cần bền (không mất) → (c); cần finality → (d) |
+| **(b) Checkpoint gộp lô** | sub-MMR epoch → **một** version checkpoint (`content_cid`=batch CID, `state_root`=sub-MMR root) | cuối epoch / vượt `max_entries` / `flush_max_age` | cần bền (không mất) → (c); cần finality → (d) |
 | **(c) Phân tán chọn lọc** | blob version + checkpoint qua Mirage (peer_assignment + repair) | priority ≥ `batch_daily` (Stamp anchor_priority) hoặc dữ liệu cần bền | cần chống rollback on-chain → (d) |
 | **(d) Anchor on-chain** | `StrataAnchor` 104B qua AnchorSink §4 | priority `immediate`/`milestone`, hoặc giá trị cao | — |
 
@@ -352,12 +352,16 @@ Nguyên tắc cứng (Feat §7, Stamp-Strata-Mapping §4): **chỉ (c)/(d) theo 
 ### §5.3 Checkpoint — khi nào đóng epoch (khớp `BatchPolicy`, Tech §7.3)
 
 ```rust
-pub struct BatchPolicy { pub epoch_secs: u64, pub max_entries: u32, pub flush_on_idle: u64 }
-// default: epoch_secs=3600 (khớp EPOCH_DURATION_SECS Reward), max_entries chống RAM phình,
-//          flush_on_idle đóng epoch sớm khi ngừng đo.
+// batch.rs — ✅ có code (module batch, S3).
+pub struct BatchPolicy { pub epoch_secs: u64, pub max_entries: u32, pub flush_max_age: u64 }
+// default: epoch_secs=3600 (khớp EPOCH_DURATION_SECS Reward), max_entries=10_000 chống RAM
+//          phình, flush_max_age=300 — không entry nào chờ quá hạn.
+// profile:  BatchPolicy::proofchat() = { epoch_secs: 600, max_entries: 4096, flush_max_age: 180 }.
 ```
 
-Đóng checkpoint khi BẤT KỲ: (1) `now - epoch_start >= epoch_secs`; (2) `entries >= max_entries`; (3) im lặng `>= flush_on_idle`. Đóng = dựng `mmr_root(sub.leaves)` (CHỐT-3 commit n) → một `append_version`. **[SPEC-TODO]**: `BatchPolicy` + vòng gộp epoch chưa có trong code `lampnet-strata` (mới có `Mmr` nền hỗ trợ append); cần daemon implement gộp.
+Đóng checkpoint khi BẤT KỲ: (1) `now - epoch_start >= epoch_secs`; (2) `entries >= max_entries`; (3) **tuổi entry CŨ NHẤT** trong epoch `>= flush_max_age`. Van (3) KHÔNG phải "im lặng" (đổi từ `flush_on_idle` cũ): chuỗi tin nhịp chậm rả rích vẫn gom được vào MỘT checkpoint, nhưng không entry nào chờ quá `flush_max_age`. Đóng = dựng `mmr_root(sub.leaves)` (CHỐT-3 commit n) → một `append_version`.
+
+Code thật (`batch.rs`): `EpochAccumulator::new(policy)` → `push(entry_seq, ts, payload, now)` (entry_seq toàn-chain tăng nghiêm ngặt — replay bị từ chối; epoch đầy → `EpochFull`, entry thuộc epoch SAU) → `should_close(now)` → `close()` trả `ClosedEpoch { sub_mmr_root, sub_size, entries, entries_serialized }`. Core THUẦN: `now` do caller truyền (không SystemTime), blob lô + `content_cid` do caller đẩy Mirage. Vòng lặp gọi định kỳ vẫn là việc daemon.
 
 ### §5.4 Index derived — rebuild thế nào, truy vấn lịch sử
 
@@ -407,7 +411,7 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
 **Cần daemon implement (📝 [SPEC-TODO] — spec đủ, code khung chưa có):**
 - Lớp HTTP §3 (route `/v1/strata/*` trong `lampnet-node.rs`) — wire core vào axum + key-registry phân giải `Did → pk`.
 - `AnchorSink` adapter §4 — chưa có code; interface đã spec, chờ chốt backend (Settlement vs Mosaic) — **quyết định liên-nền-tảng, cần anh**.
-- `BatchPolicy` + vòng gộp epoch §5.3 — core có `Mmr` nền, chưa có lớp checkpoint.
+- Vòng gộp epoch §5.3 — lớp checkpoint (`BatchPolicy`/`EpochAccumulator`/verify hai tầng) ĐÃ có trong core (`batch.rs`); daemon còn phần vòng lặp định kỳ (`now`) + đẩy blob lô qua Mirage.
 - `DerivedIndex` + columnar engine §5.4 — khung daemon, untrusted.
 
 **Vẫn cần quyết định (không phải việc code thuần):**
@@ -583,7 +587,7 @@ for e in epoch_entries { sub.append(&entry_bytes(e)); }   // KHÔNG tự băm �
 let checkpoint_state_root = sub.root();                    // commit n (CHỐT-3) sẵn trong Mmr::root
 ```
 
-> **GAP domain-tag:** `_CONTRACT.md` liệt kê tag `LN/STRATA/entry/v1` cho "batch entry (sub-MMR gộp lô)", NHƯNG `Mmr::append` dùng `TAG_LEAF` = `LN/STRATA/mmr/leaf/v1` (cứng trong merkle-anchor). Hai khả năng: (1) sub-MMR entry băm PHỦ ĐẦU bằng `H_dom("LN/STRATA/entry/v1", entry_bytes)` RỒI mới `sub.append(hashed)` (tách miền entry khỏi version-leaf); (2) dùng thẳng `TAG_LEAF` và bỏ `entry/v1`. **Chốt (đề xuất):** phương án (1) — `sub.append(&h_dom("LN/STRATA/entry/v1", &entry_bytes(e)))` để miền entry tách khỏi miền version-hash (một entry KHÔNG được nhầm là một version-hash). Điều này BẢO TOÀN `entry/v1` trong bảng CHỐT-2. **Cần anh xác nhận** phương án (1) trước khi code (ảnh hưởng byte-layout on đã-neo).
+> **Domain-tag — ĐÃ CHỐT phương án (1), có code:** sub-MMR entry băm PHỦ ĐẦU bằng `H_dom("LN/STRATA/entry/v1", entry_bytes)` RỒI mới `sub.append(hashed)` — miền entry tách khỏi miền version-hash (một entry KHÔNG được nhầm là một version-hash), BẢO TOÀN `entry/v1` trong bảng CHỐT-2. Code: `batch.rs::BatchEntry::leaf_data()`.
 
 **(b) Checkpoint = một `append_version` bình thường:**
 ```
@@ -591,7 +595,7 @@ content_cid = gen_content_cid(batch_entries_serialized)   // batch đẩy qua Mi
 state_root  = checkpoint_state_root (sub-MMR root ở trên)
 → chain.append_version(v_checkpoint, &policy)              // v_checkpoint như mọi version khác
 ```
-Không có API mới ở core; `BatchPolicy` + vòng gộp là **lớp daemon** (§5.3 [SPEC-TODO]).
+Không có API MỚI ở lớp chain; checkpoint đi qua `append_version` bình thường. Lớp gộp (`BatchPolicy` + `EpochAccumulator` + verify hai tầng) ĐÃ có trong core thuần (`batch.rs`, §5.3); vòng lặp gọi định kỳ + đẩy blob Mirage vẫn là **lớp daemon**.
 
 **(c) Inclusion hai tầng (verify một entry thuộc checkpoint đã neo):**
 ```
@@ -603,17 +607,18 @@ ghép:      checkpoint version v.state_root == checkpoint_state_root (đọc can
 ```
 Entry i được chứng minh "∈ checkpoint ∈ lịch sử đã neo" bằng hai `O(log)` proof. **Chốt lưu:** daemon PHẢI giữ sub-MMR leaves của mỗi epoch (hoặc batch blob qua Mirage) để sinh `sub_proof` sau này — nếu vứt leaves sau checkpoint thì mất khả năng prove entry lẻ (chỉ còn prove cả checkpoint). Đây là quyết định lưu-trữ tầng (c)/(d) theo giá trị.
 
-**Tham số `BatchPolicy` (chốt default để test tất định):**
+**Tham số `BatchPolicy` (ĐÃ CHỐT — default để test tất định):**
 - `epoch_secs = 3600` (khớp `EPOCH_DURATION_SECS` Reward).
-- `max_entries` — chốt số cụ thể để test "checkpoint sớm khi vượt". **Đề xuất `max_entries = 10_000`** (~2,7 entry/giây trong 1 giờ; sub-MMR 10k leaf ≈ 320KB hash trong RAM, chấp nhận được). **Cần anh chốt** nếu ProofChat có tần suất khác.
-- `flush_on_idle` — **đề xuất 300** giây (5 phút im lặng → đóng epoch sớm).
+- `max_entries = 10_000` (~2,7 entry/giây trong 1 giờ; sub-MMR 10k leaf ≈ 320KB hash trong RAM, chấp nhận được).
+- `flush_max_age = 300` giây — đóng khi entry CŨ NHẤT trong epoch đã chờ 300s (thay ngữ nghĩa "im lặng" cũ, xem §5.3).
+- ProofChat dùng profile riêng `BatchPolicy::proofchat()` = `{600, 4096, 180}`.
 
 **Tiêu chí test S3:**
 1. `checkpoint_1000_versions`: gộp 1000 entry → 1 checkpoint → 1 anchor; assert số anchor = 1 (không phải 1000).
 2. `prove_entry_in_checkpoint`: prove entry bất kỳ i ∈ [0,1000) thuộc checkpoint; assert `sub_proof` size ~`log2(1000)×32B ≈ 320B` (khớp "640B/1tr version" spec ở quy mô lớn hơn — báo cáo số thật).
 3. `two_tier_inclusion`: ghép sub-proof + version-proof → verify về `mmr_root` đã neo. PASS.
 4. `close_on_max_entries`: bơm `max_entries+1` entry → assert checkpoint đóng tại `max_entries` (không chờ hết `epoch_secs`).
-5. `close_on_idle`: dừng bơm `flush_on_idle` giây → assert checkpoint đóng.
+5. `close_on_flush_max_age`: entry đầu già `flush_max_age` giây → assert checkpoint đóng, DÙ entry mới vẫn rả rích (chứng minh ngữ nghĩa oldest-age ≠ idle).
 6. `entry_bytes_canonical`: hai entry khác payload cùng độ dài → leaf khác (length-prefix + entry/v1 tag tách miền).
 7. (nếu làm CRDT §7.4) `crdt_deterministic_state_root`: cùng tập op, thứ tự nhận khác → cùng `checkpoint_state_root`.
 
