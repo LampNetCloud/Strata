@@ -352,7 +352,7 @@ Nguyên tắc cứng (Feat §7, Stamp-Strata-Mapping §4): **chỉ (c)/(d) theo 
 ### §5.3 Checkpoint — khi nào đóng epoch (khớp `BatchPolicy`, Tech §7.3)
 
 ```rust
-// batch.rs — ✅ có code (module batch, S3).
+// batch — spec CHỐT; code hợp nhất tại PR #7 (Thịnh).
 pub struct BatchPolicy { pub epoch_secs: u64, pub max_entries: u32, pub flush_max_age: u64 }
 // default: epoch_secs=3600 (khớp EPOCH_DURATION_SECS Reward), max_entries=10_000 chống RAM
 //          phình, flush_max_age=300 — không entry nào chờ quá hạn.
@@ -361,7 +361,7 @@ pub struct BatchPolicy { pub epoch_secs: u64, pub max_entries: u32, pub flush_ma
 
 Đóng checkpoint khi BẤT KỲ: (1) `now - epoch_start >= epoch_secs`; (2) `entries >= max_entries`; (3) **tuổi entry CŨ NHẤT** trong epoch `>= flush_max_age`. Van (3) KHÔNG phải "im lặng" (đổi từ `flush_on_idle` cũ): chuỗi tin nhịp chậm rả rích vẫn gom được vào MỘT checkpoint, nhưng không entry nào chờ quá `flush_max_age`. Đóng = dựng `mmr_root(sub.leaves)` (CHỐT-3 commit n) → một `append_version`.
 
-Code thật (`batch.rs`): `EpochAccumulator::new(policy)` → `push(entry_seq, ts, payload, now)` (entry_seq toàn-chain tăng nghiêm ngặt — replay bị từ chối; epoch đầy → `EpochFull`, entry thuộc epoch SAU) → `should_close(now)` → `close()` trả `ClosedEpoch { sub_mmr_root, sub_size, entries, entries_serialized }`. Core THUẦN: `now` do caller truyền (không SystemTime), blob lô + `content_cid` do caller đẩy Mirage. Vòng lặp gọi định kỳ vẫn là việc daemon.
+Hợp đồng API (code hợp nhất tại PR #7): `EpochAccumulator::new(policy)` → `push(entry_seq, ts, payload, now)` (entry_seq toàn-chain tăng nghiêm ngặt — replay bị từ chối; epoch đầy → `EpochFull`, entry thuộc epoch SAU) → `should_close(now)` → `close()` trả `ClosedEpoch { sub_mmr_root, sub_size, entries, entries_serialized }`. Core THUẦN: `now` do caller truyền (không SystemTime), blob lô + `content_cid` do caller đẩy Mirage. Vòng lặp gọi định kỳ vẫn là việc daemon.
 
 ### §5.4 Index derived — rebuild thế nào, truy vấn lịch sử
 
@@ -410,8 +410,8 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
 
 **Cần daemon implement (📝 [SPEC-TODO] — spec đủ, code khung chưa có):**
 - Lớp HTTP §3 (route `/v1/strata/*` trong `lampnet-node.rs`) — wire core vào axum + key-registry phân giải `Did → pk`.
-- `AnchorSink` adapter §4 — chưa có code; interface đã spec, chờ chốt backend (Settlement vs Mosaic) — **quyết định liên-nền-tảng, cần anh**.
-- Vòng gộp epoch §5.3 — lớp checkpoint (`BatchPolicy`/`EpochAccumulator`/verify hai tầng) ĐÃ có trong core (`batch.rs`); daemon còn phần vòng lặp định kỳ (`now`) + đẩy blob lô qua Mirage.
+- `AnchorSink` adapter §4 — interface đã spec; backend mặc định ĐÃ CHỐT = **Settlement** (label 1234, payload CBOR raw + discriminator `t`), Mosaic CIP-68 cho hồ sơ giá trị cao. Code hợp nhất tại PR #6; đường submit production giao VeData vận hành (Strata gửi lô anchor qua intake, xem ranh giới OriLife 06/07). Đã nghiệm thu on-chain Preview: xem `reports/ACCEPTANCE-2026-07-05.md`.
+- Vòng gộp epoch §5.3 — lớp checkpoint (`BatchPolicy`/`EpochAccumulator`/verify hai tầng): spec chốt, code hợp nhất tại PR #7; daemon còn phần vòng lặp định kỳ (`now`) + đẩy blob lô qua Mirage.
 - `DerivedIndex` + columnar engine §5.4 — khung daemon, untrusted.
 
 **Vẫn cần quyết định (không phải việc code thuần):**
@@ -587,7 +587,7 @@ for e in epoch_entries { sub.append(&entry_bytes(e)); }   // KHÔNG tự băm �
 let checkpoint_state_root = sub.root();                    // commit n (CHỐT-3) sẵn trong Mmr::root
 ```
 
-> **Domain-tag — ĐÃ CHỐT phương án (1), có code:** sub-MMR entry băm PHỦ ĐẦU bằng `H_dom("LN/STRATA/entry/v1", entry_bytes)` RỒI mới `sub.append(hashed)` — miền entry tách khỏi miền version-hash (một entry KHÔNG được nhầm là một version-hash), BẢO TOÀN `entry/v1` trong bảng CHỐT-2. Code: `batch.rs::BatchEntry::leaf_data()`.
+> **Domain-tag — ĐÃ CHỐT phương án (1):** sub-MMR entry băm PHỦ ĐẦU bằng `H_dom("LN/STRATA/entry/v1", entry_bytes)` RỒI mới `sub.append(hashed)` — miền entry tách khỏi miền version-hash (một entry KHÔNG được nhầm là một version-hash), BẢO TOÀN `entry/v1` trong bảng CHỐT-2. (Code hợp nhất tại PR #7.)
 
 **(b) Checkpoint = một `append_version` bình thường:**
 ```
@@ -595,7 +595,7 @@ content_cid = gen_content_cid(batch_entries_serialized)   // batch đẩy qua Mi
 state_root  = checkpoint_state_root (sub-MMR root ở trên)
 → chain.append_version(v_checkpoint, &policy)              // v_checkpoint như mọi version khác
 ```
-Không có API MỚI ở lớp chain; checkpoint đi qua `append_version` bình thường. Lớp gộp (`BatchPolicy` + `EpochAccumulator` + verify hai tầng) ĐÃ có trong core thuần (`batch.rs`, §5.3); vòng lặp gọi định kỳ + đẩy blob Mirage vẫn là **lớp daemon**.
+Không có API MỚI ở lớp chain; checkpoint đi qua `append_version` bình thường. Lớp gộp (`BatchPolicy` + `EpochAccumulator` + verify hai tầng) thuộc core thuần (§5.3, code hợp nhất tại PR #7); vòng lặp gọi định kỳ + đẩy blob Mirage vẫn là **lớp daemon**.
 
 **(c) Inclusion hai tầng (verify một entry thuộc checkpoint đã neo):**
 ```
