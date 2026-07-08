@@ -236,8 +236,10 @@ pub struct InMemoryVersionLog {
     mmr: MmrHolder,
 }
 
-/// Wrapper giữ MMR (Blake3Hasher là unit struct không derive Debug/Default — tái dựng
-/// từ version_hashes để log vẫn có Debug/Default/Clone).
+/// Wrapper giữ MMR (Blake3Hasher là unit struct không derive Debug/Default — tự cấp
+/// Debug/Default để log dùng được). KHÔNG impl Clone: MMR không cho truy cập lá nội bộ
+/// nên không tự tái dựng được; việc clone log do `InMemoryVersionLog::clone` tái dựng MMR
+/// từ `versions`.
 struct MmrHolder(Mmr<Blake3Hasher>);
 
 impl Default for MmrHolder {
@@ -249,12 +251,6 @@ impl Default for MmrHolder {
 impl std::fmt::Debug for MmrHolder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MmrHolder").field("root", &self.0.root()).finish()
-    }
-}
-impl Clone for MmrHolder {
-    fn clone(&self) -> Self {
-        // Không có access nội bộ lá — caller (InMemoryVersionLog::clone) tái dựng.
-        MmrHolder(Mmr::<Blake3Hasher>::new())
     }
 }
 
@@ -302,6 +298,10 @@ impl InMemoryVersionLog {
     }
 
     /// Bằng chứng hai tầng cho trường `key` tại `seq`. `None` nếu seq/key vắng.
+    ///
+    /// TODO(tích hợp S1): dùng `mmr_size`/`root` HIỆN TẠI. Khi verify dưới `mmr_root` ĐÃ NEO
+    /// cũ (size cũ từ bảng anchored §8.1c) cần biến thể `prove_composite_at(seq, key, mmr_size)`
+    /// tái dựng inclusion tại size chỉ định. Bổ sung khi hợp nhất với AnchorSink (PR #6).
     pub fn prove_composite(&self, seq: Seq, key: &[u8]) -> Option<CompositeFieldProof> {
         let idx = seq as usize;
         let version = self.versions.get(idx)?.clone();

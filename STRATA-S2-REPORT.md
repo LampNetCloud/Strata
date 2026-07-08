@@ -88,3 +88,14 @@ Chạy lại: `cargo test --release s2_benchmark -- --ignored --nocapture`.
 ## 6. Toàn cảnh test repo
 
 `cargo test`: **71 pass / 0 fail / 0 warning** (59 unit gồm 6 S2 + 12 integration; 1 benchmark `#[ignore]`). `cargo clippy --all-targets`: 0 warning.
+
+---
+
+## 7. Vá theo review anh Đức (PR #5 — 2026-07-08)
+
+Anh Đức kéo nhánh chạy thật (59 unit + 12 integration pass, clippy sạch, benchmark tái lập được), kết luận **ĐẠT**, chỉ nêu 1 việc sửa nhỏ + 1 ghi nhận tích hợp sau. Đã xử lý cả hai:
+
+- **[x] `MmrHolder::clone` trả MMR RỖNG (bẫy ngầm):** đây là dead code — `InMemoryVersionLog::clone` tự tái dựng MMR từ `versions`, không hề gọi `MmrHolder::clone`. `InMemoryVersionLog` cũng chỉ `derive(Debug, Default)` (không derive Clone) nên không struct nào cần `MmrHolder: Clone`. **Xoá hẳn `impl Clone for MmrHolder`** (phương án anh nghiêng) + cập nhật doc comment nêu rõ lý do không impl Clone. Không còn đường tạo ra MMR rỗng lặng lẽ.
+- **[x] Ghi nhận tích hợp S1 (`prove_composite` dùng size hiện tại):** thêm 1 dòng `TODO(tích hợp S1)` trong doc `prove_composite` — khi verify dưới `mmr_root` ĐÃ NEO cũ sẽ cần biến thể `prove_composite_at(seq, key, mmr_size)`. Sẽ hiện thực khi hợp nhất với AnchorSink (PR #6).
+
+Sau vá: **71 pass / 0 fail**, clippy 0 warning — giữ nguyên. Diff gọn (1 file, 8/8 dòng). Sẵn sàng merge.
