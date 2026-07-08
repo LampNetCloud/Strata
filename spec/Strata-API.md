@@ -353,13 +353,21 @@ Nguyên tắc cứng (Feat §7, Stamp-Strata-Mapping §4): **chỉ (c)/(d) theo 
 
 ```rust
 // batch — spec CHỐT; code hợp nhất tại PR #7 (Thịnh).
-pub struct BatchPolicy { pub epoch_secs: u64, pub max_entries: u32, pub flush_max_age: u64 }
+pub struct BatchPolicy { pub epoch_secs: u64, pub max_entries: u32, pub flush_max_age: u64, pub max_epoch_bytes: u32 }
 // default: epoch_secs=3600 (khớp EPOCH_DURATION_SECS Reward), max_entries=10_000 chống RAM
-//          phình, flush_max_age=300 — không entry nào chờ quá hạn.
-// profile:  BatchPolicy::proofchat() = { epoch_secs: 600, max_entries: 4096, flush_max_age: 180 }.
+//          phình, flush_max_age=300 — không entry nào chờ quá hạn, max_epoch_bytes=64 MiB.
+// profile:  BatchPolicy::proofchat() = { epoch_secs: 600, max_entries: 4096, flush_max_age: 180, max_epoch_bytes: 16 MiB }.
 ```
 
 Đóng checkpoint khi BẤT KỲ: (1) `now - epoch_start >= epoch_secs`; (2) `entries >= max_entries`; (3) **tuổi entry CŨ NHẤT** trong epoch `>= flush_max_age`. Van (3) KHÔNG phải "im lặng" (đổi từ `flush_on_idle` cũ): chuỗi tin nhịp chậm rả rích vẫn gom được vào MỘT checkpoint, nhưng không entry nào chờ quá `flush_max_age`. Đóng = dựng `mmr_root(sub.leaves)` (CHỐT-3 commit n) → một `append_version`.
+
+> **Addendum S3.1 (gia cố, chốt 08/07 — 4 điểm hai bản implement đầu cùng thiếu):**
+> 1. **Blob lô có header**: `serialize_batch = u8(format_version=1) ‖ u32_be(count) ‖ entries…`; parse strict — version lạ / count sai / cụt / thừa byte → `MalformedBatch`. Version byte để nâng format sau không phá parse cũ.
+> 2. **`entry_seq` LIÊN TỤC bắt buộc** (per-chain, `prev + 1`): watermark không chỉ "tăng nghiêm ngặt" mà từ chối cả gap — mất entry phải LỘ ra ở điểm ghi, không im lặng. (Gap chủ ý không tồn tại: `entry_seq` do daemon cấp.)
+> 3. **Van (c) dùng arrival-time do daemon gán** (`ts` = lúc daemon NHẬN entry), KHÔNG dùng ts client khai — ts giả quá khứ sẽ ép đóng epoch liên tục (checkpoint-per-message DoS). ts nguồn nếu cần thì nằm trong payload, không tham gia quyết định van.
+> 4. **Trần RAM theo byte**: thêm `max_epoch_bytes: u32` (van b′ — đóng sớm khi tổng payload vượt; default 64 MiB, profile proofchat 16 MiB) — `max_entries` một mình không chặn được 10k × 1 MiB = 10 GiB.
+>
+> Lưu ý bảng CHỐT-2: `LN/STRATA/entry/v1` = leaf batch-entry gộp lô (S3, đang dùng); `LN/STRATA/checkpoint/entry/v1` = tag DỰ TRỮ đã chốt ở issue #1 (04/07) cho loại checkpoint-entry tương lai, KHÔNG dùng cho sub-MMR S3 — tránh nhầm hai tag.
 
 Hợp đồng API (code hợp nhất tại PR #7): `EpochAccumulator::new(policy)` → `push(entry_seq, ts, payload, now)` (entry_seq toàn-chain tăng nghiêm ngặt — replay bị từ chối; epoch đầy → `EpochFull`, entry thuộc epoch SAU) → `should_close(now)` → `close()` trả `ClosedEpoch { sub_mmr_root, sub_size, entries, entries_serialized }`. Core THUẦN: `now` do caller truyền (không SystemTime), blob lô + `content_cid` do caller đẩy Mirage. Vòng lặp gọi định kỳ vẫn là việc daemon.
 
