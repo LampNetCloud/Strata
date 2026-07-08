@@ -101,7 +101,28 @@ Enforce INV-E7 on-chain đã hiện thực ở **VeData/Code** (đúng ranh gi�
 
 - ~~Deploy validator lên Preview + spend-recreate THẬT~~ → ✅ **XONG 2026-07-06** (§4.1: happy `1→2` OK / reject `1→0` node từ chối, tx hash Preview thật).
 - **Tx-builder Mosaic "proper" (TS Lucid/CSL)** trong VeData/Code thay PoC cardano-cli; `MosaicBackend` (Rust) gọi sang.
-- **Aladin chốt** backend mặc định Settlement vs Mosaic (KHÔNG chặn phần đã làm).
+- **Backend mặc định = Settlement** (anh Đức chốt tại PR #8: label 1234, CBOR raw `{t:1, a:[4]}`; Mosaic CIP-68 cho hồ sơ giá trị cao). **Codec Settlement (review #5) — CHƯA graft, follow-up** (tham chiếu rev `72f7135` thư mục `anchor-sink/`): đưa CODEC vào cùng lớp thuần (chunk 64B bijective + decode lenient), phần I/O Blockfrost/submitter tách crate riêng.
+
+---
+
+## 7. Vá theo review anh Đức (PR #6 — 2026-07-08)
+
+Anh Đức chạy thật (71 pass, clippy sạch) + tự kiểm on-chain qua Koios (`44bb3b91…` datum CIP-68 khớp từng byte; `c57f55ec…` spend-recreate thật qua validator Plutus V3 — INV-E7 enforce on-chain). Nêu 6 việc (1+2 chặn merge). Đã xử lý **1, 2, 3, 4, 6**; **5 để follow-up** (xem §5).
+
+| # | Việc | Cách vá |
+|---|---|---|
+| 1 ⛔ | **Trust-model `resolve`** (validator guard SPEND không guard CREATE → ai cũng gửi UTxO datum giả seq-cao, đầu độc `read_anchor` kiểu "mới nhất tại address") | **Thread-token NFT one-shot (phương án a — Thịnh chốt).** Thêm `AssetClass` + `ResolvedAnchor{datum, thread_token}`; `read_anchor → Vec<ResolvedAnchor>` (trả MỌI UTxO ứng viên kèm asset — hợp đồng bảo mật ghi trong doc trait); `MosaicAnchorSink::with_thread_token(backend, token)` **pin NFT one-shot** (derive từ seed-UTxO genesis), `resolve` **chỉ tin UTxO mang đúng NFT** (kẻ giả không mint lại được → bị loại). `new()` = chế độ KHÔNG xác thực, chỉ test/round-trip (doc cảnh báo). |
+| 2 ⛔ | **`resolve` datum rác trả `Err(Rejected)`** → DoS 1-tx ~0,17 tADA | Datum không parse → **BỎ QUA, quét tiếp** (`Ok(None)`), không `Err`. Trong các UTxO đã xác thực lấy `seq` cao nhất. `Err` strict chỉ ở round-trip datum tự tạo. |
+| 3 | `publish_with_retry` | Loop retry **chỉ `Network`** (`is_retryable`), backoff MŨ `base << attempt`, `max_attempts`; `sleep` injectable (giữ lớp thuần/test được — không `thread::sleep`). Lỗi cứng trả ngay. |
+| 4 | `AnchoredTable` | Key **`(ref_id, seq)`** (đa-chain); **từ chối ghi đè** `(ref_id,seq)` giá trị khác (`ConflictingOverwrite`, idempotent nếu y hệt); **save/load** canonical bytes (112B/dòng) + parse strict. **Bỏ lưu proof** — `verify_resolved` tái dựng qua `chain.prove_version_at(seq, mmr_size)` ở size lịch sử = `seq+1` → **bỏ ràng buộc timing "record TRƯỚC append"** (test chứng minh record MUỘN vẫn đúng). |
+| 5 | Codec Settlement | **Follow-up** — xem §5 (graft rev `72f7135`). |
+| 6 | Note PoC artifact | Ghi rõ ở dưới: tx happy `1→2` giữ nguyên `mmr_root`/`hvh`. |
+
+**Note (review #6):** tx spend-recreate happy `1→2` ở §4.1 giữ NGUYÊN `mmr_root`/`head_version_hash` (chỉ tăng `seq`) là **PoC artifact** — chỉ để test validator enforce `seq'=seq+1` on-chain. Anchor THẬT của một version mới mang `mmr_root` MỚI (root sau khi append version đó); đừng hiểu nhầm root bất biến qua các version.
+
+**Chốt spec (PR #8):** backend mặc định là **Settlement**, không phải Mosaic CIP-68 — codec Settlement là việc chính còn lại của S1 (§5). Phần CIP-68 giữ làm lớp cho hồ sơ giá trị cao.
+
+**Kết quả sau vá:** `cargo test` **76 pass / 0 fail** (53 lib + 11 anchor_sink + 12 integration; +5 test review: thread-token chống đầu độc, datum rác skip, retry backoff, table đa-chain+persist, verify tái dựng record-muộn), clippy **0 warning**, fmt clean. Thêm `chain::prove_version_at` (tái dựng MMR ở size cũ).
 
 ---
 

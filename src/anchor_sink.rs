@@ -14,7 +14,6 @@
 
 use crate::chain::{StrataAnchor, StrataChain};
 use crate::version::Hash32;
-use lampnet_merkle_anchor::mmr::InclusionProof;
 
 // ────────────────────────────────────────────────────────────────────────────
 // §4.1 — trait + kiểu (daemon-side, ngoài core thuần)
@@ -450,6 +449,26 @@ impl Cursor<'_> {
 // §8.1b — MosaicAnchorSink (seam Mosaic = MosaicBackend) + idempotency/rollback
 // ────────────────────────────────────────────────────────────────────────────
 
+/// AssetClass Cardano = `(policy_id 28B, asset_name)`. Dùng cho **thread-token NFT
+/// one-shot** xác thực lineage anchor (§8.1b trust-model).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetClass {
+    /// Policy-id (script-hash minting) — 28B.
+    pub policy_id: [u8; 28],
+    /// Tên asset (thường rỗng cho one-shot NFT, hoặc prefix CIP-68).
+    pub asset_name: Vec<u8>,
+}
+
+/// Một UTxO ứng viên ở địa chỉ script-anchor: datum + các asset nó GIỮ (để sink lọc
+/// theo thread-token). Backend trả nguyên trạng; sink tự xác thực (không tin backend chọn hộ).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAnchor {
+    /// Inline-datum CIP-68 của UTxO.
+    pub datum: PlutusData,
+    /// Thread-token UTxO này mang (None nếu không mang NFT nào khớp lineage).
+    pub thread_token: Option<AssetClass>,
+}
+
 /// Seam ra Mosaic (VeData). Ranh giới issue #1: **Mosaic dựng+submit tx**, Strata chỉ
 /// map datum + gọi. Real impl gọi Mosaic SDK/Lucid (Phase 2); test dùng mock.
 pub trait MosaicBackend {
@@ -457,21 +476,74 @@ pub trait MosaicBackend {
     fn on_chain_seq(&self, ref_id: &Hash32) -> Result<Option<u64>, AnchorError>;
     /// Mosaic dựng reference-UTxO CIP-68 spend-recreate từ datum + submit. Trả receipt.
     fn submit_anchor(&self, datum: &PlutusData) -> Result<AnchorReceipt, AnchorError>;
-    /// Đọc datum anchor mới nhất on-chain cho `ref_id`.
-    fn read_anchor(&self, ref_id: &Hash32) -> Result<Option<PlutusData>, AnchorError>;
+    /// **HỢP ĐỒNG BẢO MẬT (§8.1b, trust-model thread-token — anh Đức chốt phương án a):**
+    /// validator chỉ guard SPEND, KHÔNG guard CREATE → ai cũng gửi được UTxO datum giả
+    /// (cùng `ref_id`, seq cao hơn) vào địa chỉ script. Vì vậy backend **KHÔNG được** trả
+    /// "UTxO mới nhất tại address" (đầu độc được). Backend PHẢI trả **mọi UTxO ứng viên** ở
+    /// địa chỉ anchor cho `ref_id` **kèm asset chúng giữ** (`ResolvedAnchor`), để [`MosaicAnchorSink`]
+    /// tự lọc theo **thread-token NFT one-shot** (mint 1 lần từ seed-UTxO genesis; kẻ giả
+    /// KHÔNG mint lại được). UTxO không mang đúng NFT → bị sink loại. `Vec` rỗng = chưa neo.
+    fn read_anchor(&self, ref_id: &Hash32) -> Result<Vec<ResolvedAnchor>, AnchorError>;
 }
 
-/// `AnchorSink` backend Mosaic (CIP-68). Bọc một [`MosaicBackend`] I/O.
+/// `AnchorSink` backend Mosaic (CIP-68). Bọc một [`MosaicBackend`] I/O + **pin thread-token
+/// one-shot** để xác thực lineage khi `resolve` (phương án a).
 pub struct MosaicAnchorSink<B: MosaicBackend> {
     backend: B,
+    /// Thread-token NFT one-shot của lineage này (derive từ seed-UTxO genesis, pin ở config).
+    /// `None` = **CHẾ ĐỘ KHÔNG XÁC THỰC** — chỉ dùng test/round-trip datum tự tạo; production
+    /// PHẢI `with_thread_token` (nếu không, `resolve` đầu độc được — xem doc `read_anchor`).
+    expected_token: Option<AssetClass>,
 }
 
 impl<B: MosaicBackend> MosaicAnchorSink<B> {
+    /// Sink KHÔNG xác thực thread-token — **chỉ test/round-trip**. Production dùng
+    /// [`with_thread_token`](Self::with_thread_token).
     pub fn new(backend: B) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            expected_token: None,
+        }
+    }
+    /// Sink production: pin thread-token NFT one-shot của lineage (seed-UTxO genesis).
+    /// `resolve` chỉ tin UTxO mang đúng NFT này (phương án a — chuẩn CIP-68 đầy đủ).
+    pub fn with_thread_token(backend: B, token: AssetClass) -> Self {
+        Self {
+            backend,
+            expected_token: Some(token),
+        }
     }
     pub fn backend(&self) -> &B {
         &self.backend
+    }
+    /// Thread-token đang pin (None = chế độ không xác thực).
+    pub fn expected_token(&self) -> Option<&AssetClass> {
+        self.expected_token.as_ref()
+    }
+
+    /// Neo có **retry chỉ khi `Network`** (§8.1b — phân tầng retry): backoff MŨ
+    /// `base_backoff_ms << attempt`, tối đa `max_attempts` lần gọi. Lỗi không-retryable
+    /// (Rejected/Rollback/DatumTooLarge/…) trả NGAY. `sleep` do caller cấp (giữ core thuần,
+    /// test injectable — không `thread::sleep` trong lớp này). `max_attempts=0` coi như 1.
+    pub fn publish_with_retry(
+        &self,
+        anchor: &StrataAnchor,
+        priority: AnchorPriority,
+        max_attempts: u32,
+        base_backoff_ms: u64,
+        mut sleep: impl FnMut(u64),
+    ) -> Result<Option<AnchorReceipt>, AnchorError> {
+        let cap = max_attempts.max(1);
+        let mut attempt: u32 = 0;
+        loop {
+            match self.publish(anchor, priority) {
+                Err(e) if e.is_retryable() && attempt + 1 < cap => {
+                    sleep(base_backoff_ms.saturating_mul(1u64 << attempt.min(63)));
+                    attempt += 1;
+                }
+                other => return other,
+            }
+        }
     }
 }
 
@@ -499,13 +571,36 @@ impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
         self.backend.submit_anchor(&datum).map(Some)
     }
 
+    /// Đọc anchor đích thực on-chain cho `ref_id`. Chống đầu độc (phương án a):
+    /// 1. **Thread-token auth**: nếu sink pin token → chỉ nhận UTxO mang đúng NFT one-shot
+    ///    (kẻ giả gửi UTxO datum seq-cao KHÔNG mint được NFT → bị loại).
+    /// 2. **Datum rác → BỎ QUA, quét tiếp** (không `Err` — chống DoS: kẻ lạ không ép được
+    ///    `resolve` báo lỗi bằng 1 tx ~0,17 tADA). `Err` strict chỉ ở round-trip datum tự tạo.
+    ///
+    /// Trong các UTxO hợp lệ (đã xác thực) lấy `seq` cao nhất = đỉnh lineage. `Ok(None)` = chưa neo.
     fn resolve(&self, ref_id: &Hash32) -> Result<Option<StrataAnchor>, AnchorError> {
-        match self.backend.read_anchor(ref_id)? {
-            None => Ok(None),
-            Some(datum) => parse_datum_to_anchor(&datum)
-                .map(Some)
-                .map_err(|e| AnchorError::Rejected(format!("datum không hợp lệ: {e:?}"))),
+        let mut best: Option<StrataAnchor> = None;
+        for cand in self.backend.read_anchor(ref_id)? {
+            // (1) xác thực thread-token (nếu pin).
+            if let Some(expected) = &self.expected_token {
+                match &cand.thread_token {
+                    Some(tok) if tok == expected => {}
+                    _ => continue, // không mang NFT one-shot → forged, bỏ qua
+                }
+            }
+            // (2) datum rác → bỏ qua, quét tiếp (KHÔNG Err).
+            let Ok(anchor) = parse_datum_to_anchor(&cand.datum) else {
+                continue;
+            };
+            // ref_id trong datum phải khớp (chống trộn lineage khác vào).
+            if &anchor.ref_id != ref_id {
+                continue;
+            }
+            if best.as_ref().is_none_or(|b| anchor.seq > b.seq) {
+                best = Some(anchor);
+            }
         }
+        Ok(best)
     }
 }
 
@@ -513,20 +608,31 @@ impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
 // §8.1c — bảng daemon `(seq, mmr_root, mmr_size)` + verify ngược
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Một dòng neo — đủ để verify version dưới root CŨ. Lưu `proof` + `mmr_size` TẠI lúc
-/// neo, vì proof của MMR phụ thuộc size: proof sinh ở size mới KHÔNG verify dưới root cũ.
-#[derive(Debug, Clone)]
+/// Một dòng neo — metadata đủ để verify version dưới root CŨ. **KHÔNG lưu proof** (review
+/// #4): proof tái dựng từ chain local ở `mmr_size` khi cần (`prove_version_at`) → bỏ ràng
+/// buộc timing "record TRƯỚC append", và dòng thuần fixed-size nên save/load gọn.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnchorRecord {
+    pub ref_id: Hash32,
     pub seq: u64,
     pub mmr_root: Hash32,
     pub mmr_size: u64,
     pub version_hash: Hash32,
-    pub proof: InclusionProof,
 }
 
-/// State daemon: mỗi lần `publish_anchor()` lưu một [`AnchorRecord`] để verify dưới root
-/// CŨ (core chỉ giữ size/proof hiện tại). Nhỏ: 1 dòng/lần neo. KHÔNG thêm vào core thuần.
-#[derive(Debug, Clone, Default)]
+/// Lỗi ghi bảng neo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableError {
+    /// Ghi đè `(ref_id, seq)` bằng GIÁ TRỊ KHÁC (mmr_root/mmr_size/version_hash lệch) —
+    /// chống ghi nhầm/đè lịch sử. Ghi lại y hệt = no-op OK (idempotent).
+    ConflictingOverwrite { seq: u64 },
+    /// `seq` của anchor không có trong chain (anchor không hợp lệ).
+    SeqNotInChain { seq: u64 },
+}
+
+/// State daemon: mỗi lần `publish_anchor()` ghi một [`AnchorRecord`]. Key **`(ref_id, seq)`**
+/// (review #4 — đa-chain: một daemon phục vụ nhiều `ref_id`). KHÔNG thêm vào core thuần.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnchoredTable {
     rows: Vec<AnchorRecord>,
 }
@@ -535,37 +641,104 @@ impl AnchoredTable {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Ghi một lần neo — lấy `(proof, size, version_hash)` từ `chain` TẠI thời điểm neo
-    /// (§8.1c). Gọi NGAY sau `publish_anchor()`, TRƯỚC khi append thêm version. Trả
-    /// `false` nếu seq của anchor không có trong chain (không xảy ra với anchor hợp lệ).
-    pub fn record_anchor(&mut self, chain: &StrataChain, anchor: &StrataAnchor) -> bool {
-        match chain.prove_version(anchor.seq) {
-            Some((proof, mmr_size, version_hash)) => {
-                self.rows.push(AnchorRecord {
-                    seq: anchor.seq,
-                    mmr_root: anchor.mmr_root,
-                    mmr_size,
-                    version_hash,
-                    proof,
-                });
-                true
+    /// Ghi một lần neo — lấy `(mmr_size, version_hash)` từ `chain` (proof KHÔNG lưu, tái
+    /// dựng khi verify). Idempotent: ghi lại `(ref_id, seq)` y hệt = OK; đè bằng giá trị
+    /// KHÁC → `ConflictingOverwrite`. Không còn ràng buộc "gọi TRƯỚC append" vì chỉ lưu
+    /// `mmr_size` (số) + verify tái dựng ở size đó.
+    pub fn record_anchor(
+        &mut self,
+        chain: &StrataChain,
+        anchor: &StrataAnchor,
+    ) -> Result<(), TableError> {
+        // Size lịch sử = leaf-count khi `seq` là head = **seq+1** (`StrataAnchor` là cam kết
+        // head: `mmr_root` = root của leaves `0..=seq`). KHÔNG dùng `prove_version` — nó trả
+        // size HIỆN TẠI, sai khi record MUỘN (sau append). Đây là lý do bỏ được ràng buộc
+        // "record TRƯỚC append": chỉ cần seq, size suy ra tất định.
+        let mmr_size = anchor.seq + 1;
+        let version_hash = chain
+            .version(anchor.seq)
+            .map(|v| v.version_hash())
+            .ok_or(TableError::SeqNotInChain { seq: anchor.seq })?;
+        let row = AnchorRecord {
+            ref_id: anchor.ref_id,
+            seq: anchor.seq,
+            mmr_root: anchor.mmr_root,
+            mmr_size,
+            version_hash,
+        };
+        if let Some(existing) = self.get(&anchor.ref_id, anchor.seq) {
+            if existing == &row {
+                return Ok(()); // idempotent — ghi lại y hệt.
             }
-            None => false,
+            return Err(TableError::ConflictingOverwrite { seq: anchor.seq });
         }
+        self.rows.push(row);
+        Ok(())
     }
-    /// Dòng neo tại `seq` (None nếu seq đó chưa từng neo).
-    pub fn get(&self, seq: u64) -> Option<&AnchorRecord> {
-        self.rows.iter().find(|r| r.seq == seq)
+    /// Dòng neo tại `(ref_id, seq)` (None nếu chưa từng neo).
+    pub fn get(&self, ref_id: &Hash32, seq: u64) -> Option<&AnchorRecord> {
+        self.rows
+            .iter()
+            .find(|r| r.seq == seq && &r.ref_id == ref_id)
     }
-    /// Lần neo mới nhất.
-    pub fn latest(&self) -> Option<&AnchorRecord> {
-        self.rows.last()
+    /// Lần neo mới nhất của `ref_id` (seq cao nhất).
+    pub fn latest(&self, ref_id: &Hash32) -> Option<&AnchorRecord> {
+        self.rows
+            .iter()
+            .filter(|r| &r.ref_id == ref_id)
+            .max_by_key(|r| r.seq)
     }
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
     pub fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    /// Serialize canonical (daemon persist): `u32_be(count) ‖ [ref_id 32 ‖ u64_be(seq) ‖
+    /// mmr_root 32 ‖ u64_be(mmr_size) ‖ version_hash 32]*`. Fixed-size mỗi dòng (112B).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + self.rows.len() * 112);
+        out.extend_from_slice(&(self.rows.len() as u32).to_be_bytes());
+        for r in &self.rows {
+            out.extend_from_slice(&r.ref_id);
+            out.extend_from_slice(&r.seq.to_be_bytes());
+            out.extend_from_slice(&r.mmr_root);
+            out.extend_from_slice(&r.mmr_size.to_be_bytes());
+            out.extend_from_slice(&r.version_hash);
+        }
+        out
+    }
+    /// Parse strict (nghịch của [`to_bytes`]): count sai / byte cụt / thừa đuôi → `None`.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 4 {
+            return None;
+        }
+        let count = u32::from_be_bytes(bytes[0..4].try_into().ok()?) as usize;
+        let mut pos = 4;
+        let mut rows = Vec::with_capacity(count);
+        for _ in 0..count {
+            if pos + 112 > bytes.len() {
+                return None; // dòng cụt
+            }
+            let ref_id: Hash32 = bytes[pos..pos + 32].try_into().ok()?;
+            let seq = u64::from_be_bytes(bytes[pos + 32..pos + 40].try_into().ok()?);
+            let mmr_root: Hash32 = bytes[pos + 40..pos + 72].try_into().ok()?;
+            let mmr_size = u64::from_be_bytes(bytes[pos + 72..pos + 80].try_into().ok()?);
+            let version_hash: Hash32 = bytes[pos + 80..pos + 112].try_into().ok()?;
+            rows.push(AnchorRecord {
+                ref_id,
+                seq,
+                mmr_root,
+                mmr_size,
+                version_hash,
+            });
+            pos += 112;
+        }
+        if pos != bytes.len() {
+            return None; // thừa byte đuôi
+        }
+        Some(Self { rows })
     }
 }
 
@@ -612,11 +785,17 @@ pub fn verify_resolved(
     if local_vh != on_chain.head_version_hash {
         return Err(VerifyError::HeadMismatch);
     }
-    // Verify dưới root+size+proof ĐÃ NEO (không phải size hiện tại).
+    // Verify dưới root ĐÃ NEO ở `mmr_size` cũ — proof TÁI DỰNG từ chain local (không lưu).
     let rec = table
-        .get(on_chain.seq)
+        .get(&on_chain.ref_id, on_chain.seq)
         .ok_or(VerifyError::NotAnchored(on_chain.seq))?;
     if rec.version_hash != on_chain.head_version_hash {
+        return Err(VerifyError::HeadMismatch);
+    }
+    let (proof, vh) = chain
+        .prove_version_at(on_chain.seq, rec.mmr_size)
+        .ok_or(VerifyError::SeqMissing(on_chain.seq))?;
+    if vh != on_chain.head_version_hash {
         return Err(VerifyError::HeadMismatch);
     }
     if !StrataChain::verify_version(
@@ -624,7 +803,7 @@ pub fn verify_resolved(
         &on_chain.head_version_hash,
         on_chain.seq,
         rec.mmr_size,
-        &rec.proof,
+        &proof,
     ) {
         return Err(VerifyError::ProofFail);
     }

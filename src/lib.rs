@@ -38,8 +38,9 @@ pub mod version;
 
 pub use anchor_sink::{
     AnchorBackend, AnchorError, AnchorPriority, AnchorReceipt, AnchorRecord, AnchorSink,
-    AnchoredTable, CborError, DatumError, MosaicAnchorSink, MosaicBackend, PlutusData, VerifyError,
-    map_anchor_to_datum, parse_datum_to_anchor, verify_resolved,
+    AnchoredTable, AssetClass, CborError, DatumError, MosaicAnchorSink, MosaicBackend, PlutusData,
+    ResolvedAnchor, TableError, VerifyError, map_anchor_to_datum, parse_datum_to_anchor,
+    verify_resolved,
 };
 pub use audit::{AuditAction, AuditEntry, AuditLog};
 pub use batch::{

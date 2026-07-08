@@ -442,6 +442,25 @@ impl StrataChain {
         ))
     }
 
+    /// Inclusion-proof cho version tại `seq` dưới MMR **ở size LỊCH SỬ** `mmr_size` (tái
+    /// dựng từ `mmr_size` leaf đầu). Cho verify ngược dưới `mmr_root` ĐÃ NEO cũ (§8.1c) mà
+    /// KHÔNG cần lưu proof-tại-lúc-neo — bỏ ràng buộc timing "record TRƯỚC append".
+    /// `None` nếu `seq >= mmr_size` hoặc `mmr_size > len()`. Trả `(proof, version_hash)`.
+    pub fn prove_version_at(&self, seq: u64, mmr_size: u64) -> Option<(InclusionProof, Hash32)> {
+        if seq >= mmr_size || mmr_size as usize > self.versions.len() {
+            return None;
+        }
+        // Tái dựng MMR ở size cũ từ các leaf (version_hash) đầu — tất định.
+        let mut m = Mmr::<Blake3Hasher>::new();
+        for v in &self.versions[..mmr_size as usize] {
+            m.append(&v.version_hash());
+        }
+        Some((
+            m.prove(seq as usize),
+            self.versions[seq as usize].version_hash(),
+        ))
+    }
+
     /// Verify một version-proof dưới một `root` cho trước (merkle-anchor verify).
     pub fn verify_version(
         root: Hash32,

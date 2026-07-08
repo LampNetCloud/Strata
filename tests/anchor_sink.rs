@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use ed25519_dalek::SigningKey;
 use lampnet_strata::anchor_sink::{
     AnchorBackend, AnchorError, AnchorPriority, AnchorReceipt, AnchorSink, AnchoredTable,
-    MosaicAnchorSink, MosaicBackend, PlutusData, map_anchor_to_datum, parse_datum_to_anchor,
-    verify_resolved,
+    AssetClass, MosaicAnchorSink, MosaicBackend, PlutusData, ResolvedAnchor, TableError,
+    map_anchor_to_datum, parse_datum_to_anchor, verify_resolved,
 };
 use lampnet_strata::chain::{Policy, StrataAnchor, StrataChain};
 use lampnet_strata::refid::gen_ref_id_raw;
@@ -56,11 +56,22 @@ fn chain_of(n: u64) -> (StrataChain, Policy, Author) {
     (chain, pol, a)
 }
 
+/// Thread-token NFT one-shot mẫu (test).
+fn tok(tag: u8) -> AssetClass {
+    AssetClass {
+        policy_id: [tag; 28],
+        asset_name: b"LN-STRATA-THREAD".to_vec(),
+    }
+}
+
 // ── mock backend Mosaic (in-memory on-chain state) ───────────────────────────
 struct MockMosaic {
-    state: RefCell<HashMap<[u8; 32], PlutusData>>, // ref_id → datum mới nhất
+    state: RefCell<HashMap<[u8; 32], PlutusData>>, // ref_id → datum authentic mới nhất
     tx_count: RefCell<usize>,
     fail_submit: Option<AnchorError>, // nếu set → submit trả lỗi này
+    fail_read: Option<AnchorError>,   // nếu set → read_anchor trả lỗi này
+    token: Option<AssetClass>,        // thread-token UTxO authentic mang (None = không mang)
+    forged: RefCell<Vec<ResolvedAnchor>>, // UTxO giả kẻ lạ gửi vào script address
 }
 impl MockMosaic {
     fn new() -> Self {
@@ -68,6 +79,9 @@ impl MockMosaic {
             state: RefCell::new(HashMap::new()),
             tx_count: RefCell::new(0),
             fail_submit: None,
+            fail_read: None,
+            token: None,
+            forged: RefCell::new(Vec::new()),
         }
     }
     fn failing(e: AnchorError) -> Self {
@@ -75,6 +89,20 @@ impl MockMosaic {
             fail_submit: Some(e),
             ..Self::new()
         }
+    }
+    /// Mock có thread-token authentic (production-mode).
+    fn with_token(token: AssetClass) -> Self {
+        Self {
+            token: Some(token),
+            ..Self::new()
+        }
+    }
+    /// Kẻ lạ gửi một UTxO giả (datum + token tuỳ ý) vào địa chỉ script.
+    fn inject_forged(&self, datum: PlutusData, thread_token: Option<AssetClass>) {
+        self.forged.borrow_mut().push(ResolvedAnchor {
+            datum,
+            thread_token,
+        });
     }
     fn tx_count(&self) -> usize {
         *self.tx_count.borrow()
@@ -101,8 +129,20 @@ impl MosaicBackend for MockMosaic {
             slot: Some(1000),
         })
     }
-    fn read_anchor(&self, ref_id: &[u8; 32]) -> Result<Option<PlutusData>, AnchorError> {
-        Ok(self.state.borrow().get(ref_id).cloned())
+    /// Trả MỌI UTxO ứng viên (authentic + forged) — sink tự lọc theo thread-token.
+    fn read_anchor(&self, ref_id: &[u8; 32]) -> Result<Vec<ResolvedAnchor>, AnchorError> {
+        if let Some(e) = &self.fail_read {
+            return Err(e.clone());
+        }
+        let mut out = Vec::new();
+        if let Some(datum) = self.state.borrow().get(ref_id).cloned() {
+            out.push(ResolvedAnchor {
+                datum,
+                thread_token: self.token.clone(),
+            });
+        }
+        out.extend(self.forged.borrow().iter().cloned());
+        Ok(out)
     }
 }
 
@@ -226,7 +266,7 @@ fn s1_criteria_5_resolve_after_append_verifies_old_root() {
     let anchor1 = chain.publish_anchor().unwrap();
     assert_eq!(anchor1.seq, 1);
     sink.publish(&anchor1, AnchorPriority::Immediate).unwrap();
-    assert!(table.record_anchor(&chain, &anchor1));
+    table.record_anchor(&chain, &anchor1).unwrap();
 
     // Append tới seq=5 (CHƯA neo) → MMR đổi.
     for seq in 2..=5 {
@@ -243,7 +283,7 @@ fn s1_criteria_5_resolve_after_append_verifies_old_root() {
     verify_resolved(&chain, &resolved, &table).expect("verify dưới root đã neo phải PASS");
 
     // seq=5 chưa neo → không có dòng trong bảng.
-    assert!(table.get(5).is_none());
+    assert!(table.get(&anchor1.ref_id, 5).is_none());
     assert_eq!(table.len(), 1);
 }
 
@@ -287,4 +327,155 @@ fn s1_criteria_6_backend_errors_propagate() {
             .unwrap_err()
             .is_retryable()
     );
+}
+
+// ── review #1: trust-model resolve — thread-token NFT one-shot chống đầu độc ───
+#[test]
+fn resolve_thread_token_rejects_poisoning() {
+    let t = tok(0xAA);
+    // Sink production: pin thread-token one-shot của lineage.
+    let sink = MosaicAnchorSink::with_thread_token(MockMosaic::with_token(t.clone()), t.clone());
+    let authentic = sample_anchor(1); // ref_id [7;32]
+    sink.publish(&authentic, AnchorPriority::Immediate)
+        .unwrap()
+        .unwrap();
+
+    // Kẻ lạ gửi UTxO datum GIẢ seq cao hơn (99) vào script address nhưng KHÔNG mint được
+    // NFT one-shot → thread_token None (hoặc token sai).
+    let forged_hi = map_anchor_to_datum(&sample_anchor(99));
+    sink.backend().inject_forged(forged_hi.clone(), None);
+    sink.backend().inject_forged(forged_hi, Some(tok(0xBB))); // token sai
+
+    // resolve PHẢI trả seq=1 (authentic), KHÔNG bị đầu độc bởi seq=99.
+    let got = sink.resolve(&authentic.ref_id).unwrap().unwrap();
+    assert_eq!(got.seq, 1, "chỉ tin UTxO mang đúng thread-token one-shot");
+}
+
+// ── review #2: datum rác → BỎ QUA quét tiếp (không Err → chống DoS) ───────────
+#[test]
+fn resolve_skips_garbage_datum_no_error() {
+    // Chế độ không pin token (round-trip) — cô lập hành vi bỏ-qua-rác.
+    let sink = MosaicAnchorSink::new(MockMosaic::new());
+    let authentic = sample_anchor(3);
+    sink.publish(&authentic, AnchorPriority::Immediate)
+        .unwrap()
+        .unwrap();
+
+    // Kẻ lạ chèn datum RÁC (shape sai) — resolve phải BỎ QUA, không Err(Rejected).
+    let garbage = PlutusData::Int(12345);
+    sink.backend().inject_forged(garbage.clone(), None);
+    let got = sink.resolve(&authentic.ref_id).unwrap();
+    assert_eq!(got.unwrap().seq, 3, "bỏ qua datum rác, lấy anchor hợp lệ");
+
+    // Chỉ có datum rác (không authentic) → Ok(None), KHÔNG Err (chống DoS 1-tx).
+    let sink2 = MosaicAnchorSink::new(MockMosaic::new());
+    sink2.backend().inject_forged(garbage, None);
+    assert_eq!(sink2.resolve(&[7u8; 32]).unwrap(), None);
+}
+
+// ── review #3: publish_with_retry — chỉ Network, backoff mũ, max_attempts ─────
+#[test]
+fn publish_with_retry_only_network_exp_backoff() {
+    let a1 = sample_anchor(1);
+
+    // Network liên tục → retry đủ max_attempts=3 rồi trả Err; backoff mũ 10,20.
+    let sink = MosaicAnchorSink::new(MockMosaic::failing(AnchorError::Network("t".into())));
+    let mut sleeps = Vec::new();
+    let err = sink
+        .publish_with_retry(&a1, AnchorPriority::Immediate, 3, 10, |ms| sleeps.push(ms))
+        .unwrap_err();
+    assert!(err.is_retryable());
+    assert_eq!(sleeps, vec![10, 20], "3 lần gọi = 2 lần chờ, backoff mũ");
+
+    // Lỗi KHÔNG retryable → trả ngay, 0 lần chờ.
+    let sink_rej = MosaicAnchorSink::new(MockMosaic::failing(AnchorError::DatumTooLarge {
+        bytes: 99,
+    }));
+    let mut s2 = Vec::new();
+    assert!(
+        sink_rej
+            .publish_with_retry(&a1, AnchorPriority::Immediate, 5, 10, |ms| s2.push(ms))
+            .is_err()
+    );
+    assert!(s2.is_empty(), "lỗi cứng không retry");
+
+    // Thành công ngay → không chờ.
+    let sink_ok = MosaicAnchorSink::new(MockMosaic::new());
+    let mut s3 = Vec::new();
+    assert!(
+        sink_ok
+            .publish_with_retry(&a1, AnchorPriority::Immediate, 5, 10, |ms| s3.push(ms))
+            .unwrap()
+            .is_some()
+    );
+    assert!(s3.is_empty());
+}
+
+// ── review #4: AnchoredTable — key (ref_id,seq), reject overwrite, save/load ──
+#[test]
+fn anchored_table_multichain_key_and_persist() {
+    let (chain, _pol, _a) = chain_of(2); // seq 0,1
+    let r1 = chain.anchor().ref_id;
+    let r2 = [0x55u8; 32]; // ref_id thứ hai (đa-chain)
+    let mut table = AnchoredTable::new();
+
+    // Ghi (r1,1) và (r2,1) — cùng seq, khác ref_id → hai dòng riêng.
+    let a_r1 = chain.anchor(); // ref_id=r1, seq=1
+    let a_r2 = StrataAnchor {
+        ref_id: r2,
+        ..chain.anchor()
+    };
+    table.record_anchor(&chain, &a_r1).unwrap();
+    table.record_anchor(&chain, &a_r2).unwrap();
+    assert_eq!(table.len(), 2);
+    assert!(table.get(&r1, 1).is_some());
+    assert!(table.get(&r2, 1).is_some());
+
+    // Idempotent: ghi lại y hệt = OK, không nhân dòng.
+    table.record_anchor(&chain, &a_r1).unwrap();
+    assert_eq!(table.len(), 2);
+
+    // Ghi đè (r1,1) bằng mmr_root KHÁC → ConflictingOverwrite.
+    let conflicting = StrataAnchor {
+        mmr_root: [0xEEu8; 32],
+        ..a_r1.clone()
+    };
+    assert_eq!(
+        table.record_anchor(&chain, &conflicting),
+        Err(TableError::ConflictingOverwrite { seq: 1 })
+    );
+    assert_eq!(table.len(), 2, "conflict không ghi");
+
+    // save/load round-trip byte-chính-xác.
+    let bytes = table.to_bytes();
+    assert_eq!(AnchoredTable::from_bytes(&bytes).unwrap(), table);
+
+    // parse strict: cụt / thừa byte → None.
+    assert!(AnchoredTable::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+    let mut extra = bytes.clone();
+    extra.push(0);
+    assert!(AnchoredTable::from_bytes(&extra).is_none());
+    assert!(AnchoredTable::from_bytes(&[0, 0]).is_none());
+}
+
+// ── review #4b: verify_resolved tái dựng proof ở size cũ (không lưu proof) ────
+#[test]
+fn verify_resolved_rebuilds_proof_no_stored_proof() {
+    let (mut chain, pol, a) = chain_of(2);
+    let ph = pol.policy_hash();
+    let sink = MosaicAnchorSink::new(MockMosaic::new());
+    let mut table = AnchoredTable::new();
+
+    let anchor1 = chain.publish_anchor().unwrap();
+    sink.publish(&anchor1, AnchorPriority::Immediate).unwrap();
+    // record SAU khi append thêm nhiều version — không còn ràng buộc "record TRƯỚC append".
+    for seq in 2..=6 {
+        let v = signed(seq, chain.head_version_hash(), 100 + seq, &a, ph);
+        chain.append_version(v, &pol).unwrap();
+    }
+    table.record_anchor(&chain, &anchor1).unwrap(); // ghi muộn vẫn đúng
+
+    let resolved = sink.resolve(&anchor1.ref_id).unwrap().unwrap();
+    verify_resolved(&chain, &resolved, &table)
+        .expect("verify tái dựng proof ở size cũ phải PASS dù record muộn");
 }
