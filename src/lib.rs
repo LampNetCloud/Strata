@@ -37,7 +37,8 @@ pub mod version;
 
 pub use audit::{AuditAction, AuditEntry, AuditLog};
 pub use batch::{
-    BatchPolicy, Checkpoint, CloseReason, TwoTierProof, entry_bytes, entry_leaf, proof_hash_bytes,
+    BatchError, BatchPolicy, Checkpoint, CloseReason, ClosedEpoch, EpochAccumulator, TwoTierProof,
+    batch_root, entry_bytes, entry_leaf, parse_batch, proof_hash_bytes, serialize_batch,
     verify_two_tier,
 };
 pub use chain::{Policy, StrataAnchor, StrataChain, StrataError};
