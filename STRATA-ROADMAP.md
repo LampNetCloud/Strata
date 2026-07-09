@@ -18,6 +18,9 @@
 ## 1. Baseline / dependency
 
 - **PR #4** (`chore(deps): repoint lampnet-merkle-anchor → repo tách Anchor + pin rev`) — ✅ **MERGED 2026-07-04.**
+- **PR #8** (`docs(spec): addendum §5.3/§8.3 + chốt Settlement + nghiệm thu T1–T6 Preview`) — ✅ **MERGED 2026-07-09** (nền spec; Addendum S3.1 tại `cfa4970`).
+- **PR #5** (S2 DerivedIndex) — ✅ **MERGED 2026-07-09** (vá review vòng 2: comment test build_log).
+- **Thứ tự merge anh Đức chốt:** #8 → #5 → #7 → #6. Đang xử lý #7 (vòng 2) → #6.
 - `lampnet-merkle-anchor` tách khỏi repo private `lampnet-hivemind` sang repo riêng **`LampNetCloud/Anchor`**; `Cargo.toml` repoint sang Anchor + pin git-rev. Không còn phụ thuộc quyền đọc `lampnet-hivemind`.
 - `cargo build` / `cargo test` chạy được với Anchor git+rev — **65 test pass**, không đổi code Strata.
 
@@ -29,7 +32,7 @@
 |---|---|---|---|---|
 | **S1** | Anchor adapter `Strata.anchor → Mosaic` (CIP-68) | Rust + on-chain | P0 | **Chốt kỹ thuật (issue #1, 07-03):** `AnchorSink` = trait cắm được, mặc định theo platform (VeData→`MosaicAnchorSink`, CIP-68 datum §8.1); không khoá backend toàn cục. OriLife label 1454/1455 KHÔNG hội tụ (thêm sink riêng sau nếu cần). `resolve()` dùng bảng `anchored: Vec<(seq, mmr_root, mmr_size)>` ở **daemon**; `StrataChain` core giữ thuần (chỉ `mmr_size` hiện tại). ⚠️ Còn **2 điểm đối chiếu byte-layout** (§3) trước khi cố định datum. |
 | **S2** | DerivedIndex / columnar query engine | Rust thuần | P1 | ✅ **CODE-COMPLETE 2026-07-04** (`STRATA-S2-REPORT.md`) — module `src/derived_index.rs`: `VersionLog`/`Query`/`DerivedIndex`+`ColumnarIndex`/`brute_force` + **proof 2 tầng** `CompositeFieldProof`+`verify_composite` (ghép `state::prove_field` × `chain::prove_version`, bind qua `version.state_root`) + `InMemoryVersionLog` (state_fields off-chain, ràng buộc `build_state_root==version.state_root`). **7 test** (5 tiêu chí §8.2 + 2 negative), benchmark n∈{1e2..1e5} (build O(n), lookup_latest O(1)). Repo **71 pass / 0 warning / clippy sạch**. Không primitive mới, không write-back (§7.5). Còn: ráp daemon thật + HTTP §3 + Backend sign-off. |
-| **S3** | BatchPolicy / checkpoint sub-MMR (4 tầng lưu) | Rust | P1 | **Chốt kỹ thuật (issue #3, 07-03):** (a) domain-tag entry CÓ, namespace `LN/STRATA/...`, tách tag version-leaf (chống type-confusion) — chuỗi tag chính xác đóng vào `_CONTRACT.md` trước khi neo lần đầu; (b) `max_entries=10_000` / `flush_on_idle=300s` là **config runtime** (không đụng byte-layout), chỉnh sau từ telemetry ProofChat. Dùng lại `Mmr<Blake3Hasher>` sẵn có, phụ thuộc **S1 sink** để neo checkpoint. |
+| **S3** | BatchPolicy / checkpoint sub-MMR (4 tầng lưu) | Rust | P1 | ✅ **CODE-COMPLETE + VÁ 2 VÒNG REVIEW** (`STRATA-S3-REPORT.md`) — `src/batch.rs`: `Checkpoint`(sub-MMR)+`BatchPolicy`/`should_close`+`EpochAccumulator`+blob canonical(`serialize/parse_batch`)+`TwoTierProof`/`verify_two_tier(&StrataVersion)`. **PR #7** (base main, rebase sau #8). Vòng 1 (07-08): 8 mục `flush_max_age`+watermark+`max_entries`@push+payload-guard. Vòng 2 + **Addendum S3.1** (07-09): DoS `parse_batch` cap + `serialize_batch`→Result + header version byte + `entry_seq` LIÊN TỤC(gap) + arrival-ts + `max_epoch_bytes` van b′. **98 pass / clippy sạch / fmt clean.** Đợi merge (sau #7 → #6). |
 
 **Thứ tự phụ thuộc:** S1 (cố định byte-layout) → S3 (phụ thuộc S1 sink + tag) · S2 độc lập (build đã thông).
 
