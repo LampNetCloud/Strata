@@ -1,0 +1,13 @@
+{
+  "fvh": "b3f206e020e8b1e4f308ec234a3f2c6dbc2e7812fa237d2962fb760e69a6d811",
+  "key": "species",
+  "siblings": [
+    [
+      "bcfa59ff03ae8287077177b7eeb69d108feb625105efc1af82035678a7f165f5",
+      false
+    ]
+  ],
+  "state_root": "3e11b7ee118d24b133e73a1339d4e747ad9c1819aab48378e35a994170f4e323",
+  "value": "64757269616e2d6d6f6e74686f6e67",
+  "version_seq": 4
+}

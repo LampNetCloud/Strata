@@ -1,0 +1,2 @@
+T6 version seq=5 content_cid=CID Mirage → 200 (0.4ms) {"mmr_root":"b35b29eb12fdac468f1838b75cf77145ebf79123d21c95119da0ba2bf1b59478","prev_hash":"80df8a029a44e00602ea73d51c32453f8426423c1e8605daeb782950472d45e1","seq":5,"version_hash":"0a9707f8af9770bee0b5ed853bbb7a3abfe3f77f29517a59319c7a06c6fd74df"}
+T6 head trả đúng CID: ln1q_25564a97509a32f4_orilife-test — PASS

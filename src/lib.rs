@@ -21,6 +21,8 @@
 //! - [`field_policy`] — INV-E4 field-level (quyền ghi MỨC TRƯỜNG + bằng chứng quyền dưới policy_hash).
 //! - [`audit`]  — INV-E3 (audit-log append-only bất biến).
 //! - [`privacy`]— INV-E9 mức code (padding/decoy chống suy luận loại qua kích thước).
+//!
+//! Gộp lô S3 (sub-MMR epoch + checkpoint) + AnchorSink S1: xem PR #7 / #6 (Thịnh) — hợp nhất 2026-07-07.
 
 pub mod audit;
 pub mod chain;

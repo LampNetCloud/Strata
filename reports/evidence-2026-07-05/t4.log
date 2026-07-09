@@ -1,0 +1,2 @@
+T4 replay body seq=4 → 422 {"detail":{"expected":5,"got":4},"error":"SeqNotMonotonic"}
+T4 head không đổi (seq=4, hash="80df8a029a44e00602ea73d51c32453f8426423c1e8605daeb782950472d45e1") — PASS

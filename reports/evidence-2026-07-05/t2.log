@@ -1,0 +1,18 @@
+T2 version seq=4 (5 trường) → 200 (0.3ms) {"mmr_root":"e867da2aab781ba0f869f9f63957cc59fafcca01b83b27961ee2da7770cca9fe","prev_hash":"885dccd9c65b2813dcc2dc5d3eddf9a509319fd82e91511fb57f8d6c491c83e8","seq":4,"version_hash":"80df8a029a44e00602ea73d51c32453f8426423c1e8605daeb782950472d45e1"}
+T2 proof/field/species → t2-proof-blob.json
+{
+  "fvh": "b3f206e020e8b1e4f308ec234a3f2c6dbc2e7812fa237d2962fb760e69a6d811",
+  "key": "species",
+  "siblings": [
+    [
+      "bcfa59ff03ae8287077177b7eeb69d108feb625105efc1af82035678a7f165f5",
+      false
+    ]
+  ],
+  "state_root": "3e11b7ee118d24b133e73a1339d4e747ad9c1819aab48378e35a994170f4e323",
+  "value": "64757269616e2d6d6f6e74686f6e67",
+  "version_seq": 4
+}
+T2 verify_field_proof (dựng lại state_root từ leaf): PASS
+T2 state_root khớp bản client tự build: PASS
+T2 value công khai đúng 'durian-monthong': PASS

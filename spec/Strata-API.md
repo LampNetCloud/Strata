@@ -343,7 +343,7 @@ Trục 2 (tần-suất/giá-trị) quyết tầng, độc lập loại MECE (Fea
 | Tầng | Trạng thái lưu | Điều kiện VÀO tầng | Điều kiện LÊN tầng trên |
 |---|---|---|---|
 | **(a) Nóng cục bộ** | `StrataChain`/`AuditLog` trong RAM + WAL local của node tạo | mọi version/event mới, giá trị thấp/tạm | đủ `BatchPolicy.epoch_secs` HOẶC `max_entries` (§5.3) → (b) |
-| **(b) Checkpoint gộp lô** | sub-MMR epoch → **một** version checkpoint (`content_cid`=batch CID, `state_root`=sub-MMR root) | cuối epoch / vượt `max_entries` / `flush_on_idle` | cần bền (không mất) → (c); cần finality → (d) |
+| **(b) Checkpoint gộp lô** | sub-MMR epoch → **một** version checkpoint (`content_cid`=batch CID, `state_root`=sub-MMR root) | cuối epoch / vượt `max_entries` / `flush_max_age` | cần bền (không mất) → (c); cần finality → (d) |
 | **(c) Phân tán chọn lọc** | blob version + checkpoint qua Mirage (peer_assignment + repair) | priority ≥ `batch_daily` (Stamp anchor_priority) hoặc dữ liệu cần bền | cần chống rollback on-chain → (d) |
 | **(d) Anchor on-chain** | `StrataAnchor` 104B qua AnchorSink §4 | priority `immediate`/`milestone`, hoặc giá trị cao | — |
 
@@ -352,12 +352,24 @@ Nguyên tắc cứng (Feat §7, Stamp-Strata-Mapping §4): **chỉ (c)/(d) theo 
 ### §5.3 Checkpoint — khi nào đóng epoch (khớp `BatchPolicy`, Tech §7.3)
 
 ```rust
-pub struct BatchPolicy { pub epoch_secs: u64, pub max_entries: u32, pub flush_on_idle: u64 }
-// default: epoch_secs=3600 (khớp EPOCH_DURATION_SECS Reward), max_entries chống RAM phình,
-//          flush_on_idle đóng epoch sớm khi ngừng đo.
+// batch — spec CHỐT; code hợp nhất tại PR #7 (Thịnh).
+pub struct BatchPolicy { pub epoch_secs: u64, pub max_entries: u32, pub flush_max_age: u64, pub max_epoch_bytes: u32 }
+// default: epoch_secs=3600 (khớp EPOCH_DURATION_SECS Reward), max_entries=10_000 chống RAM
+//          phình, flush_max_age=300 — không entry nào chờ quá hạn, max_epoch_bytes=64 MiB.
+// profile:  BatchPolicy::proofchat() = { epoch_secs: 600, max_entries: 4096, flush_max_age: 180, max_epoch_bytes: 16 MiB }.
 ```
 
-Đóng checkpoint khi BẤT KỲ: (1) `now - epoch_start >= epoch_secs`; (2) `entries >= max_entries`; (3) im lặng `>= flush_on_idle`. Đóng = dựng `mmr_root(sub.leaves)` (CHỐT-3 commit n) → một `append_version`. **[SPEC-TODO]**: `BatchPolicy` + vòng gộp epoch chưa có trong code `lampnet-strata` (mới có `Mmr` nền hỗ trợ append); cần daemon implement gộp.
+Đóng checkpoint khi BẤT KỲ: (1) `now - epoch_start >= epoch_secs`; (2) `entries >= max_entries`; (3) **tuổi entry CŨ NHẤT** trong epoch `>= flush_max_age`. Van (3) KHÔNG phải "im lặng" (đổi từ `flush_on_idle` cũ): chuỗi tin nhịp chậm rả rích vẫn gom được vào MỘT checkpoint, nhưng không entry nào chờ quá `flush_max_age`. Đóng = dựng `mmr_root(sub.leaves)` (CHỐT-3 commit n) → một `append_version`.
+
+> **Addendum S3.1 (gia cố, chốt 08/07 — 4 điểm hai bản implement đầu cùng thiếu):**
+> 1. **Blob lô có header**: `serialize_batch = u8(format_version=1) ‖ u32_be(count) ‖ entries…`; parse strict — version lạ / count sai / cụt / thừa byte → `MalformedBatch`. Version byte để nâng format sau không phá parse cũ.
+> 2. **`entry_seq` LIÊN TỤC bắt buộc** (per-chain, `prev + 1`): watermark không chỉ "tăng nghiêm ngặt" mà từ chối cả gap — mất entry phải LỘ ra ở điểm ghi, không im lặng. (Gap chủ ý không tồn tại: `entry_seq` do daemon cấp.)
+> 3. **Van (c) dùng arrival-time do daemon gán** (`ts` = lúc daemon NHẬN entry), KHÔNG dùng ts client khai — ts giả quá khứ sẽ ép đóng epoch liên tục (checkpoint-per-message DoS). ts nguồn nếu cần thì nằm trong payload, không tham gia quyết định van.
+> 4. **Trần RAM theo byte**: thêm `max_epoch_bytes: u32` (van b′ — đóng sớm khi tổng payload vượt; default 64 MiB, profile proofchat 16 MiB) — `max_entries` một mình không chặn được 10k × 1 MiB = 10 GiB.
+>
+> Lưu ý bảng CHỐT-2: `LN/STRATA/entry/v1` = leaf batch-entry gộp lô (S3, đang dùng); `LN/STRATA/checkpoint/entry/v1` = tag DỰ TRỮ đã chốt ở issue #1 (04/07) cho loại checkpoint-entry tương lai, KHÔNG dùng cho sub-MMR S3 — tránh nhầm hai tag.
+
+Hợp đồng API (code hợp nhất tại PR #7): `EpochAccumulator::new(policy)` → `push(entry_seq, ts, payload, now)` (entry_seq toàn-chain tăng nghiêm ngặt — replay bị từ chối; epoch đầy → `EpochFull`, entry thuộc epoch SAU) → `should_close(now)` → `close()` trả `ClosedEpoch { sub_mmr_root, sub_size, entries, entries_serialized }`. Core THUẦN: `now` do caller truyền (không SystemTime), blob lô + `content_cid` do caller đẩy Mirage. Vòng lặp gọi định kỳ vẫn là việc daemon.
 
 ### §5.4 Index derived — rebuild thế nào, truy vấn lịch sử
 
@@ -406,8 +418,8 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
 
 **Cần daemon implement (📝 [SPEC-TODO] — spec đủ, code khung chưa có):**
 - Lớp HTTP §3 (route `/v1/strata/*` trong `lampnet-node.rs`) — wire core vào axum + key-registry phân giải `Did → pk`.
-- `AnchorSink` adapter §4 — chưa có code; interface đã spec, chờ chốt backend (Settlement vs Mosaic) — **quyết định liên-nền-tảng, cần anh**.
-- `BatchPolicy` + vòng gộp epoch §5.3 — core có `Mmr` nền, chưa có lớp checkpoint.
+- `AnchorSink` adapter §4 — interface đã spec; backend mặc định ĐÃ CHỐT = **Settlement** (label 1234, payload CBOR raw + discriminator `t`), Mosaic CIP-68 cho hồ sơ giá trị cao. Code hợp nhất tại PR #6; đường submit production giao VeData vận hành (Strata gửi lô anchor qua intake, xem ranh giới OriLife 06/07). Đã nghiệm thu on-chain Preview: xem `reports/ACCEPTANCE-2026-07-05.md`.
+- Vòng gộp epoch §5.3 — lớp checkpoint (`BatchPolicy`/`EpochAccumulator`/verify hai tầng): spec chốt, code hợp nhất tại PR #7; daemon còn phần vòng lặp định kỳ (`now`) + đẩy blob lô qua Mirage.
 - `DerivedIndex` + columnar engine §5.4 — khung daemon, untrusted.
 
 **Vẫn cần quyết định (không phải việc code thuần):**
@@ -438,6 +450,9 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
 | `AnchorRollback { current: u64, attempted: u64 }` | E7 | 409 |
 | `FieldPolicyDenied { field_key: Vec<u8> }` | E4 field-level | 403 |
 | `FieldProofPolicyMismatch { field_key: Vec<u8> }` | E4 field-level | 403 |
+| `ReplaySeq { last: u64, got: u64 }` (batch, §8.3) | E2 | 409 |
+| `PayloadTooLarge { len: usize }` (batch, §8.3) | — | 413 |
+| `MalformedBatch` (blob lô hỏng, §8.3) | — | 400 |
 
 - Body lỗi HTTP: `{ "error":"<variant>", "detail":{ <các trường payload hex/số> } }`. VD `HashLinkBroken` → `detail:{ "expected":"<hex32>", "got":"<hex32>" }`; `FieldPolicyDenied` → `detail:{ "field_key":"<hex>" }`.
 - **Case biên bắt buộc xử lý ở daemon (không phải `StrataError` core, nhưng phải trả lỗi rõ, KHÔNG panic):**
@@ -445,7 +460,7 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
   - `seq`/`key` không tồn tại (core trả `None` từ `version`/`prove_version`/`prove_field`/`version_at`) → 404 `{ "error":"NotFound" }`.
   - `version_at(t)` với `t < ts(genesis)` → core trả `None` → 404 (KHÔNG 500).
   - Body sai schema / hex sai độ dài (H32 ≠ 64 hex char, sig ≠ 128 hex char) → 400 `{ "error":"BadRequest", "detail":{...} }` TRƯỚC khi vào core.
-  - `state_fields` có `key` trùng → daemon từ chối 400 (core `prove_field` chỉ trả lần xuất hiện đầu sau sort; trùng key = ngữ nghĩa mơ hồ). **Chốt:** key trong một version PHẢI duy nhất.
+  - `state_fields` có `key` trùng → daemon từ chối 400 (core `prove_field` chỉ trả lần xuất hiện đầu sau sort; trùng key = ngữ nghĩa mơ hồ). **Chốt INV key-duy-nhất:** key trong một version PHẢI duy nhất. ⚠️ **Không được chỉ chặn ở daemon** — `build_state_root` (`state.rs`) hiện nhận dup key thản nhiên, nên caller gọi thẳng Rust API ký được version "field X = v1" VÀ "X = v2" cùng sinh proof hợp lệ (equivocation). Core PHẢI enforce: `build_state_root`/`prove_field` reject dup key bằng biến thể lỗi mới `DuplicateFieldKey { field_key }` (E6). Issue riêng giao Thịnh — tách khỏi S1/S2/S3.
 
 ### §8.1 S1 — `AnchorSink → Mosaic` (CIP-68): byte-layout datum + resolve
 
@@ -505,15 +520,15 @@ on_chain = sink.resolve(ref_id)?          // đọc datum/metadata → dựng l�
 assert on_chain.ref_id == chain.ref_id     // định danh khớp
 assert on_chain.seq   <= chain.head().seq  // on-chain KHÔNG được đi trước local (nếu > → local stale, đồng bộ lại)
 // Chứng minh version tại on_chain.seq thuộc lịch sử local, root khớp cái đã neo:
-let (proof, size, vh) = chain.prove_version(on_chain.seq).ok_or(SeqMissing)?
+let (proof, vh) = chain.prove_version_at(on_chain.seq, on_chain_mmr_size)?  // TÁI DỰNG ở size cũ
 assert vh == on_chain.head_version_hash    // head đã neo == version local tại seq đó
-assert StrataChain::verify_version(on_chain.mmr_root, &vh, on_chain.seq, size_at_that_seq, &proof)
-// LƯU Ý: verify dưới mmr_root ĐÃ NEO (on_chain.mmr_root), với mmr_size TẠI THỜI ĐIỂM neo,
-// KHÔNG phải mmr_size hiện tại — vì INV-E3 bảo đảm proof cũ vẫn đúng dưới root mới, nhưng
-// verify dưới root CŨ cần size CŨ. Daemon phải lưu (seq → mmr_size) tại mỗi lần publish_anchor.
+assert StrataChain::verify_version(on_chain.mmr_root, &vh, on_chain.seq, on_chain_mmr_size, &proof)
+// LƯU Ý: verify dưới mmr_root ĐÃ NEO (on_chain.mmr_root), với mmr_size TẠI THỜI ĐIỂM neo.
+// prove_version_at(seq, mmr_size) TÁI DỰNG MMR từ versions[0..mmr_size] rồi prove — pure, no-I/O,
+// cùng họ prove_version, KHÔNG phình state core. mmr_size lấy từ AnchoredTable (seq → mmr_root, mmr_size).
 ```
 
-> **GAP CẦN CHỐT (anh + GreenSun):** `resolve` cần daemon lưu `(seq → mmr_size)` tại mỗi lần neo để verify dưới root cũ. `StrataChain` core KHÔNG lưu lịch sử size (chỉ size hiện tại `mmr.len()`). **Chốt:** daemon giữ bảng `anchored: Vec<(seq, mmr_root, mmr_size)>` (nhỏ: 1 dòng/lần neo). Đây là state daemon, KHÔNG thêm vào core thuần.
+> **ĐÃ CHỐT (theo code PR #6):** `prove_version_at(seq, mmr_size)` ĐẶT TRONG CORE (`chain.rs`) — hàm thuần cùng họ `prove_version`, tái dựng MMR ở size lịch sử, KHÔNG phình state; bỏ được ràng buộc timing "record proof TRƯỚC append" của phương án lưu-proof cũ. `mmr_size = seq+1` tại checkpoint. Bảng `AnchoredTable: (ref_id, seq) → (mmr_root, mmr_size, head_version_hash)` là chuẩn DUY NHẤT (thay `anchored: Vec<...>` daemon cũ). `resolve` public trả `Option<StrataAnchor>` (đúng §4.1); backend nội bộ `read_anchor → Vec<ResolvedAnchor>` (mọi UTxO ứng viên kèm asset) để lọc anti-poisoning theo thread-token — KHÔNG được trả "UTxO mới nhất tại address".
 
 **Tiêu chí test S1 (mở rộng DoD Handoff-Issues A/S1):**
 1. `map_anchor_to_datum` round-trip: `anchor → datum → parse → anchor'`, assert `anchor == anchor'` (4 trường khớp bit).
@@ -536,6 +551,9 @@ pub trait VersionLog {
     fn mmr_root(&self) -> Hash32;
     /// Field-value tại một version (đọc từ state_fields đã lưu kèm version off-chain).
     fn field_value_at(&self, seq: Seq, key: &[u8]) -> Option<Vec<u8>>;
+    /// Liệt kê field-key tại một version (CẦN cho replay tất định — enumerate cột).
+    /// Thứ tự/dup KHÔNG đảm bảo; replay tự sort+dedup. (Bổ sung theo code PR #5.)
+    fn field_keys_at(&self, seq: Seq) -> Vec<Vec<u8>>;
 }
 pub enum Query {
     FieldEquals { key: Vec<u8>, value: Vec<u8> },  // "field X == v" xuyên version
@@ -579,11 +597,13 @@ Verifier ghép: verify_field_proof(fp) ∧ fp.state_root == v_k.state_root ∧ v
 // entry_bytes = u64_be(entry_seq) ‖ u32_be(len(payload)) ‖ payload
 // (payload = giá trị đo / CRDT-op serialize tất định)
 let mut sub = Mmr::<Blake3Hasher>::new();
-for e in epoch_entries { sub.append(&entry_bytes(e)); }   // KHÔNG tự băm — Mmr::append băm rồi
+// Phủ đầu H_dom("LN/STRATA/entry/v1", ·) TÁCH MIỀN entry khỏi version-hash (phương án (1),
+// xem blockquote dưới) RỒI mới append; Mmr::append còn bọc thêm leaf_hash(TAG_LEAF, ·).
+for e in epoch_entries { sub.append(&h_dom("LN/STRATA/entry/v1", &entry_bytes(e))); }
 let checkpoint_state_root = sub.root();                    // commit n (CHỐT-3) sẵn trong Mmr::root
 ```
 
-> **GAP domain-tag:** `_CONTRACT.md` liệt kê tag `LN/STRATA/entry/v1` cho "batch entry (sub-MMR gộp lô)", NHƯNG `Mmr::append` dùng `TAG_LEAF` = `LN/STRATA/mmr/leaf/v1` (cứng trong merkle-anchor). Hai khả năng: (1) sub-MMR entry băm PHỦ ĐẦU bằng `H_dom("LN/STRATA/entry/v1", entry_bytes)` RỒI mới `sub.append(hashed)` (tách miền entry khỏi version-leaf); (2) dùng thẳng `TAG_LEAF` và bỏ `entry/v1`. **Chốt (đề xuất):** phương án (1) — `sub.append(&h_dom("LN/STRATA/entry/v1", &entry_bytes(e)))` để miền entry tách khỏi miền version-hash (một entry KHÔNG được nhầm là một version-hash). Điều này BẢO TOÀN `entry/v1` trong bảng CHỐT-2. **Cần anh xác nhận** phương án (1) trước khi code (ảnh hưởng byte-layout on đã-neo).
+> **Domain-tag — ĐÃ CHỐT phương án (1):** sub-MMR entry băm PHỦ ĐẦU bằng `H_dom("LN/STRATA/entry/v1", entry_bytes)` RỒI mới `sub.append(hashed)` — miền entry tách khỏi miền version-hash (một entry KHÔNG được nhầm là một version-hash), BẢO TOÀN `entry/v1` trong bảng CHỐT-2. (Code hợp nhất tại PR #7.)
 
 **(b) Checkpoint = một `append_version` bình thường:**
 ```
@@ -591,7 +611,7 @@ content_cid = gen_content_cid(batch_entries_serialized)   // batch đẩy qua Mi
 state_root  = checkpoint_state_root (sub-MMR root ở trên)
 → chain.append_version(v_checkpoint, &policy)              // v_checkpoint như mọi version khác
 ```
-Không có API mới ở core; `BatchPolicy` + vòng gộp là **lớp daemon** (§5.3 [SPEC-TODO]).
+Không có API MỚI ở lớp chain; checkpoint đi qua `append_version` bình thường. Lớp gộp (`BatchPolicy` + `EpochAccumulator` + verify hai tầng) thuộc core thuần (§5.3, code hợp nhất tại PR #7); vòng lặp gọi định kỳ + đẩy blob Mirage vẫn là **lớp daemon**.
 
 **(c) Inclusion hai tầng (verify một entry thuộc checkpoint đã neo):**
 ```
@@ -599,21 +619,35 @@ tầng dưới: sub_proof = sub_mmr.prove(entry_index)
            verify(checkpoint_state_root, entry_leaf_hash, entry_index, sub_size, sub_proof)
 tầng trên: (ver_proof, size, vh) = chain.prove_version(checkpoint_seq)
            verify_version(anchored_mmr_root, vh, checkpoint_seq, size, ver_proof)
-ghép:      checkpoint version v.state_root == checkpoint_state_root (đọc canonical v)
+ghép:      verify_two_tier(&v_checkpoint, ...) — nhận THẲNG &StrataVersion, hàm TỰ tính
+           version_hash(v) và đọc v.state_root; LINK "state_root == checkpoint_state_root"
+           thành HỆ QUẢ CẤU TRÚC, không phải phép so hai input prover-khai rời (chốt theo
+           code PR #7 — chặt hơn pseudo-code so-sánh cũ).
 ```
 Entry i được chứng minh "∈ checkpoint ∈ lịch sử đã neo" bằng hai `O(log)` proof. **Chốt lưu:** daemon PHẢI giữ sub-MMR leaves của mỗi epoch (hoặc batch blob qua Mirage) để sinh `sub_proof` sau này — nếu vứt leaves sau checkpoint thì mất khả năng prove entry lẻ (chỉ còn prove cả checkpoint). Đây là quyết định lưu-trữ tầng (c)/(d) theo giá trị.
 
-**Tham số `BatchPolicy` (chốt default để test tất định):**
+**Tham số `BatchPolicy` (ĐÃ CHỐT — default để test tất định):**
 - `epoch_secs = 3600` (khớp `EPOCH_DURATION_SECS` Reward).
-- `max_entries` — chốt số cụ thể để test "checkpoint sớm khi vượt". **Đề xuất `max_entries = 10_000`** (~2,7 entry/giây trong 1 giờ; sub-MMR 10k leaf ≈ 320KB hash trong RAM, chấp nhận được). **Cần anh chốt** nếu ProofChat có tần suất khác.
-- `flush_on_idle` — **đề xuất 300** giây (5 phút im lặng → đóng epoch sớm).
+- `max_entries = 10_000` (~2,7 entry/giây trong 1 giờ; sub-MMR 10k leaf ≈ 320KB hash trong RAM, chấp nhận được).
+- `flush_max_age = 300` giây — đóng khi entry CŨ NHẤT trong epoch đã chờ 300s (thay ngữ nghĩa "im lặng" cũ, xem §5.3).
+- ProofChat dùng profile riêng `BatchPolicy::proofchat()` = `{600, 4096, 180}`.
+
+**Ngữ nghĩa đóng epoch (chốt theo code PR #7 — chặt hơn mô tả cũ):**
+- **Thứ tự ưu tiên van** khi nhiều van cùng chạm: `MaxEntries` → `EpochElapsed` → `FlushMaxAge` (van cứng-tài-nguyên trước van thời-gian).
+- **Hai góc chết fail-closed:** epoch RỖNG (`count == 0`) KHÔNG bao giờ đóng; `max_entries == 0` fail-closed (không đóng lặp vô hạn).
+- **`max_entries` enforce TẠI ĐIỂM GHI** (`push` trả `EpochFull`, entry dư thuộc epoch SAU) — không chỉ trong `should_close`.
+- **Van (c) đo tuổi entry CŨ NHẤT** bằng `oldest_ts = min(ts)` (không đòi ts đơn điệu), `now.saturating_sub(oldest_ts)` — `saturating_sub` chống clock-skew panic.
+- **Chống replay:** watermark `last_entry_seq` tăng nghiêm ngặt, SỐNG XUYÊN `close()`; seq cũ/bằng → `ReplaySeq`, KHÔNG ghi gì.
+- **DoS-guard `parse_batch`:** cap `count.min(bytes.len()/12)` TRƯỚC `Vec::with_capacity` (entry tối thiểu 12B) — blob untrusted từ Mirage không ép được alloc khổng lồ. `serialize_batch` cũng phải trả `Result` (không nuốt lỗi `PayloadTooLarge` im lặng làm blob tự-mâu-thuẫn count≠body).
+
+(Bốn điểm byte-layout gia cố — blob header, `entry_seq` liên tục chống gap, van (c) arrival-time, `max_epoch_bytes` — xem **Addendum S3.1** §5.3, đã chốt 08/07. Seq đầu tiên khi watermark = None là **0**.)
 
 **Tiêu chí test S3:**
 1. `checkpoint_1000_versions`: gộp 1000 entry → 1 checkpoint → 1 anchor; assert số anchor = 1 (không phải 1000).
 2. `prove_entry_in_checkpoint`: prove entry bất kỳ i ∈ [0,1000) thuộc checkpoint; assert `sub_proof` size ~`log2(1000)×32B ≈ 320B` (khớp "640B/1tr version" spec ở quy mô lớn hơn — báo cáo số thật).
 3. `two_tier_inclusion`: ghép sub-proof + version-proof → verify về `mmr_root` đã neo. PASS.
 4. `close_on_max_entries`: bơm `max_entries+1` entry → assert checkpoint đóng tại `max_entries` (không chờ hết `epoch_secs`).
-5. `close_on_idle`: dừng bơm `flush_on_idle` giây → assert checkpoint đóng.
+5. `close_on_flush_max_age`: entry đầu già `flush_max_age` giây → assert checkpoint đóng, DÙ entry mới vẫn rả rích (chứng minh ngữ nghĩa oldest-age ≠ idle).
 6. `entry_bytes_canonical`: hai entry khác payload cùng độ dài → leaf khác (length-prefix + entry/v1 tag tách miền).
 7. (nếu làm CRDT §7.4) `crdt_deterministic_state_root`: cùng tập op, thứ tự nhận khác → cùng `checkpoint_state_root`.
 
