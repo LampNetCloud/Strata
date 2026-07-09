@@ -25,6 +25,7 @@
 //!
 //! Gộp lô S3 (sub-MMR epoch + checkpoint) + AnchorSink S1: xem PR #7 / #6 (Thịnh) — hợp nhất 2026-07-07.
 
+pub mod anchor_sink;
 pub mod audit;
 pub mod batch;
 pub mod chain;
@@ -35,6 +36,12 @@ pub mod refid;
 pub mod state;
 pub mod version;
 
+pub use anchor_sink::{
+    AnchorBackend, AnchorError, AnchorPriority, AnchorReceipt, AnchorRecord, AnchorSink,
+    AnchoredTable, AssetClass, CborError, DatumError, MosaicAnchorSink, MosaicBackend, PlutusData,
+    ResolvedAnchor, TableError, VerifyError, map_anchor_to_datum, parse_datum_to_anchor,
+    verify_resolved,
+};
 pub use audit::{AuditAction, AuditEntry, AuditLog};
 pub use batch::{
     BatchError, BatchPolicy, Checkpoint, CloseReason, ClosedEpoch, EpochAccumulator, TwoTierProof,
