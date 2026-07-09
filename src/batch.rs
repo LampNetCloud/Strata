@@ -15,10 +15,12 @@
 //!   version-checkpoint khi `chain.append_version` (§8.3b). Checkpoint là một version
 //!   BÌNH THƯỜNG; không có API mới ở core, vòng gộp epoch là lớp daemon.
 //!
-//! Ngữ nghĩa đóng epoch (§5.3, addendum 04/07 — PR #8): đóng khi BẤT KỲ (1) hết
-//! `epoch_secs`; (2) đủ `max_entries`; (3) **tuổi entry CŨ NHẤT ≥ `flush_max_age`**
-//! (van (3) KHÔNG phải "im lặng" — tin rả rích vẫn gom một checkpoint nhưng không entry
-//! nào chờ quá hạn). `now` do caller truyền (core THUẦN, không `SystemTime`).
+//! Ngữ nghĩa đóng epoch (§5.3 + Addendum S3.1 — PR #8): đóng khi BẤT KỲ, ưu tiên
+//! `MaxEntries` → `MaxEpochBytes` → `EpochElapsed` → `FlushMaxAge`: (a) đủ `max_entries`;
+//! (b′) tổng payload ≥ `max_epoch_bytes` (van byte — `max_entries` một mình không chặn
+//! 10k × 1 MiB); (c) hết `epoch_secs`; (d) **tuổi entry CŨ NHẤT ≥ `flush_max_age`**
+//! (KHÔNG phải "im lặng" — tin rả rích vẫn gom một checkpoint nhưng không entry nào chờ
+//! quá hạn). `now`/`arrival_ts` do caller truyền (core THUẦN, không `SystemTime`).
 
 use crate::chain::StrataChain;
 use crate::u32_be;
@@ -31,11 +33,18 @@ use lampnet_merkle_anchor::mmr::{InclusionProof, Mmr, verify as mmr_verify};
 /// Tách miền khỏi `LN/STRATA/ver/v1` (version-hash) và `LN/STRATA/mmr/leaf/v1` (leaf nền).
 pub const TAG_ENTRY: &str = "LN/STRATA/entry/v1";
 
+/// Version byte đầu blob lô — nâng format sau không phá parse cũ (Addendum S3.1, §8.3).
+/// Blob: `u8(BATCH_FORMAT_VERSION) ‖ u32_be(count) ‖ entry_bytes…`; version lạ → `MalformedBatch`.
+pub const BATCH_FORMAT_VERSION: u8 = 1;
+
 /// Lỗi lớp gộp lô (fail-closed — không bao giờ ghi một phần).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchError {
     /// `entry_seq` ≤ watermark toàn-chain → replay / out-of-order (kể cả xuyên epoch).
     ReplaySeq { last: u64, got: u64 },
+    /// `entry_seq` BỎ QUÃNG: kỳ vọng `prev + 1` (hoặc `0` khi chưa có entry). `entry_seq`
+    /// LIÊN TỤC per-chain (Addendum S3.1) — mất entry phải LỘ ở điểm ghi, không im lặng.
+    NonContiguousSeq { expected: u64, got: u64 },
     /// Epoch đã đủ `max_entries` — entry này thuộc epoch SAU. Caller `close()` rồi push lại.
     /// (`max_entries = 0` cũng trả biến thể này ở mọi push → fail-closed, không commit gì.)
     EpochFull { max_entries: u32 },
@@ -183,6 +192,9 @@ pub struct BatchPolicy {
     pub max_entries: u32,
     /// Đóng epoch khi **tuổi entry CŨ NHẤT** đạt ngưỡng (giây) — KHÔNG phải "im lặng".
     pub flush_max_age: u64,
+    /// Trần TỔNG payload/epoch theo byte (van b′ — Addendum S3.1). `max_entries` một mình
+    /// không chặn 10k × 1 MiB = 10 GiB; đóng sớm khi tổng payload epoch ≥ ngưỡng này.
+    pub max_epoch_bytes: u32,
 }
 
 impl Default for BatchPolicy {
@@ -191,26 +203,30 @@ impl Default for BatchPolicy {
             epoch_secs: 3600,
             max_entries: 10_000,
             flush_max_age: 300,
+            max_epoch_bytes: 64 * 1024 * 1024, // 64 MiB
         }
     }
 }
 
 impl BatchPolicy {
     /// Profile ProofChat (panel phản biện 04/07 — §8.3): epoch 10 phút, 4096 entry,
-    /// flush_max_age 180s.
+    /// flush_max_age 180s, max_epoch_bytes 16 MiB.
     pub fn proofchat() -> Self {
         Self {
             epoch_secs: 600,
             max_entries: 4096,
             flush_max_age: 180,
+            max_epoch_bytes: 16 * 1024 * 1024, // 16 MiB
         }
     }
 
-    /// Quyết định **thuần** (không timer, không I/O): có đóng epoch chưa? Ưu tiên:
-    /// `MaxEntries` (chặn RAM) → `EpochElapsed` → `FlushMaxAge`. `None` = tiếp tục gộp.
+    /// Quyết định **thuần** (không timer, không I/O): có đóng epoch chưa? Ưu tiên (hai van
+    /// chặn RAM trước): `MaxEntries` → `MaxEpochBytes` → `EpochElapsed` → `FlushMaxAge`.
+    /// `None` = tiếp tục gộp.
     ///
-    /// - `count` = số entry hiện có; `epoch_start_ts` = mốc mở epoch (ts push ĐẦU tiên);
-    /// - `oldest_ts` = ts NHỎ NHẤT trong epoch (min, không đòi ts đơn điệu);
+    /// - `count` = số entry hiện có; `total_bytes` = TỔNG payload epoch (van b′);
+    /// - `epoch_start_ts` = mốc mở epoch (arrival_ts push ĐẦU tiên);
+    /// - `oldest_ts` = arrival_ts NHỎ NHẤT trong epoch (min, không đòi ts đơn điệu);
     /// - `now` = đồng hồ hiện tại (caller cấp). `saturating_sub` chống clock-skew panic.
     ///
     /// Góc chết đã xử: **epoch RỖNG không bao giờ đóng** (`count == 0 → None`), diệt luôn
@@ -218,6 +234,7 @@ impl BatchPolicy {
     pub fn should_close(
         &self,
         count: usize,
+        total_bytes: u64,
         epoch_start_ts: u64,
         oldest_ts: u64,
         now: u64,
@@ -227,6 +244,9 @@ impl BatchPolicy {
         }
         if count as u64 >= self.max_entries as u64 {
             return Some(CloseReason::MaxEntries);
+        }
+        if total_bytes >= self.max_epoch_bytes as u64 {
+            return Some(CloseReason::MaxEpochBytes);
         }
         if now.saturating_sub(epoch_start_ts) >= self.epoch_secs {
             return Some(CloseReason::EpochElapsed);
@@ -243,6 +263,8 @@ impl BatchPolicy {
 pub enum CloseReason {
     /// Đạt trần `max_entries`.
     MaxEntries,
+    /// Tổng payload epoch ≥ `max_epoch_bytes` (van b′ — trần RAM theo byte).
+    MaxEpochBytes,
     /// Hết `epoch_secs`.
     EpochElapsed,
     /// Tuổi entry cũ nhất ≥ `flush_max_age` (thay ngữ nghĩa `Idle` cũ).
@@ -266,19 +288,23 @@ pub struct ClosedEpoch {
 /// `now`/`ts` do caller cấp, blob + `content_cid` do caller đẩy Mirage; vòng lặp định kỳ
 /// là lớp daemon.
 ///
-/// Watermark `last_entry_seq` (chống replay) **SỐNG XUYÊN `close()`** — daemon retry sau
-/// crash không băm đôi một entry vào hai checkpoint.
+/// Watermark `last_entry_seq` (chống replay + chống gap, `prev+1`) **SỐNG XUYÊN `close()`**
+/// — nhưng chỉ TRONG-TIẾN-TRÌNH (RAM). Nó ngăn retry lặp/gap băm đôi entry giữa hai
+/// checkpoint *trong cùng một lần chạy*. Crash thật LÀM MẤT watermark; chống-băm-đôi qua
+/// crash là việc daemon persist watermark (ngoài phạm vi core thuần).
 #[derive(Debug)]
 pub struct EpochAccumulator {
     policy: BatchPolicy,
     cp: Checkpoint,
     /// (entry_seq, payload) theo thứ tự append — nguồn blob canonical khi đóng.
     entries: Vec<(u64, Vec<u8>)>,
-    /// ts push đầu tiên của epoch hiện tại (mốc `epoch_secs`).
+    /// arrival_ts push đầu tiên của epoch hiện tại (mốc `epoch_secs`).
     epoch_start_ts: Option<u64>,
-    /// ts nhỏ nhất trong epoch (mốc `flush_max_age`, min — không đòi đơn điệu).
+    /// arrival_ts nhỏ nhất trong epoch (mốc `flush_max_age`, min — không đòi đơn điệu).
     oldest_ts: Option<u64>,
-    /// Watermark entry_seq toàn-chain — sống xuyên close, tăng nghiêm ngặt.
+    /// Tổng payload byte của epoch hiện tại (van b′ `max_epoch_bytes`); reset mỗi close.
+    epoch_bytes: u64,
+    /// Watermark entry_seq toàn-chain — sống xuyên close, LIÊN TỤC `prev+1`.
     last_entry_seq: Option<u64>,
 }
 
@@ -292,6 +318,7 @@ impl EpochAccumulator {
             entries: Vec::new(),
             epoch_start_ts: None,
             oldest_ts: None,
+            epoch_bytes: 0,
             last_entry_seq: None,
         }
     }
@@ -319,20 +346,23 @@ impl EpochAccumulator {
     /// Nạp một entry vào epoch hiện tại. Trả index (0-based) trong sub-MMR khi thành công.
     ///
     /// Thứ tự kiểm (fail-closed — lỗi nào cũng KHÔNG ghi gì, watermark KHÔNG đổi):
-    /// 1. `ReplaySeq` nếu `entry_seq ≤ last_entry_seq` (chống retry băm đôi entry).
-    /// 2. `EpochFull` nếu epoch đã đủ `max_entries` (entry thuộc epoch SAU — caller
+    /// 1. `ReplaySeq` nếu `entry_seq ≤ last_entry_seq` (chống retry/out-of-order lùi).
+    /// 2. `NonContiguousSeq` nếu `entry_seq ≠ prev+1` (chống GAP tiến; seq đầu khi
+    ///    watermark = `None` PHẢI là `0` — Addendum S3.1). Mất entry LỘ ngay ở điểm ghi.
+    /// 3. `EpochFull` nếu epoch đã đủ `max_entries` (entry thuộc epoch SAU — caller
     ///    `close()` rồi push lại; watermark chưa cập nhật nên push lại KHÔNG bị coi replay).
-    /// 3. `PayloadTooLarge` nếu `payload > u32::MAX`.
+    /// 4. `PayloadTooLarge` nếu `payload > u32::MAX`.
     ///
-    /// `ts` = thời điểm gốc của entry (dùng cho `oldest_ts`); `now` = đồng hồ mở-epoch.
+    /// `arrival_ts` = thời điểm daemon NHẬN entry (van (c) dùng cái này, KHÔNG dùng ts
+    /// client khai; nguồn `oldest_ts`); `now` = đồng hồ mở-epoch.
     pub fn push(
         &mut self,
         entry_seq: u64,
-        ts: u64,
+        arrival_ts: u64,
         payload: &[u8],
         now: u64,
     ) -> Result<usize, BatchError> {
-        // (1) chống replay/out-of-order xuyên epoch.
+        // (1) chống replay/out-of-order lùi (≤ watermark), xuyên epoch.
         if let Some(last) = self.last_entry_seq
             && entry_seq <= last
         {
@@ -341,21 +371,30 @@ impl EpochAccumulator {
                 got: entry_seq,
             });
         }
-        // (2) trần RAM enforce NGAY tại điểm ghi (không đợi should_close).
+        // (2) entry_seq LIÊN TỤC: kỳ vọng prev+1 (0 khi chưa có entry) — từ chối GAP.
+        let expected = self.last_entry_seq.map(|l| l + 1).unwrap_or(0);
+        if entry_seq != expected {
+            return Err(BatchError::NonContiguousSeq {
+                expected,
+                got: entry_seq,
+            });
+        }
+        // (3) trần RAM enforce NGAY tại điểm ghi (không đợi should_close).
         if (self.cp.len() as u64) >= self.policy.max_entries as u64 {
             return Err(BatchError::EpochFull {
                 max_entries: self.policy.max_entries,
             });
         }
-        // (3) encode + append (guard PayloadTooLarge nằm trong append_entry).
+        // (4) encode + append (guard PayloadTooLarge nằm trong append_entry).
         let idx = self.cp.append_entry(entry_seq, payload)?;
         self.entries.push((entry_seq, payload.to_vec()));
         // Cập nhật mốc epoch — chỉ sau khi ghi chắc chắn thành công.
         self.epoch_start_ts.get_or_insert(now);
         self.oldest_ts = Some(match self.oldest_ts {
-            Some(o) => o.min(ts),
-            None => ts,
+            Some(o) => o.min(arrival_ts),
+            None => arrival_ts,
         });
+        self.epoch_bytes += payload.len() as u64;
         self.last_entry_seq = Some(entry_seq);
         Ok(idx)
     }
@@ -364,6 +403,7 @@ impl EpochAccumulator {
     pub fn should_close(&self, now: u64) -> Option<CloseReason> {
         self.policy.should_close(
             self.cp.len(),
+            self.epoch_bytes,
             self.epoch_start_ts.unwrap_or(now),
             self.oldest_ts.unwrap_or(now),
             now,
@@ -372,48 +412,60 @@ impl EpochAccumulator {
 
     /// Đóng epoch: trả `ClosedEpoch` (root/size/blob canonical) rồi **reset epoch** nhưng
     /// GIỮ watermark `last_entry_seq`. Gọi khi `should_close` báo (hoặc daemon chủ động).
-    pub fn close(&mut self) -> ClosedEpoch {
+    ///
+    /// `Err(PayloadTooLarge)` chỉ khi một entry vượt `u32::MAX` (đường push đã guard nên
+    /// thực tế bất khả) — propagate thay vì nuốt để blob không bao giờ tự-mâu-thuẫn count.
+    pub fn close(&mut self) -> Result<ClosedEpoch, BatchError> {
         let closed = ClosedEpoch {
             sub_mmr_root: self.cp.state_root(),
             sub_size: self.cp.size(),
             entries: self.cp.len(),
-            entries_serialized: serialize_batch(&self.entries),
+            entries_serialized: serialize_batch(&self.entries)?,
         };
         // Reset epoch — watermark sống tiếp.
         self.cp = Checkpoint::new();
         self.entries.clear();
         self.epoch_start_ts = None;
         self.oldest_ts = None;
-        closed
+        self.epoch_bytes = 0;
+        Ok(closed)
     }
 }
 
-/// Serialize blob lô canonical: `u32_be(count) ‖ entry_bytes(seq, payload) lặp`. Mỗi entry
-/// tự mang length-prefix nên nối chuỗi bất nhập nhằng; `count` để parse strict biết dừng.
+/// Serialize blob lô canonical: `u8(BATCH_FORMAT_VERSION) ‖ u32_be(count) ‖ entry_bytes…`
+/// (Addendum S3.1 — version byte để nâng format sau không phá parse cũ). Mỗi entry tự mang
+/// length-prefix nên nối chuỗi bất nhập nhằng; `count` để parse strict biết dừng.
 ///
-/// Không trả lỗi: `entries` đến từ `push` đã guard `PayloadTooLarge`; `count` bị chặn
-/// bởi `max_entries` (≤ u32) trên đường push. Dùng `u32_be`/`entry_bytes` an toàn.
-pub fn serialize_batch(entries: &[(u64, Vec<u8>)]) -> Vec<u8> {
+/// Trả `Result`: entry vượt `u32::MAX` → `PayloadTooLarge` (KHÔNG bỏ qua im lặng — nếu bỏ,
+/// `count` đã đếm sẽ khiến blob TỰ-MÂU-THUẪN). `entries` từ `push` đã guard nên bình thường
+/// luôn `Ok`.
+pub fn serialize_batch(entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>, BatchError> {
     let mut out = Vec::new();
+    out.push(BATCH_FORMAT_VERSION);
     out.extend_from_slice(&u32_be(entries.len()));
     for (seq, payload) in entries {
-        // payload đã ≤ u32::MAX (đường push); entry_bytes chỉ fail khi vượt — bỏ qua an toàn.
-        if let Ok(eb) = entry_bytes(*seq, payload) {
-            out.extend_from_slice(&eb);
-        }
+        out.extend_from_slice(&entry_bytes(*seq, payload)?);
     }
-    out
+    Ok(out)
 }
 
-/// Parse strict blob lô → `[(entry_seq, payload)]`. Byte cụt / count sai / **thừa byte đuôi**
-/// đều `MalformedBatch` (không đoán). Dùng để dựng lại đúng `sub_mmr_root` (§8.3c).
+/// Parse strict blob lô → `[(entry_seq, payload)]`. Version lạ / byte cụt / count sai /
+/// **thừa byte đuôi** đều `MalformedBatch` (không đoán). Dựng lại đúng `sub_mmr_root` (§8.3c).
 pub fn parse_batch(bytes: &[u8]) -> Result<Vec<(u64, Vec<u8>)>, BatchError> {
-    if bytes.len() < 4 {
+    // Header = u8(version) ‖ u32_be(count) = 5 byte.
+    if bytes.len() < 5 {
         return Err(BatchError::MalformedBatch);
     }
-    let count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-    let mut pos = 4;
-    let mut out = Vec::with_capacity(count);
+    if bytes[0] != BATCH_FORMAT_VERSION {
+        return Err(BatchError::MalformedBatch); // version lạ — không parse mù
+    }
+    let count = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+    // Chống DoS alloc: mỗi entry ≥ 12B (u64 seq + u32 len). Cap capacity theo số byte CÒN
+    // LẠI trước khi `with_capacity` — blob 5 byte khai count=u32::MAX không ép xin ~GB RAM;
+    // count dư để vòng parse tự bắt `MalformedBatch` (thiếu header entry).
+    let max_possible = (bytes.len() - 5) / 12;
+    let mut out = Vec::with_capacity(count.min(max_possible));
+    let mut pos = 5;
     for _ in 0..count {
         if pos + 12 > bytes.len() {
             return Err(BatchError::MalformedBatch); // thiếu header entry
@@ -633,13 +685,13 @@ mod tests {
     #[test]
     fn close_on_max_entries() {
         let pol = BatchPolicy::default(); // max=10_000
-        assert_eq!(pol.should_close(9_999, 0, 100, 200), None);
+        assert_eq!(pol.should_close(9_999, 0, 0, 100, 200), None);
         assert_eq!(
-            pol.should_close(10_000, 0, 100, 200),
+            pol.should_close(10_000, 0, 0, 100, 200),
             Some(CloseReason::MaxEntries)
         );
         assert_eq!(
-            pol.should_close(10_001, 0, 100, 200),
+            pol.should_close(10_001, 0, 0, 100, 200),
             Some(CloseReason::MaxEntries)
         );
     }
@@ -650,10 +702,10 @@ mod tests {
     fn close_on_flush_max_age() {
         let pol = BatchPolicy::default(); // flush_max_age=300, epoch=3600
         // oldest=1000, epoch_start=1000: 250s chưa tới ngưỡng → None.
-        assert_eq!(pol.should_close(5, 1000, 1000, 1250), None);
+        assert_eq!(pol.should_close(5, 0, 1000, 1000, 1250), None);
         // tuổi oldest = 300 → FlushMaxAge (dù epoch mới trôi 300s « 3600).
         assert_eq!(
-            pol.should_close(5, 1000, 1000, 1300),
+            pol.should_close(5, 0, 1000, 1000, 1300),
             Some(CloseReason::FlushMaxAge)
         );
 
@@ -716,7 +768,7 @@ mod tests {
         let mut acc = EpochAccumulator::new(BatchPolicy::default());
         acc.push(0, 100, b"a", 100).unwrap();
         acc.push(1, 101, b"b", 101).unwrap();
-        let _ = acc.close(); // đóng epoch — watermark last=1 phải sống tiếp
+        acc.close().unwrap(); // đóng epoch — watermark last=1 phải sống tiếp
         // seq bằng watermark → replay.
         assert_eq!(
             acc.push(1, 200, b"x", 200),
@@ -739,6 +791,7 @@ mod tests {
             epoch_secs: 3600,
             max_entries: 2,
             flush_max_age: 300,
+            max_epoch_bytes: 64 * 1024 * 1024,
         };
         let mut acc = EpochAccumulator::new(pol);
         assert_eq!(acc.push(0, 1, b"a", 1), Ok(0));
@@ -751,7 +804,7 @@ mod tests {
         assert_eq!(acc.len(), 2);
         assert_eq!(acc.last_entry_seq(), Some(1));
         // đóng rồi push lại chính entry bị EpochFull → nhận vào epoch mới (không replay).
-        let _ = acc.close();
+        acc.close().unwrap();
         assert_eq!(acc.push(2, 3, b"c", 3), Ok(0));
     }
 
@@ -762,6 +815,7 @@ mod tests {
             epoch_secs: 3600,
             max_entries: 0,
             flush_max_age: 300,
+            max_epoch_bytes: 64 * 1024 * 1024,
         };
         let mut acc = EpochAccumulator::new(pol);
         assert_eq!(
@@ -777,7 +831,7 @@ mod tests {
     #[test]
     fn empty_epoch_never_closes() {
         let pol = BatchPolicy::default();
-        assert_eq!(pol.should_close(0, 0, 1000, 5_000_000), None);
+        assert_eq!(pol.should_close(0, 0, 0, 1000, 5_000_000), None);
         let acc = EpochAccumulator::new(pol);
         assert_eq!(acc.should_close(5_000_000), None);
     }
@@ -798,7 +852,7 @@ mod tests {
     #[test]
     fn clock_skew_no_panic() {
         let pol = BatchPolicy::default();
-        assert_eq!(pol.should_close(5, 5000, 5000, 100), None);
+        assert_eq!(pol.should_close(5, 0, 5000, 5000, 100), None);
         let mut acc = EpochAccumulator::new(pol);
         acc.push(0, 5000, b"a", 5000).unwrap();
         assert_eq!(acc.should_close(100), None); // now lùi sau mốc mở epoch
@@ -808,11 +862,11 @@ mod tests {
     #[test]
     fn rejected_push_writes_nothing() {
         let mut acc = EpochAccumulator::new(BatchPolicy::default());
-        acc.push(5, 10, b"a", 10).unwrap();
+        acc.push(0, 10, b"a", 10).unwrap();
         let before = acc.len();
-        assert!(acc.push(5, 11, b"dup", 11).is_err());
+        assert!(acc.push(0, 11, b"dup", 11).is_err());
         assert_eq!(acc.len(), before, "push từ chối không tăng len");
-        assert_eq!(acc.last_entry_seq(), Some(5), "watermark bất biến");
+        assert_eq!(acc.last_entry_seq(), Some(0), "watermark bất biến");
     }
 
     /// Payload RỖNG hợp lệ.
@@ -835,7 +889,7 @@ mod tests {
             acc.push(i, 1000 + i, p.as_bytes(), 1000 + i).unwrap();
             direct.append_entry(i, p.as_bytes()).unwrap();
         }
-        let closed = acc.close();
+        let closed = acc.close().unwrap();
         assert_eq!(closed.entries, 500);
         assert_eq!(closed.sub_mmr_root, direct.state_root());
         assert_eq!(closed.sub_size, direct.size());
@@ -853,7 +907,7 @@ mod tests {
             acc.push(i, 100 + i, format!("p{i}").as_bytes(), 100 + i)
                 .unwrap();
         }
-        let closed = acc.close();
+        let closed = acc.close().unwrap();
         // đối chứng: blob nguyên vẹn → root khớp.
         let ok = parse_batch(&closed.entries_serialized).unwrap();
         assert_eq!(batch_root(&ok).unwrap(), closed.sub_mmr_root);
@@ -876,13 +930,13 @@ mod tests {
         let mut extra = closed.entries_serialized.clone();
         extra.push(0x00);
         assert_eq!(parse_batch(&extra), Err(BatchError::MalformedBatch));
-        // count=0 nhưng có byte thừa → Malformed.
+        // count=0 nhưng có byte thừa → Malformed (header 5B: version=1 ‖ count=0).
         assert_eq!(
-            parse_batch(&[0, 0, 0, 0, 0xAA]),
+            parse_batch(&[1, 0, 0, 0, 0, 0xAA]),
             Err(BatchError::MalformedBatch)
         );
-        // quá ngắn cho count → Malformed.
-        assert_eq!(parse_batch(&[0, 0]), Err(BatchError::MalformedBatch));
+        // quá ngắn cho header (< 5B) → Malformed.
+        assert_eq!(parse_batch(&[1, 0, 0]), Err(BatchError::MalformedBatch));
     }
 
     /// Profile ProofChat đúng §8.3 {600, 4096, 180}.
@@ -892,25 +946,144 @@ mod tests {
         assert_eq!(p.epoch_secs, 600);
         assert_eq!(p.max_entries, 4096);
         assert_eq!(p.flush_max_age, 180);
+        assert_eq!(p.max_epoch_bytes, 16 * 1024 * 1024);
     }
 
-    /// Ưu tiên close: MaxEntries > EpochElapsed > FlushMaxAge (khi nhiều điều kiện cùng đúng).
+    /// Ưu tiên close: MaxEntries > MaxEpochBytes > EpochElapsed > FlushMaxAge (khi nhiều
+    /// điều kiện cùng đúng).
     #[test]
     fn close_priority_order() {
         let pol = BatchPolicy {
             epoch_secs: 100,
             max_entries: 3,
             flush_max_age: 50,
+            max_epoch_bytes: 1000,
         };
-        // count đủ trần + epoch hết + oldest già → ưu tiên MaxEntries.
+        // count đủ trần + byte vượt + epoch hết + oldest già → ưu tiên MaxEntries.
         assert_eq!(
-            pol.should_close(3, 0, 0, 1000),
+            pol.should_close(3, 5000, 0, 0, 1000),
             Some(CloseReason::MaxEntries)
         );
-        // dưới trần, epoch hết + oldest già → EpochElapsed trước FlushMaxAge.
+        // dưới trần entry nhưng byte vượt → MaxEpochBytes trước EpochElapsed/FlushMaxAge.
         assert_eq!(
-            pol.should_close(2, 0, 0, 1000),
+            pol.should_close(2, 1000, 0, 0, 1000),
+            Some(CloseReason::MaxEpochBytes)
+        );
+        // dưới cả hai trần RAM, epoch hết + oldest già → EpochElapsed trước FlushMaxAge.
+        assert_eq!(
+            pol.should_close(2, 0, 0, 0, 1000),
             Some(CloseReason::EpochElapsed)
         );
+    }
+
+    // ===== Addendum S3.1 (review 08/07 vòng 2) =====
+
+    /// (CAO) DoS alloc: blob khai `count = u32::MAX` nhưng thân rỗng KHÔNG ép `with_capacity`
+    /// xin ~GB RAM — cap theo byte còn lại; vòng parse bắt `MalformedBatch` ngay.
+    #[test]
+    fn parse_batch_dos_count_capped() {
+        // version=1 ‖ count=0xFFFFFFFF ‖ (không entry nào).
+        let blob = [BATCH_FORMAT_VERSION, 0xFF, 0xFF, 0xFF, 0xFF];
+        assert_eq!(parse_batch(&blob), Err(BatchError::MalformedBatch));
+        // count lớn nhưng còn 1 entry hợp lệ + phần khai dư → vẫn Malformed (thiếu header),
+        // không panic / không OOM.
+        let mut blob2 = vec![BATCH_FORMAT_VERSION];
+        blob2.extend_from_slice(&u32_be(1_000_000)); // khai 1 triệu entry
+        blob2.extend_from_slice(&entry_bytes(0, b"only-one").unwrap()); // chỉ có 1
+        assert_eq!(parse_batch(&blob2), Err(BatchError::MalformedBatch));
+    }
+
+    /// Version byte lạ → `MalformedBatch` (không parse mù format tương lai).
+    #[test]
+    fn parse_batch_rejects_unknown_version() {
+        let mut blob = serialize_batch(&[(0, b"x".to_vec())]).unwrap();
+        blob[0] = 2; // version lạ
+        assert_eq!(parse_batch(&blob), Err(BatchError::MalformedBatch));
+    }
+
+    /// Blob có header version byte (round-trip qua serialize/parse giữ nguyên format mới).
+    #[test]
+    fn serialize_batch_has_version_header() {
+        let blob = serialize_batch(&[(0, b"a".to_vec()), (1, b"bb".to_vec())]).unwrap();
+        assert_eq!(blob[0], BATCH_FORMAT_VERSION);
+        assert_eq!(&blob[1..5], &2u32.to_be_bytes()); // count = 2
+        let parsed = parse_batch(&blob).unwrap();
+        assert_eq!(parsed, vec![(0, b"a".to_vec()), (1, b"bb".to_vec())]);
+    }
+
+    /// `entry_seq` LIÊN TỤC: seq đầu PHẢI là 0; gap tiến → `NonContiguousSeq` (mất entry LỘ ra).
+    #[test]
+    fn entry_seq_must_be_contiguous() {
+        let mut acc = EpochAccumulator::new(BatchPolicy::default());
+        // seq đầu khác 0 khi watermark = None → NonContiguousSeq{expected:0}.
+        assert_eq!(
+            acc.push(5, 10, b"a", 10),
+            Err(BatchError::NonContiguousSeq {
+                expected: 0,
+                got: 5
+            })
+        );
+        // bắt đầu đúng từ 0.
+        assert_eq!(acc.push(0, 10, b"a", 10), Ok(0));
+        // nhảy cóc 0 → 2 (bỏ 1) → NonContiguousSeq{expected:1}.
+        assert_eq!(
+            acc.push(2, 11, b"c", 11),
+            Err(BatchError::NonContiguousSeq {
+                expected: 1,
+                got: 2
+            })
+        );
+        // đúng prev+1 → nhận.
+        assert_eq!(acc.push(1, 11, b"b", 11), Ok(1));
+        assert_eq!(acc.last_entry_seq(), Some(1));
+    }
+
+    /// Gap LIÊN TỤC vẫn enforce XUYÊN close (watermark sống tiếp): sau close, phải là prev+1.
+    #[test]
+    fn contiguous_seq_across_close() {
+        let mut acc = EpochAccumulator::new(BatchPolicy::default());
+        acc.push(0, 10, b"a", 10).unwrap();
+        acc.push(1, 11, b"b", 11).unwrap();
+        acc.close().unwrap(); // watermark last=1 sống tiếp
+        // nhảy cóc sau close → gap.
+        assert_eq!(
+            acc.push(3, 20, b"x", 20),
+            Err(BatchError::NonContiguousSeq {
+                expected: 2,
+                got: 3
+            })
+        );
+        // đúng prev+1 → nhận vào epoch mới.
+        assert_eq!(acc.push(2, 20, b"c", 20), Ok(0));
+    }
+
+    /// Van b′ `max_epoch_bytes`: tổng payload vượt trần → `MaxEpochBytes` (dù dưới `max_entries`
+    /// và epoch chưa hết). Chứng minh `max_entries` một mình không chặn được RAM theo byte.
+    #[test]
+    fn close_on_max_epoch_bytes() {
+        let pol = BatchPolicy {
+            epoch_secs: 3600,
+            max_entries: 10_000, // trần entry rất cao — không phải cái chạm
+            flush_max_age: 300,
+            max_epoch_bytes: 10, // trần byte thấp
+        };
+        let mut acc = EpochAccumulator::new(pol);
+        acc.push(0, 100, b"aaaaa", 100).unwrap(); // 5 byte < 10 → chưa đóng
+        assert_eq!(acc.should_close(100), None);
+        acc.push(1, 100, b"bbbbb", 100).unwrap(); // tổng 10 byte ≥ 10 → van b′
+        assert_eq!(acc.should_close(100), Some(CloseReason::MaxEpochBytes));
+        // đóng → epoch_bytes reset → epoch mới lại None cho tới khi vượt lại.
+        acc.close().unwrap();
+        assert_eq!(acc.should_close(100), None);
+    }
+
+    /// `serialize_batch` trả `Result` — round-trip OK cho entry hợp lệ (không nuốt lỗi im
+    /// lặng làm blob tự-mâu-thuẫn count).
+    #[test]
+    fn serialize_batch_returns_result() {
+        let ok = serialize_batch(&[(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        assert!(ok.is_ok());
+        let parsed = parse_batch(&ok.unwrap()).unwrap();
+        assert_eq!(parsed.len(), 2);
     }
 }

@@ -1,6 +1,6 @@
 # Strata S3 — `BatchPolicy` / checkpoint sub-MMR (gộp lô 4-tier) — Báo cáo
 
-> **Người:** Thịnh (`lrybi`) · **Ngày:** 2026-07-06 (vá review 2026-07-08) · **Issue:** `LampNetCloud/Strata#3` [P1]
+> **Người:** Thịnh (`lrybi`) · **Ngày:** 2026-07-06 (vá review vòng 1: 2026-07-08 · vòng 2 + Addendum S3.1: 2026-07-09) · **Issue:** `LampNetCloud/Strata#3` [P1]
 > **Spec:** `spec/Strata-API.md §5.3 + §8.3` (addendum 04/07 chốt tại **PR #8**) + `spec/Strata-Feat.md §4-tier` · **Contract:** `spec/_CONTRACT.md` CHỐT-2
 > **Nhánh:** `thinh/strata-s3-batch-checkpoint` (base `main`) · **Code:** `src/batch.rs`
 
@@ -42,7 +42,7 @@ Ranh giới: crate THUẦN (no I/O); vòng gộp epoch theo đồng hồ thật 
 | 7 | `crdt_deterministic_state_root` | cùng tập op, thứ tự nhận khác → sort tất định → cùng `checkpoint_state_root` ✅ |
 | + | `deterministic_same_entries_same_root` | cùng chuỗi entry → cùng root ✅ |
 
-**Toàn crate:** `cargo test` **73 lib (+21 batch) + 12 integration = 85 pass**, `cargo clippy --all-targets` **0 warning**, `cargo fmt --check` **clean**.
+**Toàn crate (sau vá vòng 2 + Addendum S3.1 — xem §6):** `cargo test` **86 unit (+batch) + 12 integration = 98 pass**, `cargo clippy --all-targets` **0 warning**, `batch.rs` fmt clean. (Vòng 1: 85 pass.)
 
 **Số thật báo cáo (tiêu chí #2):** với sub-MMR N=1000, proof entry lẻ = **448 byte** (14 hash × 32B). Ở quy mô 1 triệu entry, proof ≈ log2(1e6)×32 ≈ 640B — khớp "~640B/1tr version" spec.
 
@@ -70,3 +70,25 @@ Anh Đức kéo nhánh chạy thật (61 lib + 12 integration pass, proof 448B k
 | 8 | **Test bổ sung** | replay xuyên epoch, tamper blob sau đóng (kèm đối chứng pass), ts lùi trong epoch (`non_monotonic_ts_uses_min`), clock-skew saturating không panic, push từ chối không ghi gì, payload rỗng hợp lệ, ưu tiên close. |
 
 **Ghi chú spec:** code khớp §5.3/§8.3 bản mới do anh Đức chốt ở **PR #8** (chưa merge main). Không nhân bản thay đổi spec vào PR này (thuộc PR #8); khi #8 lên main sẽ rebase. Sau vá: **85 pass / 0 fail, clippy 0 warning, fmt clean**.
+
+---
+
+## 6. Vá vòng 2 + Addendum S3.1 (PR #7 — 2026-07-09, sau khi PR #8 lên main)
+
+PR #8 đã **merged main** (2026-07-09) — rebase nhánh S3 lên main mới. Anh Đức rà sâu từng dòng `batch.rs @ 583bc0b` (15/15 hợp đồng spec ĐẠT), bắt thêm 3 lỗi + gộp 4 mục **Addendum S3.1** (spec §8.3, PR #8 `cfa4970`). Đã xử lý cả 7:
+
+| # | Việc | Cách vá |
+|---|---|---|
+| 1 ⛔ CAO | **DoS alloc `parse_batch`** | Blob khai `count = u32::MAX` từng ép `Vec::with_capacity(count)` xin ~137 GB (blob qua Mirage = untrusted). Vá: cap `count.min((bytes.len()-5)/12)` (mỗi entry ≥ 12B) **trước** `with_capacity`; count dư để vòng parse tự bắt `MalformedBatch`. Test `parse_batch_dos_count_capped` (blob 5-byte `FF FF FF FF` + blob khai 1 triệu entry chỉ có 1). |
+| 2 | **`serialize_batch` nuốt lỗi im lặng** | Trước: entry quá cỡ bị `if let Ok` bỏ qua nhưng `count` đã đếm → blob tự-mâu-thuẫn. Vá: `serialize_batch` **trả `Result`**, `entry_bytes(...)?` propagate `PayloadTooLarge`. `close()` cũng trả `Result<ClosedEpoch, _>`. Test `serialize_batch_returns_result`. |
+| 3 | **Doc overclaim** | Sửa câu "retry sau crash không băm đôi" — watermark chỉ sống **TRONG-TIẾN-TRÌNH (RAM)**; crash thật mất watermark, chống-băm-đôi qua-crash là việc daemon persist (ngoài phạm vi core thuần). Doc `EpochAccumulator` + bảng §5 #2 nêu rõ phạm vi. |
+| A1 | **Blob header version byte** | `serialize_batch = u8(format_version=1) ‖ u32_be(count) ‖ entries…`; `parse_batch` đọc + kiểm version byte, **version lạ → `MalformedBatch`** (không parse mù format tương lai). Const `BATCH_FORMAT_VERSION = 1`. Test `serialize_batch_has_version_header`, `parse_batch_rejects_unknown_version`. |
+| A2 | **`entry_seq` LIÊN TỤC (chống gap)** | Không chỉ "tăng nghiêm ngặt" mà bắt `= prev+1`; seq đầu khi watermark `None` **PHẢI là 0** (daemon cấp từ 0). Gap tiến → `NonContiguousSeq{expected,got}` (mất entry LỘ ngay điểm ghi). Enforce **xuyên close** (watermark sống tiếp). Test `entry_seq_must_be_contiguous`, `contiguous_seq_across_close`. |
+| A3 | **Van (c) arrival-time** | `push(entry_seq, ts, …)` → **`arrival_ts`** (thời điểm daemon NHẬN entry, KHÔNG dùng ts client khai — ts giả quá khứ sẽ ép đóng epoch liên tục). Đổi tên tham số + doc `oldest_ts`/`epoch_start_ts` = arrival-time. |
+| A4 | **`max_epoch_bytes` van b′** | Thêm trường `max_epoch_bytes: u32` (default **64 MiB**, `proofchat` **16 MiB**); `EpochAccumulator` cộng dồn `epoch_bytes`; `should_close` thêm nhánh `MaxEpochBytes` — `max_entries` một mình không chặn 10k×1 MiB = 10 GiB. Ưu tiên van: **MaxEntries → MaxEpochBytes → EpochElapsed → FlushMaxAge**. Test `close_on_max_epoch_bytes` + `close_priority_order` (thêm assert MaxEpochBytes). |
+
+**Ghi chú thứ tự van b′:** `max_epoch_bytes` đặt ngay sau `max_entries` (cả hai là trần RAM cứng, check trước) — chọn fail-closed. Nếu anh Đức muốn vị trí khác trong chuỗi ưu tiên thì đổi 1 dòng.
+
+**Ghi chú `close()` trả `Result`:** vì `serialize_batch` giờ trả `Result` (mục 2), `close()` propagate `Result<ClosedEpoch, BatchError>`; call site đổi `let _ = acc.close();` → `acc.close().unwrap();`. Thực tế `Err` bất khả (push đã guard) nhưng không nuốt để blob không bao giờ tự-mâu-thuẫn.
+
+**Kết quả sau vá vòng 2:** `cargo test` **86 unit (+batch) + 12 integration = 98 pass / 0 fail**, `cargo clippy --all-targets` **0 warning**, `batch.rs` fmt clean. (`derived_index.rs` báo fmt-diff là do rustfmt-version local lệch với file đã-merge của main, KHÔNG thuộc thay đổi PR này.)
