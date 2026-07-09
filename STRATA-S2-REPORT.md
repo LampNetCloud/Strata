@@ -99,3 +99,15 @@ Anh Đức kéo nhánh chạy thật (59 unit + 12 integration pass, clippy sạ
 - **[x] Ghi nhận tích hợp S1 (`prove_composite` dùng size hiện tại):** thêm 1 dòng `TODO(tích hợp S1)` trong doc `prove_composite` — khi verify dưới `mmr_root` ĐÃ NEO cũ sẽ cần biến thể `prove_composite_at(seq, key, mmr_size)`. Sẽ hiện thực khi hợp nhất với AnchorSink (PR #6).
 
 Sau vá: **71 pass / 0 fail**, clippy 0 warning — giữ nguyên. Diff gọn (1 file, 8/8 dòng). Sẵn sàng merge.
+
+---
+
+## 8. Vá vòng 2 + MERGED (PR #5 — 2026-07-09)
+
+Anh Đức rà sâu vòng nữa `derived_index.rs @ 6ae8eb7` (chạy lại test + benchmark: 71 pass, n=100k build 43,9ms / equals 228µs / latest ~0 — tái lập). Kết luận giữ nguyên **ĐẠT**, chỉ 1 sửa 1-dòng:
+
+- **[x] Comment test `build_log` sai thực tế:** comment nói "author khác nhau" nhưng cả 3 version (`v0/v1/v2`) dùng CHUNG `mk_author(1)`; cái đổi là giá trị trường `status`/`owner` (alice→bob). Sửa câu chữ cho khớp test (commit `ba6b4e4`).
+
+**PR #5 MERGED main 2026-07-09** (squash) theo thứ tự anh Đức chốt #8 → **#5** → #7 → #6. Test giữ **71 pass / clippy 0 warning**.
+
+**Ghi nhận (không thuộc PR này — anh Đức mở issue riêng giao sau):** rà PR #5 lộ bug **equivocation dup-key** ở `build_state_root` (state.rs) — nhận key TRÙNG thản nhiên, `StrataChain` chỉ thấy `state_root` (không thấy `fields`) → tác giả ác ý ký một version mà "field X = v1" VÀ "field X = v2" đều sinh proof hợp lệ. Daemon HTTP đã chặn 400 nhưng gọi thẳng Rust API thì không. Anh đóng INV "key duy nhất mỗi version" vào spec + issue riêng (thêm check dup-key + biến thể lỗi mới). Nằm ở core từ trước, KHÔNG phải lỗi S2.
