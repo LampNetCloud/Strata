@@ -393,7 +393,7 @@ mod tests {
         v
     }
 
-    // Log 3 version với trường "status" đổi giá trị + author khác nhau.
+    // Log 3 version CÙNG một author; các trường "status"/"owner" đổi giá trị qua từng version.
     fn build_log() -> (InMemoryVersionLog, Hash32) {
         let a = mk_author(1);
         let ph = policy_with(&a).policy_hash();
