@@ -632,6 +632,52 @@ mod tests {
         ));
     }
 
+    /// Test biên `prove_version_at` (review #6 vòng 2 mục 4): size non-power-of-2 (5, 11),
+    /// size=1, size=len; `seq >= mmr_size → None`; `mmr_size > len → None`.
+    #[test]
+    fn prove_version_at_boundaries() {
+        // Chain 11 version (seq 0..=10, len=11).
+        let a = mk_author(1);
+        let (mut chain, pol) = genesis_chain(&a);
+        let ph = pol.policy_hash();
+        for seq in 1..11u64 {
+            let v = signed(seq, chain.head_version_hash(), 100 + seq, &a, ph);
+            chain.append_version(v, &pol).unwrap();
+        }
+        assert_eq!(chain.len(), 11);
+
+        // Root LỊCH SỬ ở size k (dựng lại từ k leaf = version_hash đầu — như prove_version_at).
+        let root_at = |k: u64| {
+            let mut m = Mmr::<Blake3Hasher>::new();
+            for i in 0..k {
+                m.append(&chain.version(i).unwrap().version_hash());
+            }
+            m.root()
+        };
+
+        // size ∈ {1, 5 (non-pow2), 11 (=len)} — mọi seq < size verify PASS dưới root lịch sử.
+        for &size in &[1u64, 5, 11] {
+            let root_k = root_at(size);
+            for seq in 0..size {
+                let (proof, vh) = chain
+                    .prove_version_at(seq, size)
+                    .expect("seq < size → Some");
+                assert!(
+                    StrataChain::verify_version(root_k, &vh, seq, size, &proof),
+                    "verify seq={seq} @ size={size}"
+                );
+            }
+        }
+
+        // seq >= mmr_size → None.
+        assert!(chain.prove_version_at(5, 5).is_none(), "seq == size");
+        assert!(chain.prove_version_at(7, 5).is_none(), "seq > size");
+        assert!(chain.prove_version_at(11, 11).is_none());
+        // mmr_size > len → None.
+        assert!(chain.prove_version_at(0, 12).is_none(), "size > len");
+        assert!(chain.prove_version_at(3, 100).is_none());
+    }
+
     #[test]
     fn inv_e4_wrong_signature_rejected() {
         let a = mk_author(1);

@@ -1,7 +1,7 @@
 # Strata S1 — Anchor adapter `Strata.anchor → Mosaic` (CIP-68) — Báo cáo
 
 > **Issue:** [#1 [P0]](https://github.com/LampNetCloud/Strata/issues/1) · **Spec:** `Strata-API.md §4.1 + §8.1`, `_CONTRACT.md` (phương án A) · **Cập nhật:** 2026-07-04
-> **Trạng thái:** Phase 1 (Strata Rust) CODE-COMPLETE + **Phase 2 ĐÃ NEO ON-CHAIN THẬT (L1 Preview)**. Repo **71 test pass**, clippy sạch.
+> **Trạng thái:** Phase 1 (Strata Rust) CODE-COMPLETE + **Phase 2 ĐÃ NEO ON-CHAIN THẬT (L1 Preview)**. Vá review PR #6 **2 vòng** (vòng 1: 2026-07-08 · vòng 2: 2026-07-09). Repo **111 test pass**, clippy sạch. (Xem §7–§8.)
 
 ---
 
@@ -123,6 +123,24 @@ Anh Đức chạy thật (71 pass, clippy sạch) + tự kiểm on-chain qua Koi
 **Chốt spec (PR #8):** backend mặc định là **Settlement**, không phải Mosaic CIP-68 — codec Settlement là việc chính còn lại của S1 (§5). Phần CIP-68 giữ làm lớp cho hồ sơ giá trị cao.
 
 **Kết quả sau vá:** `cargo test` **76 pass / 0 fail** (53 lib + 11 anchor_sink + 12 integration; +5 test review: thread-token chống đầu độc, datum rác skip, retry backoff, table đa-chain+persist, verify tái dựng record-muộn), clippy **0 warning**, fmt clean. Thêm `chain::prove_version_at` (tái dựng MMR ở size cũ).
+
+---
+
+## 8. Vá vòng 2 + MERGED (PR #6 — 2026-07-09, sau khi #8/#5/#7 lên main)
+
+Anh Đức rà sâu vòng nữa `anchor_sink.rs` + `chain.rs::prove_version_at @ 6e62f42` (76 pass xác nhận lại), kết luận cài đặt trung thành spec §8.1, **nhiều mở rộng ĐÚNG hơn spec → anh sửa spec theo code** (`prove_version_at` vào core §8.1c; `read_anchor→Vec<ResolvedAnchor>`; `AnchorRecord` 5 trường; `mmr_size=seq+1`). Em không đổi code các điểm đó. Nêu 5 việc; đã xử lý **2, 3, 4, 5**; **mục 1 = quyết định hợp nhất (PR follow-up), KHÔNG code ở PR này**:
+
+| # | Việc | Cách vá |
+|---|---|---|
+| 1 | **(CHẶN — quyết định) Hai bản ghi anchor song song** (`AnchoredTable` binary 5 trường vs `AnchoredLog` CSV 4 trường bên daemon rev `72f7135`) | Anh Đức chốt **`AnchoredTable` là bảng CHUẨN duy nhất**. Hợp nhất đường Settlement dùng chung `AnchoredTable`+`verify_resolved`/`prove_version_at` → **PR follow-up codec Settlement** (gộp với mục 5 vòng-1). **KHÔNG code trong PR #6.** Ghi vào §5/roadmap. |
+| 2 | **Rào chế độ `new()` không-xác-thực** | Đổi tên `new()` → **`new_unverified_for_tests()`** (tên dài+rõ, production không vô tình dùng) thay vì `#[deprecated]` (để giữ clippy 0 warning). Cập nhật 13 call site test. |
+| 3 | **Lenient decode đừng nuốt anchor THẬT hỏng** | `resolve` phân biệt: UTxO mang **ĐÚNG thread-token** (lineage đã xác thực) mà datum parse-fail → **`log::warn!`** (anchor thật có thể hỏng — mất im lặng là bug khó lần); datum rác của kẻ lạ → bỏ qua im lặng (đúng). Thêm dep `log = "0.4"` (facade, ~0 nếu daemon không gắn logger). Test `resolve_warns_on_authenticated_corrupt_datum`. |
+| 4 | **Test biên `prove_version_at`** | `prove_version_at_boundaries` (chain.rs): size non-pow2 (5,11), size=1, size=len — mọi `seq<size` verify PASS dưới root lịch sử; `seq≥mmr_size→None`; `mmr_size>len→None`. |
+| 5 | **Gộp check `version_hash` trùng** trong `verify_resolved` (:785 & :792) | Bỏ check `rec.version_hash != head` dư — `rec.version_hash == local_vh` do version bất biến append-only nên **1 check ở `local_vh` là đủ**. (Phong cách `verify_resolved` nhận `&StrataVersion` như `verify_two_tier` = **hoãn** — anh Đức nói không chặn merge, xếp lượt sau để giữ PR gọn.) |
+
+**Kết quả sau vá vòng 2:** `cargo test` **87 lib (+prove_version_at_boundaries) + 12 anchor_sink (+resolve_warns…) + 12 integration = 111 pass / 0 fail**, clippy **0 warning**, `anchor_sink.rs`/`chain.rs`/`tests` fmt clean (`derived_index.rs` báo fmt-diff = rustfmt-version local lệch file đã-merge của main, không thuộc PR này). `Cargo.lock` gitignored (không track — không sync lock).
+
+**PR follow-up (codec Settlement + hợp nhất AnchoredTable):** gộp mục 5 vòng-1 + mục 1 vòng-2 — đưa CODEC Settlement (label 1234, CBOR raw `{t,a}`, chunk 64B bijective + decode lenient) vào cùng lớp thuần; đường Settlement dùng chung `AnchoredTable`/`verify_resolved`/`prove_version_at`; I/O Blockfrost/submitter tách crate riêng. Tham chiếu rev `72f7135` thư mục `anchor-sink/`. Hợp đồng codec như PR #8 ghi.
 
 ---
 

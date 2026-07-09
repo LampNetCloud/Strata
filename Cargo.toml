@@ -12,3 +12,4 @@ blake3 = { version = "1.5", features = ["rayon"] }
 ed25519-dalek = { version = "2.0", features = ["rand_core"] }
 rand = "0.8"
 bech32 = "0.11"
+log = "0.4"

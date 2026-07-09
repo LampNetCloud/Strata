@@ -497,9 +497,14 @@ pub struct MosaicAnchorSink<B: MosaicBackend> {
 }
 
 impl<B: MosaicBackend> MosaicAnchorSink<B> {
-    /// Sink KHÔNG xác thực thread-token — **chỉ test/round-trip**. Production dùng
-    /// [`with_thread_token`](Self::with_thread_token).
-    pub fn new(backend: B) -> Self {
+    /// Sink KHÔNG xác thực thread-token — **CHỈ test/round-trip datum tự tạo**. Tên hàm cố
+    /// tình dài + rõ để KHÔNG ai vô tình dùng ở production: sink dựng qua đây bị đầu độc
+    /// seq-cao ngay (validator chỉ guard SPEND, không guard CREATE — xem doc `read_anchor`).
+    /// Production PHẢI [`with_thread_token`](Self::with_thread_token).
+    ///
+    /// (Trước là `new()`; đổi tên theo review anh Đức PR #6 vòng 2 mục 2 — rào chế độ
+    /// không-xác-thực bằng tên hàm thay vì `#[deprecated]` để giữ clippy 0 warning.)
+    pub fn new_unverified_for_tests(backend: B) -> Self {
         Self {
             backend,
             expected_token: None,
@@ -573,24 +578,37 @@ impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
 
     /// Đọc anchor đích thực on-chain cho `ref_id`. Chống đầu độc (phương án a):
     /// 1. **Thread-token auth**: nếu sink pin token → chỉ nhận UTxO mang đúng NFT one-shot
-    ///    (kẻ giả gửi UTxO datum seq-cao KHÔNG mint được NFT → bị loại).
-    /// 2. **Datum rác → BỎ QUA, quét tiếp** (không `Err` — chống DoS: kẻ lạ không ép được
-    ///    `resolve` báo lỗi bằng 1 tx ~0,17 tADA). `Err` strict chỉ ở round-trip datum tự tạo.
+    ///    (kẻ giả gửi UTxO datum seq-cao KHÔNG mint được NFT → bị loại IM LẶNG).
+    /// 2. **Datum parse-fail → BỎ QUA, quét tiếp** (không `Err` — chống DoS: kẻ lạ không ép
+    ///    được `resolve` báo lỗi bằng 1 tx ~0,17 tADA). NHƯNG phân biệt (review #6 vòng 2 mục 3):
+    ///    UTxO mang **ĐÚNG thread-token** (lineage đã xác thực) mà datum hỏng → **`log::warn!`**
+    ///    (anchor THẬT có thể hỏng — mất im lặng là bug khó lần); datum rác của kẻ lạ → im lặng.
     ///
     /// Trong các UTxO hợp lệ (đã xác thực) lấy `seq` cao nhất = đỉnh lineage. `Ok(None)` = chưa neo.
     fn resolve(&self, ref_id: &Hash32) -> Result<Option<StrataAnchor>, AnchorError> {
         let mut best: Option<StrataAnchor> = None;
         for cand in self.backend.read_anchor(ref_id)? {
-            // (1) xác thực thread-token (nếu pin).
-            if let Some(expected) = &self.expected_token {
-                match &cand.thread_token {
-                    Some(tok) if tok == expected => {}
-                    _ => continue, // không mang NFT one-shot → forged, bỏ qua
-                }
+            // (1) xác thực thread-token. `authenticated` = UTxO thuộc lineage THẬT.
+            let authenticated = match &self.expected_token {
+                Some(expected) => cand.thread_token.as_ref() == Some(expected),
+                None => false, // chế độ không-xác-thực: không phân biệt được thật/giả
+            };
+            if self.expected_token.is_some() && !authenticated {
+                continue; // không mang NFT one-shot → forged, bỏ qua im lặng (đúng)
             }
-            // (2) datum rác → bỏ qua, quét tiếp (KHÔNG Err).
-            let Ok(anchor) = parse_datum_to_anchor(&cand.datum) else {
-                continue;
+            // (2) parse datum — anchor thật hỏng thì WARN, kẻ lạ thì im lặng.
+            let anchor = match parse_datum_to_anchor(&cand.datum) {
+                Ok(a) => a,
+                Err(e) => {
+                    if authenticated {
+                        log::warn!(
+                            "resolve: UTxO mang ĐÚNG thread-token nhưng datum parse-fail \
+                             (ref_id={}, err={e:?}) — anchor THẬT có thể hỏng, không nuốt im lặng",
+                            hex_encode(ref_id)
+                        );
+                    }
+                    continue;
+                }
             };
             // ref_id trong datum phải khớp (chống trộn lineage khác vào).
             if &anchor.ref_id != ref_id {
@@ -777,7 +795,9 @@ pub fn verify_resolved(
             local: local_head,
         });
     }
-    // Local version tại seq phải khớp head đã neo (chống divergence).
+    // Local version tại seq phải khớp head đã neo (chống divergence). `rec.version_hash`
+    // (lưu lúc record) == `local_vh` do version bất biến append-only → CHỈ kiểm một lần ở
+    // đây là đủ (review #6 vòng 2 mục 5: gộp check version_hash trùng lặp).
     let local_vh = chain
         .version(on_chain.seq)
         .map(|v| v.version_hash())
@@ -789,9 +809,6 @@ pub fn verify_resolved(
     let rec = table
         .get(&on_chain.ref_id, on_chain.seq)
         .ok_or(VerifyError::NotAnchored(on_chain.seq))?;
-    if rec.version_hash != on_chain.head_version_hash {
-        return Err(VerifyError::HeadMismatch);
-    }
     let (proof, vh) = chain
         .prove_version_at(on_chain.seq, rec.mmr_size)
         .ok_or(VerifyError::SeqMissing(on_chain.seq))?;
