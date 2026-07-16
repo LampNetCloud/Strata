@@ -22,6 +22,8 @@
 //! - [`audit`]  — INV-E3 (audit-log append-only bất biến).
 //! - [`batch`]  — S3: checkpoint sub-MMR (gộp lô epoch → neo 1 lần) + inclusion 2 tầng; kế thừa INV-E3/E7.
 //! - [`privacy`]— INV-E9 mức code (padding/decoy chống suy luận loại qua kích thước).
+//! - [`composite`] — Composite Strata: rừng cha–con qua field-proof (Feat §6, Math §12, API §5.1).
+//! - [`tabular`]— Merkle Sum Tree cho cột: tổng/đếm có bằng chứng (Feat §8, Math §14).
 //!
 //! Gộp lô S3 (sub-MMR epoch + checkpoint) + AnchorSink S1: xem PR #7 / #6 (Thịnh) — hợp nhất 2026-07-07.
 
@@ -29,11 +31,13 @@ pub mod anchor_sink;
 pub mod audit;
 pub mod batch;
 pub mod chain;
+pub mod composite;
 pub mod derived_index;
 pub mod field_policy;
 pub mod privacy;
 pub mod refid;
 pub mod state;
+pub mod tabular;
 pub mod version;
 
 pub use anchor_sink::{
@@ -49,6 +53,10 @@ pub use batch::{
     verify_two_tier,
 };
 pub use chain::{Policy, StrataAnchor, StrataChain, StrataError};
+pub use composite::{
+    ChildRef, ParentChildProof, composite_state_fields, composite_state_root, link_two_tier,
+    prove_child,
+};
 pub use derived_index::{
     ColumnarIndex, CompositeFieldProof, DerivedIndex, InMemoryVersionLog, LogError, Query, Seq,
     VersionLog, brute_force, verify_composite,
@@ -56,6 +64,7 @@ pub use derived_index::{
 pub use field_policy::{FieldAuthProof, FieldPolicy};
 pub use refid::gen_ref_id;
 pub use state::{FieldProof, build_state_root, prove_field, verify_field_proof};
+pub use tabular::{ColumnSumTree, RowSumProof, verify_row_sum, verify_row_sum_range};
 pub use version::{Hash32, StrataVersion};
 
 /// Re-export tiện dụng từ sub-primitive nền.
