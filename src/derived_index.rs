@@ -193,9 +193,8 @@ pub fn brute_force<L: VersionLog>(log: &L, q: &Query) -> Vec<Seq> {
 /// Mang FULL version core để verifier tự tính `version_hash` và bind `state_root`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositeFieldProof {
-    /// Vị trí version trong lịch sử.
-    pub seq: Seq,
     /// Version core đã ký (verifier tính `version_hash` + đọc `state_root` từ đây).
+    /// Vị trí trong lịch sử = `version.seq` (không giữ field `seq` rời — #9).
     pub version: StrataVersion,
     /// Tầng trong: `(key, value) ∈ state_root(v_k)`.
     pub field_proof: FieldProof,
@@ -208,7 +207,8 @@ pub struct CompositeFieldProof {
 /// Verify bằng chứng hai tầng dưới một `root` đã neo (tin cậy). Nối:
 /// 1. `verify_field_proof` — (key,value) ∈ `field_proof.state_root`;
 /// 2. `field_proof.state_root == version.state_root` (đã băm vào `version_hash`);
-/// 3. `version.seq == seq` + `verify_version(root, version_hash, seq, size, inclusion)`.
+/// 3. `verify_version(root, version_hash, version.seq, size, inclusion)` — vị trí lấy
+///    thẳng từ `version.seq` (đã băm vào `version_hash`), không còn field `seq` rời.
 ///
 /// Cả ba đúng ⇒ value của trường tại version k được cam kết dưới `root`. INV-E6 giữ:
 /// mỗi tầng độc lập, không lộ trường khác.
@@ -219,11 +219,8 @@ pub fn verify_composite(root: Hash32, p: &CompositeFieldProof) -> bool {
     if p.field_proof.state_root != p.version.state_root {
         return false;
     }
-    if p.version.seq != p.seq {
-        return false;
-    }
     let vh = p.version.version_hash();
-    StrataChain::verify_version(root, &vh, p.seq, p.mmr_size, &p.inclusion)
+    StrataChain::verify_version(root, &vh, p.version.seq, p.mmr_size, &p.inclusion)
 }
 
 /// Log daemon in-memory: version đã ký + `state_fields` off-chain + MMR tái dựng.
@@ -309,7 +306,6 @@ impl InMemoryVersionLog {
         let field_proof = prove_field(fields, key)?;
         let inclusion = self.mmr.0.prove(idx);
         Some(CompositeFieldProof {
-            seq,
             version,
             field_proof,
             inclusion,
@@ -559,9 +555,9 @@ mod tests {
         tv.field_proof.value = b"HACK".to_vec();
         assert!(!verify_composite(root, &tv));
 
-        // Đổi seq claim → inclusion fail.
+        // Đổi seq claim (qua version.seq) → version_hash đổi + vị trí lệch → inclusion fail.
         let mut ts = good.clone();
-        ts.seq = 0;
+        ts.version.seq = 0;
         assert!(!verify_composite(root, &ts));
     }
 
