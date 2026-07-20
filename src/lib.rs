@@ -36,6 +36,7 @@ pub mod derived_index;
 pub mod field_policy;
 pub mod privacy;
 pub mod refid;
+pub mod settlement;
 pub mod state;
 pub mod tabular;
 pub mod version;
@@ -63,6 +64,10 @@ pub use derived_index::{
 };
 pub use field_policy::{FieldAuthProof, FieldPolicy};
 pub use refid::gen_ref_id;
+pub use settlement::{
+    ChainQuery, PayloadError, SettlementRecord, SettlementSink, SinkConfig, SubmitOutcome,
+    Submitter, decode_records, decode_records_lenient, encode_records, publish_with_retry,
+};
 pub use state::{FieldProof, build_state_root, prove_field, verify_field_proof};
 pub use tabular::{ColumnSumTree, RowSumProof, verify_row_sum, verify_row_sum_range};
 pub use version::{Hash32, StrataVersion};

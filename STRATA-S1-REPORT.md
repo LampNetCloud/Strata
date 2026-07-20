@@ -101,7 +101,7 @@ Enforce INV-E7 on-chain đã hiện thực ở **VeData/Code** (đúng ranh gi�
 
 - ~~Deploy validator lên Preview + spend-recreate THẬT~~ → ✅ **XONG 2026-07-06** (§4.1: happy `1→2` OK / reject `1→0` node từ chối, tx hash Preview thật).
 - **Tx-builder Mosaic "proper" (TS Lucid/CSL)** trong VeData/Code thay PoC cardano-cli; `MosaicBackend` (Rust) gọi sang.
-- **Backend mặc định = Settlement** (anh Đức chốt tại PR #8: label 1234, CBOR raw `{t:1, a:[4]}`; Mosaic CIP-68 cho hồ sơ giá trị cao). **Codec Settlement (review #5) — CHƯA graft, follow-up** (tham chiếu rev `72f7135` thư mục `anchor-sink/`): đưa CODEC vào cùng lớp thuần (chunk 64B bijective + decode lenient), phần I/O Blockfrost/submitter tách crate riêng.
+- **Backend mặc định = Settlement** (anh Đức chốt tại PR #8: label 1234, CBOR raw `{t:1, a:[4]}`; Mosaic CIP-68 cho hồ sơ giá trị cao). **Codec Settlement (review #5)** → ✅ **XONG 2026-07-20** — đã graft, xem **§9**.
 
 ---
 
@@ -141,6 +141,26 @@ Anh Đức rà sâu vòng nữa `anchor_sink.rs` + `chain.rs::prove_version_at @
 **Kết quả sau vá vòng 2:** `cargo test` **87 lib (+prove_version_at_boundaries) + 12 anchor_sink (+resolve_warns…) + 12 integration = 111 pass / 0 fail**, clippy **0 warning**, `anchor_sink.rs`/`chain.rs`/`tests` fmt clean (`derived_index.rs` báo fmt-diff = rustfmt-version local lệch file đã-merge của main, không thuộc PR này). `Cargo.lock` gitignored (không track — không sync lock).
 
 **PR follow-up (codec Settlement + hợp nhất AnchoredTable):** gộp mục 5 vòng-1 + mục 1 vòng-2 — đưa CODEC Settlement (label 1234, CBOR raw `{t,a}`, chunk 64B bijective + decode lenient) vào cùng lớp thuần; đường Settlement dùng chung `AnchoredTable`/`verify_resolved`/`prove_version_at`; I/O Blockfrost/submitter tách crate riêng. Tham chiếu rev `72f7135` thư mục `anchor-sink/`. Hợp đồng codec như PR #8 ghi.
+
+---
+
+## 9. Follow-up: Codec Settlement + hợp nhất `AnchoredTable` (2026-07-20)
+
+Gộp **mục 5 vòng-1** + **mục 1 vòng-2** (§7/§8) thành một PR — graft từ rev tham chiếu `72f7135` thư mục `anchor-sink/`, KHÔNG tái nhập bảng song song. Branch `thinh/strata-settlement-codec`.
+
+**Đã làm — 3 mảnh theo đúng hợp đồng PR #8:**
+
+| # | Mảnh | Nơi | Ghi chú |
+|---|---|---|---|
+| 1 | **Codec Settlement** — label 1234, CBOR raw `[{ "t":int, "a":[…] }]`, `t=1` anchor 4 trường canonical + `t=2` key-rotation (dành chỗ) | **crate lõi** `src/settlement.rs` (lớp THUẦN) | `encode_records`/`decode_records`/`decode_records_lenient`; **chunk 64B bijective** (≤64B một bytestring, >64B mảng chunk mọi chunk-giữa đúng 64B); decode STRICT (round-trip) vs LENIENT (`resolve` không tin cậy — record rác/`t` lạ/dup-key/foreign label-1234 bị BỎ QUA, không DoS được). Enum đổi tên `AnchorRecord`→**`SettlementRecord`** tránh đụng `AnchorRecord` (dòng `AnchoredTable`). Dùng `ciborium` (thuần, no-I/O). |
+| 2 | **`SettlementSink`** generic `<ChainQuery, Submitter>` + `publish_batch`/`resolve`/`publish_with_retry` | **crate lõi** `src/settlement.rs` | Trust-pin publisher (chỉ tin tx có publisher trong **INPUT**), idempotency §8.1b (đọc seq trước build; `==`→`Ok(None)`, `>`→`RollbackAttempt`), `DatumTooLarge` guard, retry chỉ `Network` với **sleep injectable** (đồng bộ style `MosaicAnchorSink`). **HỢP NHẤT:** `resolve()` trả `StrataAnchor` chuẩn → verify ngược dùng CHUNG `AnchoredTable`/`verify_resolved`/`prove_version_at`, KHÔNG bảng `AnchoredLog` song song. |
+| 3 | **I/O tách crate riêng** `lampnet-anchor-io` | member workspace mới `anchor-io/` | `BlockfrostQuery` (impl `ChainQuery`, reqwest blocking + rustls, Debug redact token) + `TsSubmitter` (impl `Submitter`, child-process `submitter/submit.ts` Lucid Evolution, secret chỉ qua ENV) + `submitter/{submit.ts,package.json}` port nguyên từ rev. Repo chuyển **single-crate → workspace** (root package giữ nguyên `lampnet-strata`, thêm `[workspace] members=["anchor-io"]`). Lõi KHÔNG kéo `reqwest`/process. |
+
+**Kết quả:** `cargo test --workspace` = **146 pass / 0 fail** (lõi 116 unit +19 settlement gồm codec+sink mock; anchor_sink 12; integration 12; **`tests/settlement.rs` 2** hợp-nhất end-to-end trên chain ký thật: neo Settlement → `resolve` → `verify_resolved` dưới `AnchoredTable` chung, gồm case neo seq CŨ verify ở `mmr_size` lúc-neo; anchor-io 4). `cargo clippy --workspace --all-targets` **0 warning**; `src/settlement.rs`/`tests/settlement.rs`/`anchor-io` fmt clean (`derived_index.rs` vẫn báo fmt-diff pre-existing như §8 — không thuộc PR này).
+
+**Byte-consistency Rust↔TS:** `submit.ts::chunk64` khớp `encode_bytes_chunked` (≤64B không chunk); metadatum `[{t,a}]` thứ tự key cố định `t` rồi `a`. Đường round-trip này đã nghiệm thu on-chain T1–T6 Preview tại rev `72f7135` (báo cáo cũ); port giữ nguyên logic.
+
+**Chưa làm (không thuộc hợp đồng follow-up này):** chạy lại T1–T6 on-chain với crate mới (cần `npm install` submitter + token GreenSun + ví seed — việc vận hành, đường code không đổi so rev đã nghiệm thu).
 
 ---
 

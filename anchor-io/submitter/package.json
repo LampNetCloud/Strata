@@ -1,0 +1,11 @@
+{
+  "name": "anchor-sink-submitter",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Submitter tx metadata label 1234 cho S1 AnchorSink (Strata). Stdin/stdout JSON; secret chỉ qua env.",
+  "dependencies": {
+    "@lucid-evolution/lucid": "^0.4.16",
+    "tsx": "^4.19.2"
+  }
+}
