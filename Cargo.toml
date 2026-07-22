@@ -1,5 +1,5 @@
 [workspace]
-members = ["anchor-io"]
+members = ["anchor-io", "node"]
 
 [package]
 name = "lampnet-strata"

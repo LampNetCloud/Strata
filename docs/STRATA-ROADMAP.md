@@ -1,6 +1,6 @@
 # Strata — Roadmap thực thi
 
-> **Repo:** `LampNetCloud/Strata` (Rust) · **Cập nhật:** 2026-07-20
+> **Repo:** `LampNetCloud/Strata` (Rust) · **Cập nhật:** 2026-07-22
 > **Strata** = tầng lưu trữ tiến hóa của MagicLamp: chuỗi version hash-link + MMR + `state_root` field-Merkle + anchor on-chain + audit-log.
 > **Spec nguồn:** `spec/_CONTRACT.md` (khế ước giao diện) + `spec/Strata-Feat/Math/Tech/API.md`.
 > **Theo dõi công việc:** issue `#1` (S1) · `#2` (S2) · `#3` (S3).
@@ -26,6 +26,7 @@
 - **PR #10** (S4 Composite + Tabular Merkle Sum Tree) — ✅ **MERGED 2026-07-16** (squash `d899ae2`). Cứu từ nhánh agent cũ; review đạt (build 0 warning, 121 xanh, domain-tag `LN/STRATA/sum/*` tách miền, red-team giả child_ref/ref_id). Nit `verify_row_sum` để lại.
 - **Issue #9 / PR #11** (refactor `derived_index`) — ✅ **MERGED 2026-07-16** (squash `ece19f7`). Điểm (1): gỡ field `seq` thừa trong `CompositeFieldProof`, `verify_composite` dùng thẳng `version.seq`. Điểm (2) `prove_field_at_version` để **backlog** (chưa caller thật cần). Issue đã đóng.
 - **S1 follow-up — Codec Settlement + hợp nhất `AnchoredTable`** — ✅ **CODE-COMPLETE 2026-07-20** (branch `thinh/strata-settlement-codec`, `STRATA-S1-REPORT.md §9`). Graft từ rev `72f7135`: (1) codec label 1234 CBOR-raw `[{t,a}]` chunk-64B-bijective + decode strict/lenient vào **crate lõi** `src/settlement.rs` (enum `SettlementRecord`); (2) `SettlementSink` thuần generic dùng CHUNG `AnchoredTable`/`verify_resolved` (KHÔNG `AnchoredLog` song song); (3) I/O Blockfrost + `TsSubmitter` tách **crate riêng** `lampnet-anchor-io` (repo → workspace). `cargo test --workspace` **146 pass**, clippy 0 warning. Lấp nốt "việc chính còn lại của S1".
+- **S5 — Daemon + HTTP §3 (`lampnet-strata-node`)** — ✅ **CODE-COMPLETE 2026-07-22** (branch `thinh/strata-s5-node-http`, `STRATA-S5-REPORT.md`). Workspace member thứ ba `node/`: 8 route §3 + bảng lỗi §3.1 đủ 11 biến thể, `KeyRegistry` (CHỐT-5), `ChainStore` khoá-theo-ref, cắm `AnchorSink` §4.1. `cargo test --workspace` **163 pass** (17 mới), clippy 0 warning; **đã chạy binary thật + smoke `curl` 8/8**. Lấp mảnh "ráp daemon thật + HTTP §3" treo từ S2.
 - `lampnet-merkle-anchor` tách khỏi repo private `lampnet-hivemind` sang repo riêng **`LampNetCloud/Anchor`**; `Cargo.toml` repoint sang Anchor + pin git-rev. Không còn phụ thuộc quyền đọc `lampnet-hivemind`.
 - `cargo build` / `cargo test` chạy được với Anchor git+rev — **65 test pass**, không đổi code Strata.
 
@@ -40,11 +41,17 @@
 | **S3** | BatchPolicy / checkpoint sub-MMR (4 tầng lưu) | Rust | P1 | ✅ **CODE-COMPLETE + VÁ 2 VÒNG REVIEW** (`STRATA-S3-REPORT.md`) — `src/batch.rs`: `Checkpoint`(sub-MMR)+`BatchPolicy`/`should_close`+`EpochAccumulator`+blob canonical(`serialize/parse_batch`)+`TwoTierProof`/`verify_two_tier(&StrataVersion)`. **PR #7** (base main, rebase sau #8). Vòng 1 (07-08): 8 mục `flush_max_age`+watermark+`max_entries`@push+payload-guard. Vòng 2 + **Addendum S3.1** (07-09): DoS `parse_batch` cap + `serialize_batch`→Result + header version byte + `entry_seq` LIÊN TỤC(gap) + arrival-ts + `max_epoch_bytes` van b′. **98 pass / clippy sạch / fmt clean.** ✅ **MERGED 2026-07-09.** |
 | **S4** | Composite Strata (rừng cha–con) + Tabular Merkle Sum Tree | Rust | P1 | ✅ **CODE-COMPLETE + MERGED 2026-07-16** (`STRATA-S4-REPORT.md`) — `src/composite.rs`: `ChildRef`/`ParentChildProof`+`prove_child`/`link_two_tier`/`composite_state_root` (con = field `role→child_ref_id` 32B thuần trong `state_root` cha, **không primitive mới**, tái dùng field-proof; `link_two_tier` chỉ kiểm bước NỐI, bind gốc-con qua anchor con riêng). `src/tabular.rs`: `ColumnSumTree`/`RowSumProof`+`verify_row_sum`/`verify_row_sum_range` (bọc `sumtree` Anchor, tag `LN/STRATA/sum/{leaf,node}/v1` tách miền khỏi mmr/state/ver; `u128` tránh float). **10 test mới** (composite 4 + tabular 6, gồm red-team giả child_ref/ref_id + tamper value/range). **PR #10** review đạt → merge. Nit `verify_row_sum` (đưa proof `prove_range` b>a+1 vào → false, an toàn) để lại. |
 
+| **S5** | Daemon + HTTP API §3 (`lampnet-strata-node`) | Rust (axum) | P1 | ✅ **CODE-COMPLETE 2026-07-22** (`STRATA-S5-REPORT.md`) — crate `node/`: **8 route §3** (`create`/`version`/`event`/`head`/`version?at`/`proof/version`/`proof/field`/`anchor`) + **bảng lỗi §3.1 đủ 11 biến thể** `StrataError` + 6 lỗi mức-cửa; `trait KeyRegistry` `Did→pk` (CHỐT-5, 424 fail-closed); `ChainStore` khoá **theo từng ref** + giữ `state_fields` theo seq để dựng `prove_field` lịch sử (`?seq=`); cắm `AnchorSink` §4.1 (`DisabledSink`/`MemorySink`/`FailingSink`), **KHÔNG viết backend mới**. Thứ tự neo **kiểm → đẩy → chốt** (gọi `publish_anchor()` trước rồi backend hỏng sẽ làm ref chết vĩnh viễn — có test riêng). Ranh giới §0/§8.4 giữ nguyên: daemon không băm, không ký, không dựng tx. **163 pass workspace (17 mới) / clippy 0 warning / fmt clean**, + smoke `curl` 8/8 trên binary thật. Còn: bền vững (in-memory), cắm backend neo thật, ghép S3/S4 + `DerivedIndex` vào đường đọc. |
+
 **Thứ tự phụ thuộc:** S1 (cố định byte-layout) → S3 (phụ thuộc S1 sink + tag) · S2 độc lập (build đã thông) · S4 độc lập, dựng trên S-state + `sumtree` Anchor (không phụ thuộc S1/S3).
 
 ---
 
-## 3. Điểm cần đối chiếu trước khi cố định byte-layout S1
+## 3. Điểm cần đối chiếu trước khi cố định byte-layout S1 — ✅ ĐÃ CHỐT (lưu vết)
+
+> **Cả hai điểm dưới đây anh Đức đã chốt ở comment issue #1 (2026-07-04) và S1/S3 đã code+merge theo đó** — giữ lại làm lưu vết, không còn là việc treo:
+> 1. **Byte-layout anchor → phương án A** (giữ `_CONTRACT.md`): `anchor = (ref_id, head_version_hash, mmr_root, seq)` = 104 byte. `state_root` đã cam-kết-bắc-cầu qua `head_version_hash`, không thêm 32 byte on-chain.
+> 2. **Tag checkpoint:** trong cài đặt thật, "checkpoint sub-MMR entry" và "batch entry gộp lô" là **một** khái niệm (`batch.rs`), nên chỉ dùng **một** tag `LN/STRATA/entry/v1` — bảng CHỐT-2 giữ nguyên, không cần thêm tag thứ hai.
 
 Mô tả trong comment issue lệch với `spec/_CONTRACT.md` hiện tại — cần thống nhất bản chuẩn trước khi cố định datum neo.
 
