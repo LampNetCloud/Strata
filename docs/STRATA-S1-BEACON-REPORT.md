@@ -74,19 +74,35 @@ cargo test --workspace → 4 + 116 (1 ignored: live-Preview có sẵn) + 12 + 12
 cargo clippy --workspace --tests → sạch
 ```
 
-## 3. HOÃN — WRITE-SIDE (cần test on-chain Preview thật, chưa merge như end-to-end)
+## 3. WRITE-SIDE — CODE + TYPECHECK XONG, LIVE Preview là bước kế
 
-Read-side đủ để đóng **DoS đọc/verify** và un-ignore test, NHƯNG `beacon_mode` chỉ **end-to-
-end** khi write-side biết mint/di chuyển beacon:
-- `submitter/submit.ts`: lần đầu **mint** beacon (`sig(publisher)`, assetName=ref_id) tới
-  UTxO anchro; mỗi lần sau **tiêu UTxO beacon cũ + gửi beacon** sang UTxO anchor mới cùng
-  metadata. `publish_batch`: nhiều ref_id di chuyển nhiều beacon trong 1 tx.
-- Bẫy đã biết (memory): bytestring >64B phải chunk; dùng slot-tip node cho validity window
-  (host lệch đồng hồ); thứ tự neo kiểm→đẩy→chốt.
+`beacon_mode` end-to-end cần write-side biết mint/di chuyển beacon. **Đã code + verify tĩnh**
+(commit `4048668`):
+- **`submitter/submit.ts`** (Lucid Evolution):
+  - beacon-walk: mỗi anchor `t=1` → `unit = policyId ‖ ref_id`; chưa có → `mintAssets` (native
+    policy `sig(publisher)` qua `scriptFromNative`) + `addSignerKey`; đã có →
+    `collectFrom` UTxO giữ beacon; luôn gửi beacon (1 beacon / 1 output) sang UTxO mới mang
+    metadata anchor. Native `sig` policy **KHÔNG cần validity-interval** ⇒ tránh bẫy lệch
+    đồng hồ host. Chunk 64B giữ nguyên.
+  - op `"policy_id"`: suy `policyId` từ `address` (offline, không secret) hoặc từ ví.
+  - `initWallet()` tách dùng chung; response beacon kèm `policy_id`.
+- **`anchor-io/lib.rs`**: `TsSubmitter.beacon` → gắn `"beacon":true` vào request JSON.
+- **`submitter/tsconfig.json` + script `typecheck`** (`tsc --noEmit`) — đóng gap CI API-drift
+  Lucid (bài học tx-builder-ci-gap).
 
-⚠️ **KHÔNG merge read-side như thể beacon_mode đã chạy end-to-end** trước khi write-side +
-smoke Preview thật xong (bài học Hydra L1-fallback-stub: đường "chỉ trông như tồn tại").
-`beacon_mode` mặc định `None` nên nhánh này **không phá tương thích** bản hiện hành.
+### Kiểm chứng tĩnh (chưa on-chain)
+```
+cargo test --workspace           → 149 pass (field TsSubmitter.beacon)
+submit.ts  tsc --noEmit          → exit 0 (khớp type Lucid thật: mintAssets/attach.MintingPolicy/
+                                    pay.ToAddress/addSignerKey/utxosAtWithUnit/selectWallet.fromSeed)
+scriptFromNative+mintingPolicyToId → policyId 28B (56 hex) OK; paymentCredentialOf exported/callable
+```
+
+### ⏳ LIVE Preview smoke (bước kế — cần creds preview ở A/VeData/.env)
+Kịch bản: (1) `op:policy_id` lấy address+policyId; (2) submit beacon `seq=0` (mint) → txid;
+(3) chờ confirm; (4) `resolve` (BlockfrostQuery beacon mode) đọc lại đúng anchor; (5) submit
+`seq=1` (di chuyển beacon) → resolve trả `seq=1`. ⚠️ **CHƯA merge như end-to-end** trước khi
+smoke này xanh (bài học Hydra L1-fallback-stub). `beacon_mode` mặc định off nên nhánh an toàn.
 
 ## 4. ĐỀ XUẤT SPEC — chờ anh Đức chốt (miền spec)
 
@@ -119,7 +135,7 @@ content + commitment" của Settlement (không thêm validator, không đội da
 | PR #17 regression test | ✅ MERGED (`11e2f64`) |
 | #14 quyết định A-opt | ✅ chốt (comment issue #14) |
 | #14 read-side (resolve chống-flood) | ✅ CODE + test xanh (nhánh `thinh/strata-14-beacon-resolve`) |
-| #14 write-side (beacon-walk submit) | ⏳ HOÃN — cần Preview thật |
+| #14 write-side (beacon-walk submit) | ✅ CODE + `tsc` xanh (`4048668`); ⏳ LIVE Preview smoke bước kế |
 | Đề xuất spec §8.1(d) + hiệu chỉnh :504 | ⏳ chờ anh Đức chốt |
 | #15 spec payload | ⏳ anh Đức |
 | #16 code-only cleanup | ⏳ hoãn (sau #14) |
