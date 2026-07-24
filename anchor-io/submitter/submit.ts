@@ -220,13 +220,36 @@ async function main(): Promise<void> {
     ok({ txid, address });
   } catch (e) {
     const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+    const err = e as { code?: unknown; status?: unknown; statusCode?: unknown };
+    // Tín hiệu CÓ CẤU TRÚC (code lỗi Node / HTTP status) ưu tiên hơn khớp-chuỗi (#16):
+    // msg hay lẫn "500"/"429" từ lovelace/slot → regex bare `50\d`/`429` gán nhầm một
+    // Rejected TẤT ĐỊNH thành Network → Rust retry một lỗi không-retryable.
+    const code = typeof err.code === "string" ? err.code : "";
+    const status =
+      typeof err.status === "number"
+        ? err.status
+        : typeof err.statusCode === "number"
+          ? err.statusCode
+          : undefined;
+    const isNetCode = /^(ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EPIPE|UND_ERR)/.test(code);
+    const isNetStatus = status === 429 || (status !== undefined && status >= 500 && status <= 599);
+
+    // TẤT ĐỊNH (không retry) TRƯỚC → Network (retry) → Rejected (mặc định).
     if (/insufficient|not enough|exhausted|InputsExhausted|MissingInput/i.test(msg)) {
       fail("InsufficientAda", msg, { need: 0, have: 0 });
     }
     if (/maximum transaction size|MaxTxSize|too large|exceeds/i.test(msg)) {
       fail("DatumTooLarge", msg, { bytes: 0 });
     }
-    if (/fetch|network|timeout|ECONN|ENOTFOUND|50\d|429/i.test(msg)) {
+    // Network: code/status có cấu trúc, hoặc CỤM tường minh (word-boundary) — KHÔNG khớp
+    // bare "500"/"429" lẫn trong số tiền/slot.
+    if (
+      isNetCode ||
+      isNetStatus ||
+      /\bfetch failed\b|\bnetwork error\b|\btimed?\s?out\b|socket hang up|Too Many Requests|Service Unavailable|Bad Gateway|Gateway Timeout|\bETIMEDOUT\b|\bECONN\w*\b|\bENOTFOUND\b/i.test(
+        msg
+      )
+    ) {
       fail("Network", msg);
     }
     fail("Rejected", msg);
