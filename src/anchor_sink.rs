@@ -504,6 +504,11 @@ impl<B: MosaicBackend> MosaicAnchorSink<B> {
     ///
     /// (Trước là `new()`; đổi tên theo review anh Đức PR #6 vòng 2 mục 2 — rào chế độ
     /// không-xác-thực bằng tên hàm thay vì `#[deprecated]` để giữ clippy 0 warning.)
+    ///
+    /// `#[doc(hidden)]` (review #16): ẩn khỏi doc công khai để khó dùng nhầm ở production —
+    /// tăng cường name-guard sẵn có, KHÔNG đảo quyết định name-guard của anh Đức (không
+    /// `#[cfg(test)]`: hàm dùng ở integration test `tests/anchor_sink.rs`, gate sẽ phá build).
+    #[doc(hidden)]
     pub fn new_unverified_for_tests(backend: B) -> Self {
         Self {
             backend,
