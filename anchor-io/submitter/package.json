@@ -4,8 +4,15 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Submitter tx metadata label 1234 cho S1 AnchorSink (Strata). Stdin/stdout JSON; secret chỉ qua env.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
     "@lucid-evolution/lucid": "^0.4.16",
     "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
   }
 }

@@ -234,6 +234,10 @@ pub struct TsSubmitter {
     pub label: u64,
     /// Timeout chờ child (giây).
     pub timeout_secs: u64,
+    /// BẬT beacon-walk (issue #14): mỗi anchor mint/di chuyển beacon NFT
+    /// `unit = policyId ‖ ref_id` (native policy `sig(publisher)`). Phải khớp
+    /// `SinkConfig::beacon_policy` mà `resolve` dùng. `false` = tx metadata-only (legacy).
+    pub beacon: bool,
 }
 
 impl std::fmt::Debug for TsSubmitter {
@@ -272,7 +276,7 @@ impl Submitter for TsSubmitter {
                 }
             }
         }
-        let req = serde_json::json!({ "label": self.label, "records": recs });
+        let req = serde_json::json!({ "label": self.label, "records": recs, "beacon": self.beacon });
 
         let mut child = std::process::Command::new("npx")
             .args(["tsx", "submit.ts"])
@@ -394,6 +398,7 @@ mod tests {
             submitter_dir: PathBuf::from("/x/submitter"),
             label: 1234,
             timeout_secs: 60,
+            beacon: false,
         };
         let dbg = format!("{s:?}");
         assert!(dbg.contains("1234"));
@@ -408,6 +413,7 @@ mod tests {
             submitter_dir: PathBuf::from("/nonexistent-dir-xyz"),
             label: 1234,
             timeout_secs: 5,
+            beacon: false,
         };
         let a = lampnet_strata::chain::StrataAnchor {
             ref_id: [1; 32],
@@ -425,6 +431,7 @@ mod tests {
             submitter_dir: PathBuf::from("/x"),
             label: 1234,
             timeout_secs: 5,
+            beacon: false,
         };
         let a = lampnet_strata::chain::StrataAnchor {
             ref_id: [1; 32],

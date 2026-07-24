@@ -1,31 +1,44 @@
 /**
- * submit.ts — build + sign + submit tx metadata label 1234 (S1 AnchorSink, backend
- * Settlement) lên Cardano Preview qua Blockfrost + Lucid Evolution.
+ * submit.ts — build + sign + submit tx label 1234 (S1 AnchorSink, backend Settlement)
+ * lên Cardano Preview qua Blockfrost + Lucid Evolution.
  *
  * Giao thức: stdin nhận MỘT JSON request, stdout in MỘT dòng JSON response.
- *   req : { label: number, records: [ { t:1, ref_id:hex64, head_version_hash:hex64,
- *                                       mmr_root:hex64, seq:number }
- *                                   | { t:2, payload:hex } ] }
- *   resp: { ok:true, txid, address }
- *       | { ok:false, error_kind: "NotConfigured"|"Network"|"InsufficientAda"
- *                                 |"DatumTooLarge"|"Rejected", error }
+ *   req submit : { label:number, records:[Rec], beacon?:boolean }
+ *   req op     : { op:"policy_id", address?:string }   // suy policyId beacon, KHÔNG submit
+ *   Rec        : { t:1, ref_id:hex64, head_version_hash:hex64, mmr_root:hex64, seq:number }
+ *              | { t:2, payload:hex }
+ *   resp submit: { ok:true, txid, address, policy_id? }
+ *   resp op    : { ok:true, policy_id, address }
+ *              | { ok:false, error_kind:"NotConfigured"|"Network"|"InsufficientAda"
+ *                            |"DatumTooLarge"|"Rejected", error }
  *
  * Metadata layout (KHỚP payload.rs — CBOR raw bytes, KHÔNG JSON-hex):
- *   metadatum = [ { "t": int, "a": [...] } ]
- *   t=1: a = [ bytes32 ref_id, bytes32 head_version_hash, bytes32 mmr_root, int seq ]
+ *   metadatum = [ { "t":int, "a":[...] } ];  t=1: a=[b32 ref_id, b32 hvh, b32 mmr_root, int seq]
  *   bytes > 64B → mảng chunk canonical (mọi chunk trừ cuối đúng 64B).
+ *
+ * BEACON mode (beacon:true, issue #14): mỗi anchor t=1 gắn một beacon NFT
+ *   unit = policyId ‖ ref_id  (assetName = ref_id 32B; policy = native `sig(publisher)`).
+ *   Chưa có beacon → MINT; đã có → SPEND UTxO giữ beacon + gửi beacon sang UTxO mới mang
+ *   metadata anchro. `resolve` off-chain tra asset-index → miễn nhiễm flood-eviction.
  *
  * SECRET: VEDATA_WALLET_MNEMONIC + BLOCKFROST_TOKEN_GREENSUN chỉ đọc từ env.
  * TUYỆT ĐỐI không in ra stdout/stderr — mọi message lỗi đi qua redact() trước.
  */
 
-import { Lucid, Blockfrost } from "@lucid-evolution/lucid";
+import {
+  Lucid,
+  Blockfrost,
+  scriptFromNative,
+  mintingPolicyToId,
+  paymentCredentialOf,
+  type Script,
+} from "@lucid-evolution/lucid";
 
 type Rec =
   | { t: 1; ref_id: string; head_version_hash: string; mmr_root: string; seq: number }
   | { t: 2; payload: string };
 
-type Req = { label: number; records: Rec[] };
+type Req = { label: number; records: Rec[]; beacon?: boolean; op?: string; address?: string };
 
 // ---------------------------------------------------------------------------
 // Secret hygiene
@@ -47,6 +60,11 @@ function redact(s: string): string {
     if (norm !== sec) while (out.includes(norm)) out = out.replaceAll(norm, "[REDACTED]");
   }
   return out;
+}
+
+function ok(obj: Record<string, unknown>): never {
+  process.stdout.write(JSON.stringify({ ok: true, ...obj }) + "\n");
+  process.exit(0);
 }
 
 function fail(kind: string, msg: string, extra: Record<string, unknown> = {}): never {
@@ -80,6 +98,11 @@ function chunk64(b: Uint8Array): Uint8Array | Uint8Array[] {
   return out;
 }
 
+/** Native minting policy `sig(pkh)` cho beacon — publisher là người ký duy nhất. */
+function beaconPolicy(pkh: string): Script {
+  return scriptFromNative({ type: "sig", keyHash: pkh });
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const c of process.stdin) chunks.push(c as Buffer);
@@ -91,17 +114,33 @@ async function readStdin(): Promise<string> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const mnemonic = process.env.VEDATA_WALLET_MNEMONIC?.trim().replace(/\s+/g, " ");
-  const bfToken = process.env.BLOCKFROST_TOKEN_GREENSUN?.trim();
-  if (!mnemonic) fail("NotConfigured", "thiếu env VEDATA_WALLET_MNEMONIC");
-  if (!bfToken) fail("NotConfigured", "thiếu env BLOCKFROST_TOKEN_GREENSUN");
-
   let req: Req;
   try {
     req = JSON.parse(await readStdin()) as Req;
   } catch (e) {
     fail("Rejected", `request JSON hỏng: ${String(e)}`);
   }
+
+  // --- op: policy_id (suy policyId beacon; offline nếu có `address`) ---------
+  if (req.op === "policy_id") {
+    if (req.address && req.address.trim()) {
+      // Suy pkh từ địa chỉ công khai — KHÔNG cần ví/provider/secret.
+      let pkh: string;
+      try {
+        pkh = paymentCredentialOf(req.address.trim()).hash;
+      } catch (e) {
+        fail("Rejected", `address không hợp lệ: ${String(e)}`);
+      }
+      ok({ policy_id: mintingPolicyToId(beaconPolicy(pkh)), address: req.address.trim() });
+    }
+    // Không có address → suy từ ví (cần mnemonic + provider).
+    const { lucid, address } = await initWallet();
+    const pkh = paymentCredentialOf(address).hash;
+    ok({ policy_id: mintingPolicyToId(beaconPolicy(pkh)), address });
+    void lucid;
+  }
+
+  // --- submit -----------------------------------------------------------------
   if (!Number.isInteger(req.label) || req.label < 0) {
     fail("Rejected", "label phải là số nguyên không âm");
   }
@@ -132,28 +171,53 @@ async function main(): Promise<void> {
     fail("Rejected", `record t không hỗ trợ: ${JSON.stringify(r)}`);
   });
 
-  let lucid;
-  try {
-    lucid = await Lucid(
-      new Blockfrost("https://cardano-preview.blockfrost.io/api/v0", bfToken),
-      "Preview"
-    );
-  } catch (e) {
-    fail("Network", `khởi tạo Lucid/Blockfrost: ${String(e)}`);
-  }
-  lucid.selectWallet.fromSeed(mnemonic!); // CIP-1852 account 0, index 0 (base address)
-  const address = await lucid.wallet().address();
+  const { lucid, address } = await initWallet();
 
   try {
-    // Tx tối thiểu: 1 output tự-trả (Lucid tự lo input + change) + metadata.
-    const tx = await lucid
-      .newTx()
+    let tx = lucid.newTx();
+
+    if (req.beacon) {
+      // BEACON-WALK: mỗi anchor t=1 → mint/di chuyển beacon unit=policyId‖ref_id.
+      const pkh = paymentCredentialOf(address).hash;
+      const policy = beaconPolicy(pkh);
+      const policyId = mintingPolicyToId(policy);
+      const toMint: Record<string, bigint> = {};
+      let needPolicy = false;
+
+      for (const r of req.records) {
+        if (r.t !== 1) continue; // chỉ anchor có beacon (t=2 reserved)
+        const unit = policyId + r.ref_id.toLowerCase(); // assetName = ref_id hex (32B)
+        const held = await lucid.utxosAtWithUnit(address, unit);
+        if (held.length === 0) {
+          toMint[unit] = 1n; // beacon chưa tồn tại → mint
+          needPolicy = true;
+        } else {
+          tx = tx.collectFrom([held[0]]); // đã tồn tại → tiêu UTxO giữ beacon
+        }
+        // Gửi beacon (mới mint hoặc vừa tiêu) sang UTxO mới — 1 beacon / 1 output.
+        tx = tx.pay.ToAddress(address, { lovelace: 2_000_000n, [unit]: 1n });
+      }
+      if (needPolicy) {
+        tx = tx.mintAssets(toMint).attach.MintingPolicy(policy);
+        // Native `sig` policy → tx phải có chữ ký của pkh (ví ký, khai báo tường minh).
+        tx = tx.addSignerKey(pkh);
+      }
+      tx = tx.attachMetadata(req.label, metadata as never);
+
+      const completed = await tx.complete();
+      const signed = await completed.sign.withWallet().complete();
+      const txid = await signed.submit();
+      ok({ txid, address, policy_id: policyId });
+    }
+
+    // Không beacon: tx metadata tối thiểu (1 output tự-trả, Lucid tự lo input+change).
+    const completed = await tx
       .pay.ToAddress(address, { lovelace: 2_000_000n })
       .attachMetadata(req.label, metadata as never)
       .complete();
-    const signed = await tx.sign.withWallet().complete();
+    const signed = await completed.sign.withWallet().complete();
     const txid = await signed.submit();
-    process.stdout.write(JSON.stringify({ ok: true, txid, address }) + "\n");
+    ok({ txid, address });
   } catch (e) {
     const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
     if (/insufficient|not enough|exhausted|InputsExhausted|MissingInput/i.test(msg)) {
@@ -167,6 +231,26 @@ async function main(): Promise<void> {
     }
     fail("Rejected", msg);
   }
+}
+
+/** Khởi tạo Lucid (Preview) + chọn ví từ seed; trả địa chỉ base (CIP-1852 acct0/idx0). */
+async function initWallet(): Promise<{ lucid: Awaited<ReturnType<typeof Lucid>>; address: string }> {
+  const mnemonic = process.env.VEDATA_WALLET_MNEMONIC?.trim().replace(/\s+/g, " ");
+  const bfToken = process.env.BLOCKFROST_TOKEN_GREENSUN?.trim();
+  if (!mnemonic) fail("NotConfigured", "thiếu env VEDATA_WALLET_MNEMONIC");
+  if (!bfToken) fail("NotConfigured", "thiếu env BLOCKFROST_TOKEN_GREENSUN");
+  let lucid;
+  try {
+    lucid = await Lucid(
+      new Blockfrost("https://cardano-preview.blockfrost.io/api/v0", bfToken),
+      "Preview"
+    );
+  } catch (e) {
+    fail("Network", `khởi tạo Lucid/Blockfrost: ${String(e)}`);
+  }
+  lucid.selectWallet.fromSeed(mnemonic!);
+  const address = await lucid.wallet().address();
+  return { lucid, address };
 }
 
 main().catch((e) => {
