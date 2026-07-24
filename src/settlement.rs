@@ -43,8 +43,13 @@ pub const METADATA_BYTES_MAX: usize = 64;
 // Quy tắc chunk 64B (giới hạn bytestring metadata Cardano):
 // - bytes ≤ 64B → MỘT bytestring (KHÔNG được chunk — chống malleability);
 // - bytes > 64B → mảng chunk, mọi chunk trừ chunk cuối PHẢI đúng 64B, chunk cuối
-//   1..=64B. Decode từ chối mọi chunking khác → một dãy bytes chỉ có ĐÚNG MỘT
-//   biểu diễn hợp lệ (bijection, chặn đầu độc bằng biến thể encode).
+//   1..=64B. Decode từ chối mọi chunking khác → **canonical ở tầng CẤU TRÚC record**
+//   (chunking + map đúng-2-entry + chống dup-key). LƯU Ý (không phải bijection toàn phần):
+//   KHÔNG đảm bảo canonical CBOR nguyên thuỷ — int non-minimal / indefinite-length / rác
+//   đuôi vẫn decode ra CÙNG record qua ciborium. Vô hại vì trust đến từ **pin
+//   publisher-input**, KHÔNG từ băm bytes metadata (không consumer nào hash metadatum làm
+//   định-danh). Nếu sau này cần bijection thật: thêm kiểm minimal-encoding + test-vector
+//   "2 encoding tương đương → từ chối 1".
 //
 // Decode khoan dung có kiểm soát: record `t` lạ → BỎ QUA (forward-compat); record `t=1`
 // NHƯNG sai hình dạng → LỖI ở chế độ strict, hoặc bỏ qua ở chế độ resolve (kẻ lạ không
