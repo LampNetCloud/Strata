@@ -179,6 +179,21 @@ impl ChainQuery for BlockfrostQuery {
         Ok(out)
     }
 
+    fn asset_latest_tx(&self, unit: &str) -> Result<Option<String>, AnchorError> {
+        // /assets/{unit}/transactions?order=desc → tx đụng asset, MỚI→CŨ. Phần tử đầu =
+        // lần di chuyển beacon gần nhất. 404 = asset chưa từng tồn tại → chưa neo.
+        let Some(v) =
+            self.get_json(&format!("/assets/{unit}/transactions?order=desc&count=1&page=1"))?
+        else {
+            return Ok(None);
+        };
+        let first = v.as_array().and_then(|items| items.first());
+        Ok(first
+            .and_then(|it| it.get("tx_hash"))
+            .and_then(|h| h.as_str())
+            .map(|s| s.to_string()))
+    }
+
     fn tx_metadata_cbor(&self, txid: &str, label: u64) -> Result<Option<Vec<u8>>, AnchorError> {
         let Some(v) = self.get_json(&format!("/txs/{txid}/metadata/cbor"))? else {
             return Ok(None);
