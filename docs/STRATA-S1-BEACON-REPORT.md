@@ -98,11 +98,23 @@ submit.ts  tsc --noEmit          → exit 0 (khớp type Lucid thật: mintAsset
 scriptFromNative+mintingPolicyToId → policyId 28B (56 hex) OK; paymentCredentialOf exported/callable
 ```
 
-### ⏳ LIVE Preview smoke (bước kế — cần creds preview ở A/VeData/.env)
-Kịch bản: (1) `op:policy_id` lấy address+policyId; (2) submit beacon `seq=0` (mint) → txid;
-(3) chờ confirm; (4) `resolve` (BlockfrostQuery beacon mode) đọc lại đúng anchor; (5) submit
-`seq=1` (di chuyển beacon) → resolve trả `seq=1`. ⚠️ **CHƯA merge như end-to-end** trước khi
-smoke này xanh (bài học Hydra L1-fallback-stub). `beacon_mode` mặc định off nên nhánh an toàn.
+### ✅ LIVE Preview smoke — ĐÃ CHẠY THẬT ĐẦU-CUỐI (2026-07-24)
+Creds preview đọc tại chỗ `A/VeData/.env` (map `oMNEMONICpreview`/`oBLOCKFROST_API_KEY_preview`
+→ env submit.ts; KHÔNG in secret). `anchor-io/examples/resolve_beacon.rs` gọi
+`SettlementSink::resolve` beacon mode qua `BlockfrostQuery` thật.
+
+- **policyId** = `87935847c3ba708c26525c8b8dea5157f7bea139395349f4af7252f4` (native `sig(publisher)`).
+- **publisher** = `addr_test1qptpgpr555n7ge2mdgu9dmwnhvlj39uaw4sy5d4g94x9zawtm59cnx5tl3vaknp89pttmvu89tgk20rlv4732shqyflq2kgt84`.
+- **ref_id test** = `1400beac…1400beac`.
+
+| Bước | Tx (Preview) | resolve đọc lại |
+|---|---|---|
+| MINT beacon seq=0 (hvh=22.., mmr=33..) | `41cffc9f415225849897404b3ac2e519c7b1e7c7721e030e2ebce22e10f8bcf7` | **seq=0**, hvh/mmr khớp ✓ |
+| MOVE beacon seq=1 (spend UTxO cũ + đẩy tới; hvh=44.., mmr=55..) | `95a6ff00c7eec89856f227909412f3fe438467eaf05afcfd3357902c822baf38` | **seq=1**, hvh/mmr khớp ✓ |
+
+⟹ Toàn bộ vòng đời **mint → walk → resolve-theo-asset** chạy thật, `resolve` bám đúng latest.
+Chống-flood là **bản chất** (kẻ lạ không mint/di chuyển được NFT — không cần flood thật để
+chứng minh; unit test `resolve_must_not_be_blinded_by_flood` đã chốt logic). KHÔNG còn là stub.
 
 ## 4. ĐỀ XUẤT SPEC — chờ anh Đức chốt (miền spec)
 
@@ -135,7 +147,7 @@ content + commitment" của Settlement (không thêm validator, không đội da
 | PR #17 regression test | ✅ MERGED (`11e2f64`) |
 | #14 quyết định A-opt | ✅ chốt (comment issue #14) |
 | #14 read-side (resolve chống-flood) | ✅ CODE + test xanh (nhánh `thinh/strata-14-beacon-resolve`) |
-| #14 write-side (beacon-walk submit) | ✅ CODE + `tsc` xanh (`4048668`); ⏳ LIVE Preview smoke bước kế |
+| #14 write-side (beacon-walk submit) | ✅ CODE + `tsc` xanh + **LIVE Preview mint→walk→resolve seq0→seq1** (tx `41cffc9f`, `95a6ff00`) |
 | Đề xuất spec §8.1(d) + hiệu chỉnh :504 | ⏳ chờ anh Đức chốt |
 | #15 spec payload | ⏳ anh Đức |
 | #16 code-only cleanup | ⏳ hoãn (sau #14) |
