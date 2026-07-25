@@ -170,3 +170,41 @@ byte-layout nào đã neo, nên đổi sau vẫn rẻ):
   composite/tabular chưa có route — §3 cũng chưa đặc tả route cho chúng.
 - **`DerivedIndex` (S2)** chưa gắn vào đường đọc: các route hiện quét thẳng chain (đúng kết quả,
   chưa tối ưu). §7.5 cấm index ghi ngược nên việc gắn là thuần tăng tốc đọc.
+
+---
+
+## 8. Land lên main (2026-07-25)
+
+Nhánh viết xong 07-22, main đi tiếp 4 lần trong lúc chờ (PR #17 test regression flood, #20 gom
+docs, #22 dọn audit #16). Trước khi merge đã rebase lên `1b18c6d` và chạy lại toàn bộ.
+
+**Conflict GitHub báo là hình thức.** `mergeable_state: dirty` chỉ vì PR #20 dời
+`STRATA-ROADMAP.md` → `docs/` sau khi nhánh này tách ra. Rebase local nhận rename, không có một
+hunk conflict nào.
+
+**Kiểm chứng lại trên base mới:**
+
+| Hạng mục | Kết quả |
+|---|---|
+| `cargo test --workspace` | **164 pass / 0 fail** (16 test HTTP của node giữ nguyên) |
+| `cargo clippy --workspace --all-targets` | **0 warning** |
+| `cargo fmt -p lampnet-strata-node --check` | clean |
+
+Repo không có workflow CI nào, nên "no checks reported" trên PR là bình thường — kiểm chứng
+hoàn toàn dựa vào chạy local, ghi rõ để lần sau không ai đọc nhầm thành CI xanh.
+
+**Ba điểm dọn trước khi land:**
+
+1. `STRATA-S5-REPORT.md` → `docs/` cho khớp convention PR #20 (báo cáo viết trước lần dời đó).
+2. Gỡ `log = "0.4"` khỏi `node/Cargo.toml` — khai mà không có một dòng `log::` nào.
+3. `proof_field` nhận `Query<SeqQuery>` **trần**, nên `?seq=<không phải số>` rơi về format lỗi mặc
+   định của axum — lệch đúng mục tiêu "client chỉ phải hiểu MỘT format" mà chính báo cáo này đặt
+   ra. Đã bọc `Result` như `version_at`, thêm assertion vào
+   `malformed_inputs_are_400_in_our_error_format`.
+
+**Câu hỏi §6.2 (thông điệp ký của `event kind=audit`) tách thành issue #23.** Lý do tách riêng
+khỏi hai câu còn lại: §6.1 và §6.3 là lựa chọn code-side, sai thì sửa, không ai ở ngoài phụ
+thuộc. §6.2 thì khác — chữ ký audit **không đi vào leaf**, nên không root nào cam kết byte-layout
+đã ký; client ngoài phải tự đoán, và nếu sau này chốt khác thì chữ ký cũ chết **im lặng**, không
+test nào bắt được. Đây đúng hạng lỗi `stamp_id` lệch encoder (VeDataIO/Core#39), chỉ khác là lộ
+ra trước khi có client thứ hai.

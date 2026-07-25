@@ -24,7 +24,8 @@ fn main() {
     policy.allow(did, pk);
     let policy_hash = policy.policy_hash();
 
-    let value = hex::decode("aa00000000000000000000000000000000000000000000000000000000000001").unwrap();
+    let value =
+        hex::decode("aa00000000000000000000000000000000000000000000000000000000000001").unwrap();
     let fields = vec![(b"diagnosis".to_vec(), value.clone())];
     let content_cid = hex::decode("cafe").unwrap();
 

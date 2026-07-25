@@ -50,7 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    println!("strata-node nghe tại http://{addr} — route §3 dưới /v1/strata, {n_keys} khoá trong registry");
+    println!(
+        "strata-node nghe tại http://{addr} — route §3 dưới /v1/strata, {n_keys} khoá trong registry"
+    );
     axum::serve(listener, router(state)).await?;
     Ok(())
 }

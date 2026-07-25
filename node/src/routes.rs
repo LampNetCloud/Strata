@@ -352,8 +352,12 @@ struct SeqQuery {
 async fn proof_field(
     State(st): State<AppState>,
     Path((r, key)): Path<(String, String)>,
-    Query(q): Query<SeqQuery>,
+    q: Result<Query<SeqQuery>, axum::extract::rejection::QueryRejection>,
 ) -> ApiResult<Json<FieldProofResp>> {
+    // Bọc `Result` như `version_at`: `?seq=abc` phải ra ĐÚNG format lỗi của ta, không rơi
+    // về format mặc định của axum (client chỉ phải hiểu MỘT format).
+    let Query(q) =
+        q.map_err(|e| ApiError::Malformed(format!("`seq` không hợp lệ: {}", e.body_text())))?;
     let ref_id = parse_ref(&r)?;
     let entry = st.store.get(&ref_id).ok_or(ApiError::NotFound("ref"))?;
     let g = lock(&entry);

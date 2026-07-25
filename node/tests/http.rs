@@ -557,6 +557,17 @@ async fn malformed_inputs_are_400_in_our_error_format() {
     let (st, e) = call(&app, "GET", "/v1/strata/khong-phai-ref/head", None).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
     assert_eq!(e["error"], "MalformedRequest");
+
+    // `seq` không phải số — cũng phải ra format lỗi của ta, không phải của axum
+    let (st, e) = call(
+        &app,
+        "GET",
+        &format!("/v1/strata/{r}/proof/field/name?seq=khong-phai-so"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(e["error"], "MalformedRequest");
 }
 
 // ── 3. Neo (§2.7 + §4) ──────────────────────────────────────────────────────
