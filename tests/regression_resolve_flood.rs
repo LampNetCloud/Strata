@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 
 use lampnet_strata::{
-    AnchorError, AnchorSink, ChainQuery, SettlementRecord, SettlementSink, SinkConfig, StrataAnchor,
-    SubmitOutcome, Submitter, encode_records,
+    AnchorError, AnchorSink, ChainQuery, SettlementRecord, SettlementSink, SinkConfig,
+    StrataAnchor, SubmitOutcome, Submitter, encode_records,
 };
 
 const PUBLISHER: &str = "addr_publisher";
@@ -116,7 +116,9 @@ fn build(beacon: bool, scan_limit: usize, n_garbage: usize) -> SettlementSink<Mo
 #[test]
 fn resolve_must_not_be_blinded_by_flood() {
     // Cửa sổ legacy chỉ 3 (sẽ bị 3 tx rác lấp đầy) — nhưng beacon KHÔNG dùng cửa sổ này.
-    let sink = build(/* beacon */ true, /* scan_limit */ 3, /* n_garbage */ 3);
+    let sink = build(
+        /* beacon */ true, /* scan_limit */ 3, /* n_garbage */ 3,
+    );
     let got = sink.resolve(&REF_ID).unwrap();
     assert_eq!(
         got.map(|a| a.seq),
@@ -128,7 +130,9 @@ fn resolve_must_not_be_blinded_by_flood() {
 /// Canh hồi quy đường thường (beacon, không flood): resolve đúng anchor.
 #[test]
 fn resolve_control_no_flood() {
-    let sink = build(/* beacon */ true, /* scan_limit */ 10, /* n_garbage */ 0);
+    let sink = build(
+        /* beacon */ true, /* scan_limit */ 10, /* n_garbage */ 0,
+    );
     let got = sink.resolve(&REF_ID).unwrap();
     assert_eq!(got.map(|a| a.seq), Some(REAL_SEQ));
 }
@@ -138,7 +142,9 @@ fn resolve_control_no_flood() {
 /// daemon vẫn an toàn) và là lý do beacon_mode tồn tại — KHÔNG phải bug hồi quy.
 #[test]
 fn legacy_mode_is_blinded_by_flood_documented() {
-    let sink = build(/* beacon */ false, /* scan_limit */ 3, /* n_garbage */ 3);
+    let sink = build(
+        /* beacon */ false, /* scan_limit */ 3, /* n_garbage */ 3,
+    );
     let got = sink.resolve(&REF_ID).unwrap();
     assert_eq!(
         got.map(|a| a.seq),

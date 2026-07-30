@@ -182,8 +182,9 @@ impl ChainQuery for BlockfrostQuery {
     fn asset_latest_tx(&self, unit: &str) -> Result<Option<String>, AnchorError> {
         // /assets/{unit}/transactions?order=desc → tx đụng asset, MỚI→CŨ. Phần tử đầu =
         // lần di chuyển beacon gần nhất. 404 = asset chưa từng tồn tại → chưa neo.
-        let Some(v) =
-            self.get_json(&format!("/assets/{unit}/transactions?order=desc&count=1&page=1"))?
+        let Some(v) = self.get_json(&format!(
+            "/assets/{unit}/transactions?order=desc&count=1&page=1"
+        ))?
         else {
             return Ok(None);
         };
@@ -276,7 +277,8 @@ impl Submitter for TsSubmitter {
                 }
             }
         }
-        let req = serde_json::json!({ "label": self.label, "records": recs, "beacon": self.beacon });
+        let req =
+            serde_json::json!({ "label": self.label, "records": recs, "beacon": self.beacon });
 
         let mut child = std::process::Command::new("npx")
             .args(["tsx", "submit.ts"])

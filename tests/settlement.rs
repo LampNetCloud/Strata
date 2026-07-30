@@ -175,4 +175,3 @@ fn settlement_resolve_old_seq_verifies_at_anchored_size() {
     assert_eq!(resolved.seq, 1);
     assert!(verify_resolved(&chain, &resolved, &table).is_ok());
 }
-
