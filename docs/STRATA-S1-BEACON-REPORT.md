@@ -167,7 +167,7 @@ content + commitment" của Settlement (không thêm validator, không đội da
 | #14 read-side (resolve chống-flood) | ✅ CODE + test xanh (nhánh `thinh/strata-14-beacon-resolve`) |
 | #14 write-side (beacon-walk submit) | ✅ CODE + `tsc` xanh + **LIVE Preview mint→walk→resolve seq0→seq1** (tx `41cffc9f`, `95a6ff00`) |
 | Đề xuất spec §8.1(d) + hiệu chỉnh :504 | ✅ **anh Đức chốt hướng 2026-07-30** (PR #19): tách 2 mức bảo đảm beacon-native vs Mosaic A + thêm trần quy mô ~10⁷ ref_id. §4 đã áp; **text canonical vào spec do anh Đức ghi** |
-| #14 land | PR #19 — anh Đức duyệt "chỉnh xong text thì land"; merge sau khi CI xanh |
+| #14 land | ✅ **PR #19 MERGED 2026-07-30** (`c141ba7`, nhánh đã xoá). Gate tại máy trước merge: `cargo test --workspace` **149 pass** · `clippy --all-targets` sạch · `tsc --noEmit` exit 0 |
 | #15 spec payload | ⏳ anh Đức xử cùng đợt spec |
 | #16 code-only cleanup | ✅ code trong PR #19 (`4a6f8b9` — phân loại lỗi theo code/status thay bare regex), land cùng #14 |
 
@@ -183,3 +183,15 @@ Hệ quả kỹ thuật đã kiểm: rustdoc `src/settlement.rs:470–473` mô t
 miễn-nhiễm-flood (không nói chống rollback) ⇒ code KHÔNG hứa quá, không phải sửa theo.
 Chốt-đơn-điệu cho reader mới không dựng được thuần client-side (floor do caller cấp chỉ dời
 niềm tin sang caller) — đường thật là Mosaic A hoặc aggregated-root, cả hai đã ở roadmap.
+
+### Phát hiện phụ khi chạy gate (tách ra issue #24)
+
+`cargo fmt --all -- --check` **đỏ 8 hunk ngay trên `main`**, ở cả file PR #19 không đụng
+(`src/derived_index.rs:93/247/548/573/580`, `tests/settlement.rs:175`). Không phải regression của
+#14: `rustfmt 1.9.0-stable (2026-05-25)` mới hơn lúc viết code, mà repo **không pin toolchain**
+và **chưa có workflow CI nào** (`gh pr checks 19` → "no checks reported") nên không cơ chế nào
+bắt. Nội dung code đang lành (149 pass, clippy sạch, `tsc` 0) — thiếu là **cơ chế ép**.
+
+Thứ tự sửa có ràng buộc, ghi ở **issue #24**: pin toolchain → thêm workflow (test/clippy/fmt/tsc)
+→ **một PR fmt-sweep riêng** → mới bật `fmt --check` thành gate. Sweep trước khi pin thì làm lại,
+bật gate trước khi sweep thì mọi PR đỏ oan. Cùng lớp gap với `VeDataIO/Glint#12`.
