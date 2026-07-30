@@ -34,7 +34,8 @@ fn hex32(s: &str, name: &str) -> [u8; 32] {
 }
 
 fn main() {
-    let token = std::env::var("BLOCKFROST_TOKEN_GREENSUN").expect("thiếu BLOCKFROST_TOKEN_GREENSUN");
+    let token =
+        std::env::var("BLOCKFROST_TOKEN_GREENSUN").expect("thiếu BLOCKFROST_TOKEN_GREENSUN");
     let policy = std::env::var("STRATA_BEACON_POLICY").expect("thiếu STRATA_BEACON_POLICY");
     let ref_hex = std::env::var("STRATA_REF_ID").expect("thiếu STRATA_REF_ID");
     let publisher = std::env::var("STRATA_PUBLISHER").expect("thiếu STRATA_PUBLISHER");

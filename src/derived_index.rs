@@ -93,10 +93,7 @@ impl DerivedIndex for ColumnarIndex {
         let mut by_sender: BTreeMap<[u8; 32], Vec<(u64, Seq)>> = BTreeMap::new();
         for seq in 0..log.len() {
             let Some(v) = log.version(seq) else { continue };
-            by_sender
-                .entry(v.author_did)
-                .or_default()
-                .push((v.ts, seq));
+            by_sender.entry(v.author_did).or_default().push((v.ts, seq));
             // Duyệt khoá theo thứ tự tất định để index byte-chính-xác.
             let mut keys = log.field_keys_at(seq);
             keys.sort();
@@ -247,7 +244,9 @@ impl Default for MmrHolder {
 
 impl std::fmt::Debug for MmrHolder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MmrHolder").field("root", &self.0.root()).finish()
+        f.debug_struct("MmrHolder")
+            .field("root", &self.0.root())
+            .finish()
     }
 }
 
@@ -548,7 +547,10 @@ mod tests {
             let r = l.mmr_root();
             (l, r)
         };
-        assert!(!verify_composite(log0.mmr_root(), &good), "root lạ phải fail");
+        assert!(
+            !verify_composite(log0.mmr_root(), &good),
+            "root lạ phải fail"
+        );
 
         // Đổi value trong field_proof → field-proof fail.
         let mut tv = good.clone();
@@ -573,13 +575,18 @@ mod tests {
             let mut prev = [0u8; 32];
             for seq in 0..n {
                 // status xoay vòng open/closed để FieldEquals có kết quả rải đều.
-                let status = if seq % 2 == 0 { b"open".to_vec() } else { b"closed".to_vec() };
+                let status = if seq % 2 == 0 {
+                    b"open".to_vec()
+                } else {
+                    b"closed".to_vec()
+                };
                 let fields = vec![
                     (b"status".to_vec(), status),
                     (b"n".to_vec(), seq.to_be_bytes().to_vec()),
                 ];
                 let sr = build_state_root(&fields);
-                let v = StrataVersion::unsigned(seq, prev, b"cid".to_vec(), sr, did, [0u8; 32], seq);
+                let v =
+                    StrataVersion::unsigned(seq, prev, b"cid".to_vec(), sr, did, [0u8; 32], seq);
                 prev = v.version_hash();
                 log.push(v, fields).unwrap();
             }
@@ -587,9 +594,18 @@ mod tests {
             let idx = ColumnarIndex::replay(&log);
             let build = t0.elapsed().as_micros();
 
-            let q_eq = Query::FieldEquals { key: b"status".to_vec(), value: b"open".to_vec() };
-            let q_lt = Query::FieldLatest { key: b"status".to_vec() };
-            let q_sr = Query::SenderRange { sender: did, from_ts: 0, to_ts: n };
+            let q_eq = Query::FieldEquals {
+                key: b"status".to_vec(),
+                value: b"open".to_vec(),
+            };
+            let q_lt = Query::FieldLatest {
+                key: b"status".to_vec(),
+            };
+            let q_sr = Query::SenderRange {
+                sender: did,
+                from_ts: 0,
+                to_ts: n,
+            };
             let t1 = Instant::now();
             let r_eq = idx.lookup(&q_eq).len();
             let eq = t1.elapsed().as_micros();
