@@ -263,7 +263,7 @@ Mọi băm phải tái lập bit-chính-xác trên mọi máy. Quy tắc:
 
 1. **Thứ tự trường tất định**: đúng thứ tự khai báo trong `_CONTRACT.md` (§1.3). KHÔNG dựa vào thứ tự serde mặc định; viết encoder tay (`canonical_version_bytes`).
 2. **Endianness**: mọi số nguyên `u64` → **big-endian 8 byte cố định** (`to_be_bytes`). Khớp convention `epoch.to_be_bytes()` đã dùng trong reward merkle leaf (`allocate.rs`).
-3. **Độ dài thay đổi (`content_cid`, `key`)**: prefix bằng **độ dài u32 big-endian** rồi tới bytes — length-prefixed, chống ambiguity nối chuỗi (canonical encoding rule). **Trần cứng (hợp đồng, đồng bộ Spectra §1.9):** mỗi trường length-prefix `< 2³²` byte và mỗi danh sách count-prefix `< 2³²` phần tử. Input **vượt trần = fail-loud**: `u32_be` chặn bằng `assert!` (chạy CẢ release, KHÔNG phải `debug_assert!`) — thà panic tại chỗ còn hơn để `n as u32` truncate lặng lẽ → prefix cụt → **mất song ánh** → hai input khác cho cùng byte → `H_dom` trùng, vỡ tất định băm. `u32_be` là van chung cho mọi encoder không guard graceful (`version`/`field_policy`/`audit`); `batch::entry_bytes` guard trước bằng `PayloadTooLarge` (đường Result). Về mặt kiểu, `content_cid`/`key` là `Vec<u8>` nên trần phải là **hợp đồng tường minh** dù ngữ nghĩa `content_cid` = BLAKE3 32B.
+3. **Độ dài thay đổi (`content_cid`, `key`)**: prefix bằng **độ dài u32 big-endian** rồi tới bytes — length-prefixed, chống ambiguity nối chuỗi (canonical encoding rule).
 4. **Trường cố định** (`H32`, `Did`, `Sig`): ghi nguyên 32/64 byte, KHÔNG length-prefix.
 5. **KHÔNG đưa `sig` vào `version_signing_bytes`** (vì sig ký trên chính bytes đó).
 
