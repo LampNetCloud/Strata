@@ -75,8 +75,42 @@ pub use version::{Hash32, StrataVersion};
 /// Re-export tiện dụng từ sub-primitive nền.
 pub use lampnet_merkle_anchor::{Blake3Hasher, DomainHasher, hash, mmr};
 
-/// Encode `u32` big-endian (length-prefix cho trường biến độ dài — §1.7 quy tắc 3).
+/// Encode `u32` big-endian — length/count-prefix canonical (§1.7 quy tắc 3).
+///
+/// **Trần cứng `< 2³²`** (issue #18, đồng bộ Spectra §1.9): mọi trường/danh sách length-
+/// prefix phải `< 2³²` (byte hoặc phần tử). `n ≥ 2³²` → `n as u32` truncate LẶNG LẼ →
+/// prefix cụt → **mất song ánh** canonical → hai input khác cho cùng byte → `H_dom` trùng,
+/// vỡ tất định băm (lan xuống consumer không phát hiện được). Vì vậy **fail-loud**:
+/// `assert!` (chạy CẢ release, không phải `debug_assert!`) — thà panic tại chỗ còn hơn băm
+/// sai. Đây là van chung cho mọi caller không có guard graceful (`version::content_cid`,
+/// `field_policy::field_key`, `audit`); `batch::entry_bytes` guard trước bằng
+/// `PayloadTooLarge` nên không chạm assert này.
 #[inline]
 pub(crate) fn u32_be(n: usize) -> [u8; 4] {
+    assert!(
+        n <= u32::MAX as usize,
+        "canonical §1.7: trường length/count-prefix = {n} ≥ 2³² — mất song ánh (issue #18)"
+    );
     (n as u32).to_be_bytes()
+}
+
+#[cfg(test)]
+mod u32_be_tests {
+    use super::u32_be;
+
+    #[test]
+    fn boundary_u32_max_ok() {
+        // Đúng trần: tới u32::MAX vẫn encode được, không panic.
+        assert_eq!(u32_be(0), [0, 0, 0, 0]);
+        assert_eq!(u32_be(258), 258u32.to_be_bytes());
+        assert_eq!(u32_be(u32::MAX as usize), [0xff, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    #[should_panic(expected = "mất song ánh")]
+    #[cfg(target_pointer_width = "64")] // usize 32-bit không biểu diễn nổi 2³²
+    fn over_2pow32_fails_loud() {
+        // Vượt trần: fail-loud thay vì truncate lặng lẽ (chỉ truyền n, KHÔNG cấp phát 4GiB).
+        let _ = u32_be((u32::MAX as usize) + 1);
+    }
 }

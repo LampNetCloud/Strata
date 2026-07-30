@@ -720,9 +720,15 @@ impl AnchoredTable {
 
     /// Serialize canonical (daemon persist): `u32_be(count) ‖ [ref_id 32 ‖ u64_be(seq) ‖
     /// mmr_root 32 ‖ u64_be(mmr_size) ‖ version_hash 32]*`. Fixed-size mỗi dòng (112B).
+    ///
+    /// Count đi qua [`crate::u32_be`] để trần `<2³²` (§1.7 quy tắc 3, issue #18) là MỘT van
+    /// duy nhất cho mọi prefix — trước đây chỗ này cast `as u32` trực tiếp, tức doc ghi
+    /// `u32_be` mà code không đi qua nó. Đây là đường **persist** (không phải hash-canonical)
+    /// nên hậu quả nếu truncate là parse strict trả `None` ⇒ **mất bảng đã lưu**, không phải
+    /// va chạm `H_dom`; vẫn fail-loud để không prefix nào nằm ngoài hợp đồng.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + self.rows.len() * 112);
-        out.extend_from_slice(&(self.rows.len() as u32).to_be_bytes());
+        out.extend_from_slice(&crate::u32_be(self.rows.len()));
         for r in &self.rows {
             out.extend_from_slice(&r.ref_id);
             out.extend_from_slice(&r.seq.to_be_bytes());
