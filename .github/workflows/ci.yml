@@ -1,0 +1,82 @@
+name: CI
+
+# Gate cho repo Strata — issue #24.
+#
+# Trước PR này repo KHÔNG có workflow nào: `gh pr checks` trả "no checks reported",
+# nên mọi lệnh test/clippy/fmt chỉ đúng ở máy nào có chạy. Đây là cùng lớp gap đã gặp
+# ở VeDataIO/Glint#12 và gói tx-builder của Mosaic.
+#
+# Thứ tự bật (xem #24): pin toolchain (#29) → sweep fmt (#30) → MỚI bật gate này.
+# Bật `fmt --check` trước khi sweep thì mọi PR đỏ oan.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust (test · clippy · fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `lampnet-merkle-anchor` kéo từ repo PRIVATE LampNetCloud/Anchor (pin git rev).
+      # GITHUB_TOKEN mặc định KHÔNG đọc được repo khác ⇒ phải có PAT read-only.
+      # Kiểm sớm + báo rõ, thay vì để cargo fetch chết với lỗi auth khó đọc.
+      - name: Preflight — token đọc dep private
+        env:
+          ANCHOR_READ_TOKEN: ${{ secrets.ANCHOR_READ_TOKEN }}
+        run: |
+          if [ -z "$ANCHOR_READ_TOKEN" ]; then
+            echo "::error::Thiếu secret ANCHOR_READ_TOKEN. Cargo.toml pin lampnet-merkle-anchor"
+            echo "::error::từ repo private LampNetCloud/Anchor; CI không fetch được nếu không có PAT."
+            echo "::error::Cách thêm: tạo fine-grained PAT chỉ Contents:read cho LampNetCloud/Anchor,"
+            echo "::error::rồi: gh secret set ANCHOR_READ_TOKEN --repo LampNetCloud/Strata"
+            exit 1
+          fi
+
+      - name: Cấu hình git dùng token cho github.com
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.ANCHOR_READ_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      # KHÔNG pin toolchain ở đây: rust-toolchain.toml (#29) là nguồn duy nhất.
+      # rustup tự cài đúng channel + components khi chạy lệnh cargo đầu tiên.
+      - name: Toolchain theo rust-toolchain.toml
+        run: rustup show && cargo --version && rustfmt --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+  submitter:
+    name: submitter (tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: anchor-io/submitter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: anchor-io/submitter/package-lock.json
+      - run: npm ci
+      # Gói này nằm ngoài Cargo workspace nên không lệnh Rust nào chạm tới nó.
+      # Không có job này thì API-drift của Lucid chỉ lộ lúc chạy thật.
+      - run: npm run typecheck
