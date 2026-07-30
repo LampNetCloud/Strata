@@ -113,6 +113,39 @@ async function readStdin(): Promise<string> {
 // Main
 // ---------------------------------------------------------------------------
 
+/**
+ * Dựng metadatum label 1234: `[ { t, a } ]` — thứ tự key cố định "t" rồi "a"
+ * (deterministic, khớp decoder Rust; lucid-evolution giữ insertion order khi build CBOR).
+ *
+ * Tách thành hàm THUẦN + export để `test/fixture.test.ts` đối chiếu được với test-vector
+ * chung `apis/settlement-metadata.json` — cùng file mà `tests/settlement_fixture.rs` bên
+ * Rust dùng. Trước đây phần này nằm trong `main()` nên không có cách nào kiểm nó ngoài
+ * việc chạy tx thật, và hai bản cài đặt (TS ở đây, Rust ở `settlement.rs`) có thể trôi
+ * khỏi nhau mà không ai biết cho tới lúc `resolve` từ chối.
+ */
+export function buildMetadata(records: Rec[]): unknown[] {
+  return records.map((r) => {
+    if (r.t === 1) {
+      if (!Number.isSafeInteger(r.seq) || r.seq < 0) {
+        fail("Rejected", `seq ${r.seq} không phải số nguyên an toàn không âm`);
+      }
+      return {
+        t: 1,
+        a: [
+          chunk64(hexToBytes(r.ref_id, "ref_id", 32)),
+          chunk64(hexToBytes(r.head_version_hash, "head_version_hash", 32)),
+          chunk64(hexToBytes(r.mmr_root, "mmr_root", 32)),
+          r.seq,
+        ],
+      };
+    }
+    if (r.t === 2) {
+      return { t: 2, a: [chunk64(hexToBytes(r.payload, "payload"))] };
+    }
+    fail("Rejected", `record t không hỗ trợ: ${JSON.stringify(r)}`);
+  });
+}
+
 async function main(): Promise<void> {
   let req: Req;
   try {
@@ -148,28 +181,7 @@ async function main(): Promise<void> {
     fail("Rejected", "records rỗng");
   }
 
-  // Dựng metadatum: [ { t, a } ] — thứ tự key cố định "t" rồi "a" (deterministic,
-  // khớp decoder Rust; lucid-evolution giữ insertion order khi build CBOR map).
-  const metadata = req.records.map((r) => {
-    if (r.t === 1) {
-      if (!Number.isSafeInteger(r.seq) || r.seq < 0) {
-        fail("Rejected", `seq ${r.seq} không phải số nguyên an toàn không âm`);
-      }
-      return {
-        t: 1,
-        a: [
-          chunk64(hexToBytes(r.ref_id, "ref_id", 32)),
-          chunk64(hexToBytes(r.head_version_hash, "head_version_hash", 32)),
-          chunk64(hexToBytes(r.mmr_root, "mmr_root", 32)),
-          r.seq,
-        ],
-      };
-    }
-    if (r.t === 2) {
-      return { t: 2, a: [chunk64(hexToBytes(r.payload, "payload"))] };
-    }
-    fail("Rejected", `record t không hỗ trợ: ${JSON.stringify(r)}`);
-  });
+  const metadata = buildMetadata(req.records);
 
   const { lucid, address } = await initWallet();
 
@@ -276,7 +288,9 @@ async function initWallet(): Promise<{ lucid: Awaited<ReturnType<typeof Lucid>>;
   return { lucid, address };
 }
 
-main().catch((e) => {
+// Chỉ chạy khi được gọi trực tiếp — import từ test KHÔNG được đụng ví/mạng.
+if (import.meta.url === `file://${process.argv[1]}`)
+  main().catch((e) => {
   const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
   fail("Rejected", `lỗi không bắt được: ${msg}`);
 });
