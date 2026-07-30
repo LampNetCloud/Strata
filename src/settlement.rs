@@ -43,8 +43,13 @@ pub const METADATA_BYTES_MAX: usize = 64;
 // Quy tắc chunk 64B (giới hạn bytestring metadata Cardano):
 // - bytes ≤ 64B → MỘT bytestring (KHÔNG được chunk — chống malleability);
 // - bytes > 64B → mảng chunk, mọi chunk trừ chunk cuối PHẢI đúng 64B, chunk cuối
-//   1..=64B. Decode từ chối mọi chunking khác → một dãy bytes chỉ có ĐÚNG MỘT
-//   biểu diễn hợp lệ (bijection, chặn đầu độc bằng biến thể encode).
+//   1..=64B. Decode từ chối mọi chunking khác → **canonical ở tầng CẤU TRÚC record**
+//   (chunking + map đúng-2-entry + chống dup-key). LƯU Ý (không phải bijection toàn phần):
+//   KHÔNG đảm bảo canonical CBOR nguyên thuỷ — int non-minimal / indefinite-length / rác
+//   đuôi vẫn decode ra CÙNG record qua ciborium. Vô hại vì trust đến từ **pin
+//   publisher-input**, KHÔNG từ băm bytes metadata (không consumer nào hash metadatum làm
+//   định-danh). Nếu sau này cần bijection thật: thêm kiểm minimal-encoding + test-vector
+//   "2 encoding tương đương → từ chối 1".
 //
 // Decode khoan dung có kiểm soát: record `t` lạ → BỎ QUA (forward-compat); record `t=1`
 // NHƯNG sai hình dạng → LỖI ở chế độ strict, hoặc bỏ qua ở chế độ resolve (kẻ lạ không
@@ -265,6 +270,18 @@ pub fn decode_records(cbor: &[u8]) -> Result<Vec<SettlementRecord>, PayloadError
 /// Decode KHOAN DUNG: record hỏng/lạ bị BỎ QUA thay vì lỗi. Dùng cho `resolve()` đọc dữ
 /// liệu on-chain KHÔNG TIN CẬY — kẻ lạ (hoặc tx label-1234 của hệ khác, VD LampNet
 /// settlement JSON) không DoS được resolve bằng payload rác.
+/// Hex thường (lowercase) — dựng `unit` beacon (`policy ++ ref_id`) không cần kéo crate
+/// `hex` vào core no-I/O.
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
 pub fn decode_records_lenient(cbor: &[u8]) -> Vec<SettlementRecord> {
     let Ok(items) = parse_top_level(cbor) else {
         return Vec::new();
@@ -288,6 +305,16 @@ pub trait ChainQuery {
     fn tx_input_addresses(&self, txid: &str) -> Result<Vec<String>, AnchorError>;
     /// CBOR metadatum (raw bytes) của `label` trong tx; `None` nếu tx không có label.
     fn tx_metadata_cbor(&self, txid: &str, label: u64) -> Result<Option<Vec<u8>>, AnchorError>;
+    /// Tx hash MỚI NHẤT có đụng tới asset `unit` (`policyId` ++ `assetName`, hex);
+    /// `None` nếu asset chưa từng tồn tại. Dùng cho `beacon_mode` — con-trỏ-latest theo
+    /// asset thay vì quét cửa sổ địa chỉ (miễn nhiễm flood). Impl mặc định báo không hỗ
+    /// trợ để các `ChainQuery` chỉ dùng đường legacy không phải cài lại.
+    fn asset_latest_tx(&self, unit: &str) -> Result<Option<String>, AnchorError> {
+        let _ = unit;
+        Err(AnchorError::Rejected(
+            "asset_latest_tx: ChainQuery này không hỗ trợ beacon_mode".into(),
+        ))
+    }
 }
 
 /// Kết quả submit từ backend build tx.
@@ -317,8 +344,17 @@ pub struct SinkConfig {
     /// Trần kích thước metadatum (byte) — vượt → [`AnchorError::DatumTooLarge`]. Cardano
     /// maxTxSize ~16384; để dư địa cho phần tx còn lại.
     pub max_metadatum_bytes: usize,
-    /// Trần số tx quét khi `resolve` (ví publisher dùng chung có nhiều tx).
+    /// Trần số tx quét khi `resolve` (ví publisher dùng chung có nhiều tx). Chỉ dùng ở
+    /// đường legacy (`beacon_policy = None`).
     pub resolve_scan_limit: usize,
+    /// BẬT `beacon_mode` (opt-in, mặc định `None` = legacy address-scan).
+    ///
+    /// `Some(policy_id_hex)` = `resolve` xác định latest theo **asset** thay vì quét cửa
+    /// sổ địa chỉ: beacon NFT `unit = policy_id ++ ref_id` (native minting policy
+    /// `sig(publisher)`) đi tới trên UTxO anchor mới nhất. Kẻ lạ không mint/di chuyển được
+    /// beacon ⇒ flood tx-gửi-tới-publisher KHÔNG làm mù `resolve` (issue #14). `policy_id`
+    /// = 28 byte = 56 hex.
+    pub beacon_policy: Option<String>,
 }
 
 impl Default for SinkConfig {
@@ -328,6 +364,7 @@ impl Default for SinkConfig {
             label: METADATA_LABEL,
             max_metadatum_bytes: 8 * 1024,
             resolve_scan_limit: 500,
+            beacon_policy: None,
         }
     }
 }
@@ -407,6 +444,80 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
             slot: None,
         }))
     }
+
+    /// LEGACY (`beacon_policy = None`): quét cửa sổ hữu hạn tx của ví publisher (MỚI→CŨ)
+    /// rồi lọc `input == publisher`. ĐIỂM YẾU issue #14: kẻ tấn công flood tx-gửi-tới-
+    /// publisher đẩy anchor thật ra ngoài cửa sổ → trả `None`. An toàn cho publisher
+    /// 1-ref_id / reader tin daemon; reader bên thứ ba cần chống-flood dùng `beacon_mode`.
+    fn resolve_via_address_scan(
+        &self,
+        ref_id: &Hash32,
+    ) -> Result<Option<StrataAnchor>, AnchorError> {
+        let txs = self
+            .query
+            .address_txs(&self.cfg.publisher_address, self.cfg.resolve_scan_limit)?;
+        let mut best: Option<StrataAnchor> = None;
+        for txid in txs {
+            let Some(cbor) = self.query.tx_metadata_cbor(&txid, self.cfg.label)? else {
+                continue;
+            };
+            // TRUST: chỉ tin tx do publisher CHI (địa chỉ publisher trong input).
+            // `address_txs` trả cả tx GỬI TỚI publisher (VD faucet) → phải lọc input.
+            let inputs = self.query.tx_input_addresses(&txid)?;
+            if !inputs.iter().any(|a| a == &self.cfg.publisher_address) {
+                continue; // tx từ ví lạ mang label 1234 → bỏ qua
+            }
+            best = Self::fold_best_anchor(best, &cbor, ref_id);
+        }
+        Ok(best)
+    }
+
+    /// BEACON (`beacon_policy = Some`): xác định latest theo ASSET, không quét cửa sổ.
+    /// Beacon NFT `unit = policy ++ ref_id` chỉ publisher mint/di chuyển được (native
+    /// policy `sig(publisher)`) ⇒ lịch sử asset toàn do publisher chi ⇒ flood tx-gửi-tới-
+    /// publisher KHÔNG chạm beacon (issue #14). O(1) theo tx mới nhất của asset.
+    fn resolve_via_beacon(
+        &self,
+        ref_id: &Hash32,
+        policy: &str,
+    ) -> Result<Option<StrataAnchor>, AnchorError> {
+        // assetName = ref_id (32B ≤ giới hạn 32B của Cardano) → hex 64 ký tự.
+        let unit = format!("{policy}{}", hex_lower(ref_id));
+        let Some(txid) = self.query.asset_latest_tx(&unit)? else {
+            return Ok(None); // beacon chưa từng tồn tại ⇒ ref_id chưa neo
+        };
+        // Defense-in-depth: beacon chỉ di chuyển được bởi khoá chi của publisher. Đối
+        // chiếu input; lệch = bất thường (khoá lộ / indexer sai) → fail-closed, KHÔNG
+        // nhầm với "chưa neo".
+        let inputs = self.query.tx_input_addresses(&txid)?;
+        if !inputs.iter().any(|a| a == &self.cfg.publisher_address) {
+            return Err(AnchorError::Rejected(format!(
+                "beacon {unit}: tx mới nhất {txid} không do publisher chi — asset-index bất nhất"
+            )));
+        }
+        let Some(cbor) = self.query.tx_metadata_cbor(&txid, self.cfg.label)? else {
+            return Ok(None);
+        };
+        Ok(Self::fold_best_anchor(None, &cbor, ref_id))
+    }
+
+    /// Gộp record CBOR của một tx vào `best` (anchor `seq` cao nhất khớp `ref_id`).
+    fn fold_best_anchor(
+        best: Option<StrataAnchor>,
+        cbor: &[u8],
+        ref_id: &Hash32,
+    ) -> Option<StrataAnchor> {
+        let mut best = best;
+        for rec in decode_records_lenient(cbor) {
+            if let SettlementRecord::Anchor(a) = rec
+                && a.ref_id == *ref_id
+                && best.as_ref().is_none_or(|b| a.seq > b.seq)
+            {
+                best = Some(a);
+            }
+        }
+        best
+    }
 }
 
 impl<Q: ChainQuery, S: Submitter> AnchorSink for SettlementSink<Q, S> {
@@ -423,30 +534,10 @@ impl<Q: ChainQuery, S: Submitter> AnchorSink for SettlementSink<Q, S> {
 
     fn resolve(&self, ref_id: &Hash32) -> Result<Option<StrataAnchor>, AnchorError> {
         self.ensure_configured()?;
-        let txs = self
-            .query
-            .address_txs(&self.cfg.publisher_address, self.cfg.resolve_scan_limit)?;
-        let mut best: Option<StrataAnchor> = None;
-        for txid in txs {
-            let Some(cbor) = self.query.tx_metadata_cbor(&txid, self.cfg.label)? else {
-                continue;
-            };
-            // TRUST: chỉ tin tx do publisher CHI (địa chỉ publisher trong input).
-            // `address_txs` trả cả tx GỬI TỚI publisher (VD faucet) → phải lọc input.
-            let inputs = self.query.tx_input_addresses(&txid)?;
-            if !inputs.iter().any(|a| a == &self.cfg.publisher_address) {
-                continue; // tx từ ví lạ mang label 1234 → bỏ qua
-            }
-            for rec in decode_records_lenient(&cbor) {
-                if let SettlementRecord::Anchor(a) = rec
-                    && a.ref_id == *ref_id
-                    && best.as_ref().is_none_or(|b| a.seq > b.seq)
-                {
-                    best = Some(a);
-                }
-            }
+        match &self.cfg.beacon_policy {
+            Some(policy) => self.resolve_via_beacon(ref_id, policy),
+            None => self.resolve_via_address_scan(ref_id),
         }
-        Ok(best)
     }
 }
 

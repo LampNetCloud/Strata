@@ -1,0 +1,33 @@
+//! `lampnet-strata-node` — **lớp daemon** của Strata (`Strata-API.md` §0).
+//!
+//! ```text
+//! Platform (ProofChat/OriLife/AladinWork)
+//!    │  HTTP JSON  (§3)          ← crate NÀY
+//!    ▼
+//! daemon: lưu · phân giải Did→pk · neo qua AnchorSink
+//!    │  Rust API thuần (§2)
+//!    ▼
+//! lampnet-strata core (no I/O)   ← mọi hash/proof/invariant nằm ở đây
+//! ```
+//!
+//! Crate này CHỈ làm ba việc §0 giao cho daemon: **lưu** ([`store`]), **phân giải khoá**
+//! ([`registry`]), **đẩy neo** ([`anchor`]) — cộng lớp cửa HTTP ([`routes`] + [`dto`] +
+//! [`error`]). Không có một dòng hash/merkle nào ở đây: nếu thấy mình sắp băm cái gì trong
+//! crate này thì đó là dấu hiệu code đang lấn xuống core (§8.4).
+//!
+//! Bản hiện tại lưu **in-memory**; đường persist (Mirage cho blob + đĩa cho log) là milestone
+//! sau, cắm qua chính [`store::ChainStore`].
+
+pub mod anchor;
+pub mod dto;
+pub mod error;
+pub mod hexs;
+pub mod registry;
+pub mod routes;
+pub mod store;
+
+pub use anchor::{DisabledSink, FailingSink, MemorySink};
+pub use error::{ApiError, ApiResult};
+pub use registry::{InMemoryRegistry, KeyRegistry};
+pub use routes::{AppState, router};
+pub use store::{ChainEntry, ChainStore, StoreError};

@@ -164,6 +164,26 @@ Gộp **mục 5 vòng-1** + **mục 1 vòng-2** (§7/§8) thành một PR — gr
 
 ---
 
+## 10. Dọn sau audit hội đồng #16 (mục code-only) — 2026-07-24
+
+Xử lý mục Trung bình/Thấp **code-only** từ issue #16 (audit `settlement.rs`/`anchor_sink.rs`/`anchor-io`). Mục chạm spec/cần-bằng-chứng để riêng.
+
+| Mục | Xử lý | PR |
+|---|---|---|
+| [codec/doc] hạ claim "bijection" | comment `settlement.rs` overclaim → đúng: canonical tầng CẤU TRÚC record (chunk/map-2-entry/dup-key), KHÔNG canonical CBOR toàn phần | **#22** |
+| [Thấp] `new_unverified_for_tests` public | `#[doc(hidden)]` (additive) | **#22** |
+| [vận hành] `submit.ts` phân loại lỗi | code/status có cấu trúc + regex word-boundary thay bare `50\d`/`429` | **#19** (nhánh beacon — submit.ts sống ở đó) |
+
+**Quyết định:**
+- `new_unverified_for_tests` **KHÔNG** `#[cfg(test)]`: dùng ở 13 chỗ integration test `tests/anchor_sink.rs` (crate riêng ⇒ gate phá build) + anh Đức đã chốt name-guard ở PR#6 vòng 2 ⇒ chọn `#[doc(hidden)]` (không đảo quyết định, không phá test).
+- `submit.ts` đặt ở nhánh beacon vì PR#19 viết lại trọn file — sửa bản main sẽ bị ghi đè + conflict.
+
+**Hoãn/ngoài phạm vi:** quota resolve (cùng gốc #14 → beacon giải quyết); M2 double-submit (không mất dữ liệu, chỉ tốn tADA); CBOR malleability nội bộ `anchor_sink` / one-shot assumption / dedup ref_id / kiểm ví hậu-submit / [NEEDS-EVIDENCE] Blockfrost label string (doc/khó/cần curl thật).
+
+**Kiểm chứng:** PR#22 `cargo test --workspace` 147 pass + clippy sạch; PR#19 `submit.ts tsc --noEmit` exit 0.
+
+---
+
 ## 6. Phụ lục — script PoC phía Mosaic (`~/vedata-node/`)
 
 > Lưu vết (giống `boot-m6live.sh`). File thật ở `~/vedata-node/` (ngoài repo — tham chiếu path local + `credentials/`), **không** đưa vào code tree. PoC dùng cardano-cli thay Lucid; bản proper là tx-builder TS trong VeData/Code.
