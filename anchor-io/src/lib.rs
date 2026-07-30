@@ -179,6 +179,21 @@ impl ChainQuery for BlockfrostQuery {
         Ok(out)
     }
 
+    fn asset_latest_tx(&self, unit: &str) -> Result<Option<String>, AnchorError> {
+        // /assets/{unit}/transactions?order=desc → tx đụng asset, MỚI→CŨ. Phần tử đầu =
+        // lần di chuyển beacon gần nhất. 404 = asset chưa từng tồn tại → chưa neo.
+        let Some(v) =
+            self.get_json(&format!("/assets/{unit}/transactions?order=desc&count=1&page=1"))?
+        else {
+            return Ok(None);
+        };
+        let first = v.as_array().and_then(|items| items.first());
+        Ok(first
+            .and_then(|it| it.get("tx_hash"))
+            .and_then(|h| h.as_str())
+            .map(|s| s.to_string()))
+    }
+
     fn tx_metadata_cbor(&self, txid: &str, label: u64) -> Result<Option<Vec<u8>>, AnchorError> {
         let Some(v) = self.get_json(&format!("/txs/{txid}/metadata/cbor"))? else {
             return Ok(None);
@@ -219,6 +234,10 @@ pub struct TsSubmitter {
     pub label: u64,
     /// Timeout chờ child (giây).
     pub timeout_secs: u64,
+    /// BẬT beacon-walk (issue #14): mỗi anchor mint/di chuyển beacon NFT
+    /// `unit = policyId ‖ ref_id` (native policy `sig(publisher)`). Phải khớp
+    /// `SinkConfig::beacon_policy` mà `resolve` dùng. `false` = tx metadata-only (legacy).
+    pub beacon: bool,
 }
 
 impl std::fmt::Debug for TsSubmitter {
@@ -257,7 +276,7 @@ impl Submitter for TsSubmitter {
                 }
             }
         }
-        let req = serde_json::json!({ "label": self.label, "records": recs });
+        let req = serde_json::json!({ "label": self.label, "records": recs, "beacon": self.beacon });
 
         let mut child = std::process::Command::new("npx")
             .args(["tsx", "submit.ts"])
@@ -379,6 +398,7 @@ mod tests {
             submitter_dir: PathBuf::from("/x/submitter"),
             label: 1234,
             timeout_secs: 60,
+            beacon: false,
         };
         let dbg = format!("{s:?}");
         assert!(dbg.contains("1234"));
@@ -393,6 +413,7 @@ mod tests {
             submitter_dir: PathBuf::from("/nonexistent-dir-xyz"),
             label: 1234,
             timeout_secs: 5,
+            beacon: false,
         };
         let a = lampnet_strata::chain::StrataAnchor {
             ref_id: [1; 32],
@@ -410,6 +431,7 @@ mod tests {
             submitter_dir: PathBuf::from("/x"),
             label: 1234,
             timeout_secs: 5,
+            beacon: false,
         };
         let a = lampnet_strata::chain::StrataAnchor {
             ref_id: [1; 32],
