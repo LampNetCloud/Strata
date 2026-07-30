@@ -116,10 +116,11 @@ Creds preview đọc tại chỗ `A/VeData/.env` (map `oMNEMONICpreview`/`oBLOCK
 Chống-flood là **bản chất** (kẻ lạ không mint/di chuyển được NFT — không cần flood thật để
 chứng minh; unit test `resolve_must_not_be_blinded_by_flood` đã chốt logic). KHÔNG còn là stub.
 
-## 4. ĐỀ XUẤT SPEC — chờ anh Đức chốt (miền spec)
+## 4. ĐỀ XUẤT SPEC — anh Đức đã chốt hướng 2026-07-30 (text canonical do anh Đức ghi)
 
 Beacon là mode mới, có điểm chạm `_CONTRACT.md` + `Strata-API §8.1`. Đề xuất (chưa ghi đè
-spec canonical):
+spec canonical) — bản dưới đã áp 2 hiệu chỉnh anh Đức yêu cầu ở PR #19: tách bạch mức bảo
+đảm ở (ii), thêm trần quy mô ở (i).
 
 **(i) Thêm `Strata-API §8.1(d)` — Beacon mode (opt-in):**
 > Backend Settlement hỗ trợ tùy chọn `beacon_policy` (native minting policy `sig(publisher)`,
@@ -128,12 +129,29 @@ spec canonical):
 > anchor mới nhất theo **tx gần nhất đụng asset** thay vì quét cửa sổ địa chỉ ⇒ miễn nhiễm
 > flood-eviction (#14). Giao thức beacon-walk: mỗi anchor tiêu UTxO giữ beacon + gửi beacon
 > sang UTxO mới mang metadata anchor. Trust root = khoá publisher (không thêm giả định).
+>
+> **Trần quy mô.** Beacon per-ref_id là 1 NFT trên 1 UTxO cho mỗi `ref_id`, nên min-ADA bị
+> khoá tăng tuyến tính theo số `ref_id`. Phù hợp tới **~10⁷ ref_id/publisher** (≈10⁷ × ~1,5
+> tADA ≈ 15M ADA khoá — vẫn trong tầm); ở hàng trăm tỷ `ref_id` thì min-ADA vượt tổng cung
+> ADA ⇒ per-ref_id KHÔNG mở rộng tới đó. Lối mở rộng là **aggregated-root** (một cây commit
+> nhiều `ref_id`, proof `O(log N)`) — việc lớn, để roadmap, không thuộc #14.
 
-**(ii) Hiệu chỉnh `§8.1(b):504` (INV-E7 hai lớp):**
-> Làm rõ: lớp cross-process của backend Settlement bằng **quét địa chỉ (legacy)** là
-> **best-effort** — bị flood-eviction làm mù (#14); đảm bảo cross-process chống-rollback đầy
-> đủ cho reader bên thứ ba **chỉ khi bật `beacon_mode`** (hoặc dùng backend Mosaic A). Legacy
-> vẫn đủ cho publisher-1-ref_id / reader tin daemon.
+**(ii) Hiệu chỉnh `§8.1(b):504` — tách bạch mức bảo đảm, KHÔNG gộp:**
+> - **beacon-native** (`beacon_mode`, native policy `sig(publisher)`): **miễn nhiễm
+>   flood-eviction** — kẻ lạ không mint/di chuyển được beacon. Nhưng native policy chỉ chặn
+>   *mint lại*, **KHÔNG chặn *di chuyển***: chính publisher (hoặc khoá bị chiếm) vẫn spend
+>   UTxO giữ beacon rồi gửi beacon sang một anchor `seq` **THẤP hơn**; `resolve` khi đó trả
+>   seq thấp — một **rollback đã-xác-thực** mà reader mới không phát hiện được. Không có
+>   validator nên không gì ép `seq_out > seq_in` on-chain. ⟹ tính đơn điệu ở mode này **vẫn
+>   tin khoá publisher**.
+> - **Mosaic A** (Plutus validator spend-recreate ép `seq_out > seq_in`): INV-E7 **độc lập
+>   khoá** — chống cả key-compromise / publisher tự rollback.
+> - **Quét địa chỉ (legacy)** là **best-effort**: bị flood-eviction làm mù (#14); vẫn đủ cho
+>   publisher 1-ref_id / reader tin daemon.
+>
+> Reader bên thứ ba **chỉ cần chống-flood** → beacon-native đủ. **Cần chống cả
+> key-compromise** → phải dùng Mosaic A. Trust root của beacon = khoá publisher, nhất quán
+> với (i).
 
 **(iii)** `_CONTRACT.md`: ghi native minting policy beacon KHÔNG vi phạm tính "off-chain
 content + commitment" của Settlement (không thêm validator, không đội datum).
@@ -148,6 +166,20 @@ content + commitment" của Settlement (không thêm validator, không đội da
 | #14 quyết định A-opt | ✅ chốt (comment issue #14) |
 | #14 read-side (resolve chống-flood) | ✅ CODE + test xanh (nhánh `thinh/strata-14-beacon-resolve`) |
 | #14 write-side (beacon-walk submit) | ✅ CODE + `tsc` xanh + **LIVE Preview mint→walk→resolve seq0→seq1** (tx `41cffc9f`, `95a6ff00`) |
-| Đề xuất spec §8.1(d) + hiệu chỉnh :504 | ⏳ chờ anh Đức chốt |
-| #15 spec payload | ⏳ anh Đức |
-| #16 code-only cleanup | ⏳ hoãn (sau #14) |
+| Đề xuất spec §8.1(d) + hiệu chỉnh :504 | ✅ **anh Đức chốt hướng 2026-07-30** (PR #19): tách 2 mức bảo đảm beacon-native vs Mosaic A + thêm trần quy mô ~10⁷ ref_id. §4 đã áp; **text canonical vào spec do anh Đức ghi** |
+| #14 land | PR #19 — anh Đức duyệt "chỉnh xong text thì land"; merge sau khi CI xanh |
+| #15 spec payload | ⏳ anh Đức xử cùng đợt spec |
+| #16 code-only cleanup | ✅ code trong PR #19 (`4a6f8b9` — phân loại lỗi theo code/status thay bare regex), land cùng #14 |
+
+### Ghi nhận từ phản hồi anh Đức (2026-07-30)
+
+Điểm anh Đức bổ sung mà bản đề xuất đầu của mình gộp thiếu chính xác: **native policy chặn
+mint-lại nhưng KHÔNG chặn di-chuyển**, nên beacon-native không phải "chống rollback đầy đủ"
+— nó chống *outsider*, còn tính đơn điệu vẫn dựa vào khoá publisher. Muốn đơn điệu độc-lập-khoá
+thì phải có validator (Mosaic A). Bài học ghi lại: khi một cơ chế chỉ chặn được **một** trong
+các đường ghi (mint / move / spend), đừng viết mức bảo đảm bằng một câu gộp.
+
+Hệ quả kỹ thuật đã kiểm: rustdoc `src/settlement.rs:470–473` mô tả beacon **chỉ** ở mức
+miễn-nhiễm-flood (không nói chống rollback) ⇒ code KHÔNG hứa quá, không phải sửa theo.
+Chốt-đơn-điệu cho reader mới không dựng được thuần client-side (floor do caller cấp chỉ dời
+niềm tin sang caller) — đường thật là Mosaic A hoặc aggregated-root, cả hai đã ở roadmap.
