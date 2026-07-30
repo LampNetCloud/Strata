@@ -1,0 +1,12 @@
+# Pin toolchain — issue #24.
+#
+# Vì sao pin: `cargo fmt --all -- --check` cho kết quả KHÁC nhau giữa các phiên bản
+# rustfmt (đợt #19 thấy 8 hunk đỏ ngay trên `main` ở file không ai sửa — rustfmt mới
+# hơn lúc viết code). Không pin thì "format đúng" trôi theo máy của từng người và CI
+# không thể làm trọng tài.
+#
+# Đổi channel = có thể sinh diff format mới → làm trong PR fmt-sweep RIÊNG, đừng trộn
+# vào PR logic.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
