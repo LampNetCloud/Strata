@@ -98,10 +98,25 @@ Không tự gỡ được, hai lẽ:
 2. **Đặt secret đòi quyền admin repo**, mà `lrybi` là `{admin: false, push: true}` trên
    **cả** `Strata` lẫn `Anchor`.
 
-Đã hỏi anh Đức ở comment #31 với ba hướng: thêm secret `ANCHOR_READ_TOKEN` · **cho `Anchor`
-public** · cấp admin. Nghiêng hướng public: crate là sub-primitive **đã đóng băng** (1
-commit từ 2026-07-03, không chứa secret), và nó gỡ rào cho **mọi** consumer thay vì mỗi
-consumer xin token một lần.
+Đã hỏi anh Đức ở comment #31 với ba hướng: thêm khoá đọc `ANCHOR_READ_TOKEN` · cho `Anchor`
+public · cấp admin.
+
+**Hướng đề xuất: khoá đọc.** Hướng "public" đã nêu ở comment #31 nay **rút lại** — nó đổi
+một quyết định cấp công ty (mở source lúc dự án đang phát triển) lấy một tiện lợi CI, và
+**không đảo ngược được**: private lại chỉ giấu bản gốc, không thu hồi được bản đã clone/fork/
+index. Lập luận "crate đóng băng, không chứa secret" chỉ chặn rò rỉ *khoá*, không chặn rò rỉ
+*thiết kế* — `lampnet-merkle-anchor` lộ cách dựng tầng neo trong khi spec chưa công bố.
+
+Trong hướng khoá đọc, **deploy key (SSH) bền hơn fine-grained PAT**:
+
+| | fine-grained PAT | deploy key |
+|---|---|---|
+| Hạn dùng | tối đa 1 năm → CI đỏ lúc hết hạn, thường không ai nhớ vì sao | không hết hạn |
+| Gắn với | tài khoản một người (người đó đổi quyền/rời đi là gãy) | riêng repo `Anchor` |
+| Phạm vi | Contents: read cho `Anchor` | read-only đúng `Anchor` |
+
+Đổi lại workflow phải rewrite sang SSH (`url."ssh://git@github.com/".insteadOf` + `ssh-agent`)
+thay cho `x-access-token` hiện tại. Cả hai đều cần **một** thao tác admin, làm một lần.
 
 > Rào này **lặp lại đúng chuyện #2/#4** hồi 2026-07-03: lần đó **máy dev** thiếu quyền đọc
 > repo private (anh Đức xử bằng cách tách `Anchor` ra + cấp read); lần này **runner CI**
@@ -122,7 +137,7 @@ npm run test:fixture                   → 8/8 case khớp vector chung
 
 ## 6. Còn lại của S7
 
-- **#31** — chờ quyền (§4). Merge được ngay khi có secret hoặc `Anchor` public.
+- **#31** — chờ quyền (§4). Merge được ngay khi runner có khoá đọc `Anchor`.
 - **Property test P1–P7** (`Strata-Tech §9.3`) — **chưa có** (`proptest`/`quickcheck` = 0 hit).
   Đây là phần còn lại lớn nhất của S7: `mmr_root_deterministic` · `mmr_inclusion_complete` ·
   `mmr_extend_monotone` · `canonical_roundtrip` · `state_root_order_independent` ·
