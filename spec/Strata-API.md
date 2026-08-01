@@ -156,6 +156,8 @@ let ok = lampnet_strata::verify_field_proof(&fp);                      // tự k
 
 `verify_version` SUY chiều trái/phải từ `leaf_index`, KHÔNG tin cờ trong proof (bind chặt index↔hash). `verify_field_proof` tính lại root từ `value` + siblings rồi so `state_root`.
 
+> ⚠️ **Tiền đề key-duy-nhất (INV-E6/E6-key, xem §8.0):** một version PHẢI có `field_key` duy nhất. Tới khi core enforce `DuplicateFieldKey` (issue #39), một `FieldProof` verify hợp lệ dưới `state_root` đã ký **KHÔNG** bảo đảm giá trị duy nhất cho một key — nếu caller ký version có key trùng, hai giá trị mâu thuẫn cùng sinh proof hợp lệ dưới CÙNG root (equivocation). Verifier bên-3 phải coi đây là rủi ro tồn dư; caller PHẢI khử trùng key trước khi ký.
+
 ### §2.6 `append_event` — loại #2 (chuỗi-thêm) và audit-log
 
 Hai cách, chọn theo nhu cầu neo:
@@ -215,6 +217,8 @@ Style axum khớp `lampnet-node.rs` (`Router::new().route("/v1/...", post(handle
 // 200
 { "index":12, "log_root":"<hex32>" }            // kind=version → trả như /version
 ```
+
+> **Byte-được-ký của `kind=audit` (chốt #23):** client ký trên **`AuditEntry::canonical()`** (KHÔNG phải `leaf_bytes()`). `AuditEntry` không có trường `sig` nên chữ ký KHÔNG vào MMR — đây là điểm DUY NHẤT trong Strata mà byte-được-ký không do root nào cam kết, nên phải nói tường minh. Daemon verify `pk.verify_strict(&ae.canonical(), &sig)` (INV-E4, loại malleable/small-order) bằng khoá phân giải từ `actor_did` (CHỐT-5). **KHÔNG** dùng domain-tag riêng (entry đã có `actor_did` + `created_ts` bên trong `canonical()`).
 
 ### GET `/v1/strata/:ref/head`
 ```jsonc
@@ -292,7 +296,7 @@ pub enum AnchorError { NotConfigured, Rejected(String), Network(String) }
 | Backend | Cơ chế | Khi nào | Nguồn pattern |
 |---|---|---|---|
 | **Settlement** (LampNet) | tx metadata **label 1234** `{ ref_id, head_version_hash, mmr_root, seq }` hex (đối chiếu `settle.ts:358` đang dùng 1234 cho `{merkle_root,epoch,...}`); message người-đọc label **674** CIP-20 | Strata cập nhật dày, gộp lô (priority `batch_daily`/`milestone`) — rẻ nhất | `lampnet-settlement/src/settle.ts:344-391` |
-| **Mosaic** (VeData/GreenSun) | reference UTxO CIP-68 spend-recreate, validator enforce `seq'==seq+1` on-chain (INV-E7) | giá trị cao cần on-chain state + finality (priority `immediate`) | `Strata-Tech.md §5.2 Lựa chọn A`, `Stamp-Strata-Mapping §4` |
+| **Mosaic** (VeData/GreenSun) | reference UTxO CIP-68 spend-recreate, validator enforce `seq' > seq` on-chain (INV-E7) — **⚠️ Phase 2, CHƯA hiện thực; hiện chỉ trait `MosaicBackend` + `MockMosaic`, KHÔNG có validator `.ak`** | giá trị cao cần on-chain state + finality (priority `immediate`) | `Strata-Tech.md §5.2 Lựa chọn A`, `Stamp-Strata-Mapping §4` |
 
 Cadence đẩy theo `AnchorPriority` (Stamp-Strata-Mapping §4): `immediate` → đẩy mỗi version (Mosaic A); `milestone` → mốc/epoch; `batch_daily` → gom ngày (settlement metadata); `no_anchor` → KHÔNG đẩy, sống tầng (a)/(b).
 
@@ -456,11 +460,10 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
 
 - Body lỗi HTTP: `{ "error":"<variant>", "detail":{ <các trường payload hex/số> } }`. VD `HashLinkBroken` → `detail:{ "expected":"<hex32>", "got":"<hex32>" }`; `FieldPolicyDenied` → `detail:{ "field_key":"<hex>" }`.
 - **Case biên bắt buộc xử lý ở daemon (không phải `StrataError` core, nhưng phải trả lỗi rõ, KHÔNG panic):**
-  - `ref` không tồn tại → 404 `{ "error":"RefNotFound" }`.
-  - `seq`/`key` không tồn tại (core trả `None` từ `version`/`prove_version`/`prove_field`/`version_at`) → 404 `{ "error":"NotFound" }`.
+  - `ref`/`seq`/`key` không tồn tại (core trả `None` từ `version`/`prove_version`/`prove_field`/`version_at`) → 404 `{ "error":"NotFound", "detail":{ "what": "ref"|"seq"|"field key"|"version tại t" } }`. (Daemon phân biệt bằng `detail.what`, KHÔNG bằng tên biến thể riêng — code `node/src/error.rs` KHÔNG có `RefNotFound`.)
   - `version_at(t)` với `t < ts(genesis)` → core trả `None` → 404 (KHÔNG 500).
-  - Body sai schema / hex sai độ dài (H32 ≠ 64 hex char, sig ≠ 128 hex char) → 400 `{ "error":"BadRequest", "detail":{...} }` TRƯỚC khi vào core.
-  - `state_fields` có `key` trùng → daemon từ chối 400 (core `prove_field` chỉ trả lần xuất hiện đầu sau sort; trùng key = ngữ nghĩa mơ hồ). **Chốt INV key-duy-nhất:** key trong một version PHẢI duy nhất. ⚠️ **Không được chỉ chặn ở daemon** — `build_state_root` (`state.rs`) hiện nhận dup key thản nhiên, nên caller gọi thẳng Rust API ký được version "field X = v1" VÀ "X = v2" cùng sinh proof hợp lệ (equivocation). Core PHẢI enforce: `build_state_root`/`prove_field` reject dup key bằng biến thể lỗi mới `DuplicateFieldKey { field_key }` (E6). Issue riêng giao Thịnh — tách khỏi S1/S2/S3.
+  - Body sai schema / hex sai độ dài (H32 ≠ 64 hex char, sig ≠ 128 hex char) → 400 `{ "error":"MalformedRequest", "detail":{...} }` TRƯỚC khi vào core. (Tên biến thể cửa theo `error.rs`: `MalformedRequest`, `NotFound`, `RefExists`, `AnchorNotConfigured`, `AnchorRejected`, `AnchorNetwork` — KHÔNG phải `BadRequest`.)
+  - `state_fields` có `key` trùng → daemon từ chối 400 (core `prove_field` chỉ trả lần xuất hiện đầu sau sort; trùng key = ngữ nghĩa mơ hồ). **Chốt INV key-duy-nhất:** key trong một version PHẢI duy nhất. ⚠️ **Không được chỉ chặn ở daemon** — `build_state_root` (`state.rs`) hiện nhận dup key thản nhiên, nên caller gọi thẳng Rust API ký được version "field X = v1" VÀ "X = v2" cùng sinh proof hợp lệ (equivocation). Core PHẢI enforce: `build_state_root`/`prove_field` reject dup key bằng biến thể lỗi mới `DuplicateFieldKey { field_key }` (E6) — reject KỂ CẢ khi value giống hệt (fail-closed, đơn giản). Phạm vi: chỉ `state_fields`/`build_state_root`; **KHÔNG** áp cho `field_policy::grant()` (dedupe-idempotent ở đó là đúng — ngữ nghĩa QUYỀN khác GIÁ TRỊ). Issue riêng (#39) giao Thịnh — tách khỏi S1/S2/S3.
 
 ### §8.1 S1 — `AnchorSink → Mosaic` (CIP-68): byte-layout datum + resolve
 
@@ -481,17 +484,21 @@ StrataAnchorDatum = Constr 0 [
 ]
 ```
 
-- **Thứ tự trường trong `extra` CHỐT theo canonical anchor** `(ref_id, head_version_hash, mmr_root, seq)` — đúng thứ tự `StrataAnchor` (`_CONTRACT.md`). Validator §5.4 kiểm `datum_out.seq == datum_in.seq+1` đọc field thứ 4 của `extra`.
+- **Thứ tự trường trong `extra` CHỐT theo canonical anchor** `(ref_id, head_version_hash, mmr_root, seq)` — đúng thứ tự `StrataAnchor` (`_CONTRACT.md`). Validator §5.4 kiểm `datum_out.seq > datum_in.seq` (đơn điệu tăng, CHO PHÉP gap — khớp core `publish_anchor` neo HEAD + adapter Settlement; xem §5.4 lý do KHÔNG dùng `==seq+1`) đọc field thứ 4 của `extra`.
 - **`seq` là `Int`**: Plutus `Int` không giới hạn `u64`; adapter PHẢI reject `seq > u64::MAX` (không xảy ra vì core dùng `u64`) và reject `Int` âm khi resolve về `u64`.
 - **Byte-size on-chain:** 3×32 bytes + Int(≤8B) trong `extra` + overhead map metadata ~40B ≈ **~180–200 byte datum** (so 104B commitment thuần) — vẫn nhỏ, đủ min-ADA `1_500_000` lovelace (§4.3). Metadata map cố ý tối thiểu để không đội phí; KHÔNG nhét thêm field nào (giữ INV-E5 — không lộ loại).
-- **Backend Settlement (Lựa chọn B, metadata label 1234):** payload = `{ "ref_id":"<hex32>", "head_version_hash":"<hex32>", "mmr_root":"<hex32>", "seq":<int> }`, KHÔNG có metadata map CIP-68 (metadata thuần). Cùng 4 trường, cùng thứ tự.
+- **Backend Settlement (Lựa chọn B, metadata label 1234):** payload KHÔNG phải map field-tên JSON-hex. Mỗi record = **CBOR** `{ "t": <uint discriminator>, "a": [ … ] }` với giá trị **byte thô** (không hex-string). Hai loại record:
+  - `t=1` (anchor): `a = [ ref_id: Bytes(32), head_version_hash: Bytes(32), mmr_root: Bytes(32), seq: uint ]` — đúng thứ tự canonical `(ref_id, head_version_hash, mmr_root, seq)`.
+  - `t=2` (rotation): `a = [ payload ]` — một bytestring (hoặc mảng chunk khi >64B).
+  - **Chunk rule** (giới hạn 64B/mục metadata Cardano): độ dài `≤64B` → MỘT bytestring (cấm chunk); `>64B` → mảng chunk, mọi chunk trừ cuối đúng 64B.
+  - **Nguồn sự thật DUY NHẤT = `apis/settlement-metadata.json`** (test-vector CHUNG Rust↔TS, sinh bởi `cargo run --example dump_settlement_fixture`; Rust giữ decoder = ra đề, TS phải khớp). KHÔNG có metadata map CIP-68 (đó là Lựa chọn A/Mosaic). Consumer PHẢI decode theo `{t,a}` raw, KHÔNG theo map field-tên.
 
 **(b) Error-semantics `AnchorSink` (mở rộng §4.1 `AnchorError`).** §4.1 mới có 3 biến thể; đủ cho case biên cần:
 
 ```rust
 pub enum AnchorError {
     NotConfigured,                 // backend chưa cấu hình (thiếu key/URL)
-    Rejected(String),              // backend/validator từ chối (VD seq' != seq+1 on-chain)
+    Rejected(String),              // backend/validator từ chối (VD seq' ≤ seq on-chain)
     Network(String),               // lỗi mạng/timeout — RETRYABLE
     RollbackAttempt { on_chain_seq: u64, attempted: u64 },  // INV-E7 backend phát hiện anchor cũ hơn
     DatumTooLarge { bytes: usize }, // datum vượt maxTxSize/protocol param
@@ -501,7 +508,13 @@ pub enum AnchorError {
 
 - **Idempotency (bắt buộc):** `publish` cùng một anchor `seq` hai lần (retry sau `Network`) KHÔNG được tạo hai tx spend-recreate. Adapter phải: query on-chain seq hiện tại TRƯỚC khi build tx; nếu `on_chain_seq >= anchor.seq` → trả `Ok(None)` (đã neo) HOẶC `Err(RollbackAttempt)` nếu `on_chain_seq > anchor.seq`. Chốt: `on_chain_seq == anchor.seq` → `Ok(None)` (idempotent no-op); `on_chain_seq > anchor.seq` → `RollbackAttempt`.
 - **Phân tầng retryable:** chỉ `Network(_)` retry (backoff). `Rejected`/`RollbackAttempt`/`DatumTooLarge`/`InsufficientAda` là fail cứng — KHÔNG retry, trả lên daemon.
-- **INV-E7 hai lớp (nhắc lại §4.3, chốt cách verify):** core `publish_anchor()` chặn rollback trong-tiến-trình; adapter chặn rollback cross-process bằng query on-chain seq (Mosaic A: validator; Settlement B: indexer từ chối `seq ≤ seq đã thấy`). **Cả hai lớp đều phải test riêng.**
+- **INV-E7 hai lớp — mức cross-process KHÁC theo backend (chốt rõ để reader bên-3 không tin quá):**
+  - Lớp trong-tiến-trình: core `publish_anchor()` chặn rollback (mọi backend).
+  - Lớp cross-process, theo backend:
+    - **Settlement legacy (`beacon_policy=None`, quét địa chỉ):** *best-effort*. Bị flood-eviction làm mù (#14) — mù CẢ guard bên GHI (`publish_batch` dùng `resolve`) lẫn bên đọc. Đủ cho publisher-1-ref_id / reader tin daemon; **KHÔNG** đủ cho reader bên-3 không tin publisher.
+    - **Settlement + beacon_mode (§8.1(d)):** chống flood (resolve theo asset). Đủ cho bên-3 về **chống-flood**; nhưng đơn-điệu **vẫn dựa khoá publisher** — KHÔNG chống publisher-tự-rollback / key-compromise.
+    - **Mosaic A (Plutus validator `seq_out > seq_in`):** INV-E7 cross-process **đầy đủ, độc-lập-khoá** — chống cả key-compromise. ⚠️ **PHASE 2 — CHƯA hiện thực trong repo** (hiện chỉ có trait `MosaicBackend` + `MockMosaic`; KHÔNG có validator `.ak`/`plutus.json`). **Tới khi validator on-chain được build, KHÔNG có tier độc-lập-khoá nào khả dụng** — mọi đường đang ship (Settlement legacy + beacon) đều quy về tin-khoá-publisher.
+  - Cả ba lớp đều phải test riêng.
 
 **(c) Resolve ngược `anchor on-chain → verify mmr_root khớp chain`.** THÊM method vào trait (S1 DoD yêu cầu "proof resolvable on-chain"):
 
@@ -537,6 +550,14 @@ assert StrataChain::verify_version(on_chain.mmr_root, &vh, on_chain.seq, on_chai
 4. **INV-E7 idempotent:** gọi `publish(seq=1)` hai lần → lần hai trả `Ok(None)`, KHÔNG tạo tx mới (assert số tx = 1).
 5. Resolve sau append: neo seq=1, append tới seq=5 (chưa neo) → `resolve` vẫn trả seq=1; verify proof version seq=1 dưới `on_chain.mmr_root` (size cũ) PASS; version seq=5 chưa neo → không có anchor.
 6. `DatumTooLarge`/`InsufficientAda`: mock backend từ chối → adapter trả đúng biến thể, KHÔNG panic.
+
+**(d) Beacon mode (opt-in) — con-trỏ-latest xác thực chống flood-eviction (#14).**
+`beacon_policy: Option<String>` trong `SinkConfig` (mặc định `None` = legacy metadata-only, resolve bằng quét địa chỉ — *best-effort*, xem lớp tin cậy ở (b)). Khi bật:
+- Beacon = NFT **native**, `policy_id` = native minting policy `sig(publisher)` (KHÔNG Plutus validator — Settlement giữ "no on-chain script"), `assetName = ref_id` (32B), `unit = policy_id ‖ ref_id`.
+- **beacon-walk (write):** mỗi anchor, publisher tiêu UTxO đang giữ beacon + gửi beacon sang UTxO mới mang metadata anchor (label 1234, record `{t,a}`). Beacon luôn nằm trên UTxO anchor mới nhất.
+- **resolve (read):** `resolve(ref_id)` = tx gần nhất đụng `unit` (asset-index), **O(1)** theo lịch sử (hằng số ~3 request Blockfrost: asset→tx, tx→input-addr, tx→metadata; KHÔNG quét cửa sổ), miễn nhiễm flood; defense-in-depth: đối chiếu `input == publisher`, sai → `Rejected` (fail-closed).
+- **Mô hình tin cậy — CHỐT RÕ:** trust root = **khoá publisher**. Beacon-native chống **outsider** (flood, mint giả) NHƯNG **KHÔNG** chống **publisher-tự-rollback / key-compromise**: native policy chỉ chặn *mint lại*, KHÔNG chặn *di chuyển* beacon sang UTxO có `seq` thấp hơn; không validator nên không ép `seq_out > seq_in` on-chain. Đơn-điệu độc-lập-khoá là thuộc tính của **Mosaic A** (validator §5.4, Phase 2), KHÔNG phải beacon-native.
+- **Giới hạn quy mô:** beacon per-ref_id (1 NFT / 1 UTxO / ref_id) phù hợp tới **~10⁷ ref_id/publisher**; lớn hơn (→10¹¹) min-ADA khoá vượt tổng cung ADA → cần **aggregated-root** (1 cây commit nhiều ref_id, proof O(log N)) — roadmap, ngoài S1.
 
 ### §8.2 S2 — `DerivedIndex` / columnar query: kiểu đủ để code + FieldProof xuyên version
 
