@@ -105,6 +105,134 @@ impl StrataVersion {
     }
 }
 
+/// Lỗi giải mã canonical (`parse_canonical_core`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalError {
+    /// Buffer ngắn hơn số byte cần đọc cho trường tiếp theo.
+    Truncated {
+        /// Tên trường đang đọc.
+        field: &'static str,
+        /// Số byte cần.
+        need: usize,
+        /// Số byte còn lại.
+        have: usize,
+    },
+    /// `len(content_cid)` khai báo vượt phần byte còn lại.
+    LengthOverflow {
+        /// Độ dài khai báo trong prefix.
+        declared: usize,
+        /// Số byte thực còn lại.
+        remaining: usize,
+    },
+    /// Còn byte thừa sau khi đọc hết các trường core.
+    TrailingBytes {
+        /// Số byte thừa ở đuôi.
+        extra: usize,
+    },
+}
+
+impl std::fmt::Display for CanonicalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Truncated { field, need, have } => {
+                write!(
+                    f,
+                    "canonical cụt tại '{field}': cần {need} byte, còn {have}"
+                )
+            }
+            Self::LengthOverflow {
+                declared,
+                remaining,
+            } => write!(
+                f,
+                "canonical len-prefix khai {declared} byte nhưng chỉ còn {remaining}"
+            ),
+            Self::TrailingBytes { extra } => {
+                write!(f, "canonical thừa {extra} byte ở đuôi")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CanonicalError {}
+
+/// Giải mã ngược [`StrataVersion::canonical_core`] — nghịch đảo của encoder (§1.7).
+///
+/// Trả version với `sig = 0^64`: `sig` **không nằm trong** canonical (CHỐT-1) nên
+/// không khôi phục được từ byte — đúng phát biểu P4 (§9.3) "cùng `StrataVersion`
+/// **trừ sig**". `version_hash` của kết quả trùng với bản gốc.
+///
+/// **Chặt có chủ đích.** Từ chối byte cụt, `len(content_cid)` khai vượt buffer, và
+/// **byte thừa ở đuôi**. Decoder lỏng ở bất kỳ điểm nào trong ba điểm đó sẽ cho hai
+/// chuỗi byte khác nhau cùng giải ra một version ⇒ mở lại đúng lớp nhập nhằng mà
+/// canonical §1.7 sinh ra để đóng (cùng họ với trần `< 2³²` ở [`crate::u32_be`],
+/// issue #18).
+pub fn parse_canonical_core(bytes: &[u8]) -> Result<StrataVersion, CanonicalError> {
+    struct Cursor<'a> {
+        b: &'a [u8],
+        i: usize,
+    }
+    impl<'a> Cursor<'a> {
+        fn take(&mut self, n: usize, field: &'static str) -> Result<&'a [u8], CanonicalError> {
+            let have = self.b.len() - self.i;
+            if have < n {
+                return Err(CanonicalError::Truncated {
+                    field,
+                    need: n,
+                    have,
+                });
+            }
+            let out = &self.b[self.i..self.i + n];
+            self.i += n;
+            Ok(out)
+        }
+        fn u64(&mut self, field: &'static str) -> Result<u64, CanonicalError> {
+            let s = self.take(8, field)?;
+            Ok(u64::from_be_bytes(s.try_into().expect("đúng 8 byte")))
+        }
+        fn h32(&mut self, field: &'static str) -> Result<Hash32, CanonicalError> {
+            let s = self.take(32, field)?;
+            Ok(s.try_into().expect("đúng 32 byte"))
+        }
+    }
+
+    let mut c = Cursor { b: bytes, i: 0 };
+    let seq = c.u64("seq")?;
+    let prev_hash = c.h32("prev_hash")?;
+
+    let len_bytes = c.take(4, "len(content_cid)")?;
+    let declared = u32::from_be_bytes(len_bytes.try_into().expect("đúng 4 byte")) as usize;
+    let remaining = bytes.len() - c.i;
+    if declared > remaining {
+        return Err(CanonicalError::LengthOverflow {
+            declared,
+            remaining,
+        });
+    }
+    let content_cid = c.take(declared, "content_cid")?.to_vec();
+
+    let state_root = c.h32("state_root")?;
+    let author_did = c.h32("author_did")?;
+    let policy_hash = c.h32("policy_hash")?;
+    let ts = c.u64("ts")?;
+
+    if c.i != bytes.len() {
+        return Err(CanonicalError::TrailingBytes {
+            extra: bytes.len() - c.i,
+        });
+    }
+
+    Ok(StrataVersion::unsigned(
+        seq,
+        prev_hash,
+        content_cid,
+        state_root,
+        author_did,
+        policy_hash,
+        ts,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
