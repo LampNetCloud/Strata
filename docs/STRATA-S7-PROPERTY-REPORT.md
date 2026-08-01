@@ -1,6 +1,6 @@
 # Strata S7 — Property test P1–P7 (`Strata-Tech.md` §9.3)
 
-**Ngày:** 2026-08-01 · **Nhánh:** `thinh/s7-property-tests` · **Phạm vi:** phần còn lại lớn nhất
+**Ngày:** 2026-08-01 · **PR:** #38 · **Issue spec kèm theo:** #39 · **Phạm vi:** phần còn lại lớn nhất
 của milestone S7 sau đợt CI (`STRATA-S7-CI-REPORT.md`).
 
 Trước đợt này repo có **0** property test (không `proptest`, không `quickcheck`) trong khi
@@ -133,7 +133,7 @@ trường" của §3.6. Điểm cần quyết: có siết (dedupe/từ chối) h
 
 ## 5. Việc treo sang anh Đức
 
-Issue mở kèm đợt này (2 điểm, đều spec-adjacent):
+Issue **#39** mở kèm đợt này (2 điểm spec + 1 đề xuất text):
 
 1. **`ref_id` length-prefix** (§4.1) — sửa hay giữ + ghi tiền đề "`author_did` LUÔN 32 byte"
    vào spec.
