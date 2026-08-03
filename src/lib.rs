@@ -70,7 +70,7 @@ pub use settlement::{
 };
 pub use state::{FieldProof, build_state_root, prove_field, verify_field_proof};
 pub use tabular::{ColumnSumTree, RowSumProof, verify_row_sum, verify_row_sum_range};
-pub use version::{Hash32, StrataVersion};
+pub use version::{CanonicalError, Hash32, StrataVersion, parse_canonical_core};
 
 /// Re-export tiện dụng từ sub-primitive nền.
 pub use lampnet_merkle_anchor::{Blake3Hasher, DomainHasher, hash, mmr};
