@@ -295,8 +295,8 @@ pub enum AnchorError { NotConfigured, Rejected(String), Network(String) }
 
 | Backend | Cơ chế | Khi nào | Nguồn pattern |
 |---|---|---|---|
-| **Settlement** (LampNet) | tx metadata **label 1234** `{ ref_id, head_version_hash, mmr_root, seq }` hex (đối chiếu `settle.ts:358` đang dùng 1234 cho `{merkle_root,epoch,...}`); message người-đọc label **674** CIP-20 | Strata cập nhật dày, gộp lô (priority `batch_daily`/`milestone`) — rẻ nhất | `lampnet-settlement/src/settle.ts:344-391` |
-| **Mosaic** (VeData/GreenSun) | reference UTxO CIP-68 spend-recreate, validator enforce `seq' > seq` on-chain (INV-E7) — **⚠️ Phase 2, CHƯA hiện thực; hiện chỉ trait `MosaicBackend` + `MockMosaic`, KHÔNG có validator `.ak`** | giá trị cao cần on-chain state + finality (priority `immediate`) | `Strata-Tech.md §5.2 Lựa chọn A`, `Stamp-Strata-Mapping §4` |
+| **Settlement** (LampNet) | tx metadata **label 1234**, record `{t,a}` raw-bytes (`t=1` anchor, `a=[ref_id, head_version_hash, mmr_root, seq]`) — byte-layout ở §8.1(a), test-vector `apis/settlement-metadata.json`; message người-đọc label **674** CIP-20 | Strata cập nhật dày, gộp lô (priority `batch_daily`/`milestone`) — rẻ nhất | `lampnet-settlement/src/settle.ts:344-391` |
+| **Mosaic** (VeData/GreenSun) | reference UTxO CIP-68 spend-recreate, validator Plutus V3 enforce `seq' == seq + 1` on-chain (INV-E7) — **đã build + chạy Preview**; mã ở `VeDataIO/Code: mosaic/aiken/validators/strata_anchor.ak` (KHÔNG ở repo này) | giá trị cao cần on-chain state + finality (priority `immediate`) | `Strata-Tech.md §5.2 Lựa chọn A` + `§5.4`, `Stamp-Strata-Mapping §4` |
 
 Cadence đẩy theo `AnchorPriority` (Stamp-Strata-Mapping §4): `immediate` → đẩy mỗi version (Mosaic A); `milestone` → mốc/epoch; `batch_daily` → gom ngày (settlement metadata); `no_anchor` → KHÔNG đẩy, sống tầng (a)/(b).
 
@@ -484,14 +484,20 @@ StrataAnchorDatum = Constr 0 [
 ]
 ```
 
-- **Thứ tự trường trong `extra` CHỐT theo canonical anchor** `(ref_id, head_version_hash, mmr_root, seq)` — đúng thứ tự `StrataAnchor` (`_CONTRACT.md`). Validator §5.4 kiểm `datum_out.seq > datum_in.seq` (đơn điệu tăng, CHO PHÉP gap — khớp core `publish_anchor` neo HEAD + adapter Settlement; xem §5.4 lý do KHÔNG dùng `==seq+1`) đọc field thứ 4 của `extra`.
+- **Thứ tự trường trong `extra` CHỐT theo canonical anchor** `(ref_id, head_version_hash, mmr_root, seq)` — đúng thứ tự `StrataAnchor` (`_CONTRACT.md`). Validator đang chạy (`Strata-Tech §5.4`) đọc field thứ 4 của `extra` và kiểm `datum_out.seq == datum_in.seq + 1` (KHÔNG cho gap). ⚠️ Tầng đẩy off-chain hiện cho gap → lệch pha, chưa giải; xem cảnh báo ở §5.4 trước khi dùng đường Mosaic-A.
 - **`seq` là `Int`**: Plutus `Int` không giới hạn `u64`; adapter PHẢI reject `seq > u64::MAX` (không xảy ra vì core dùng `u64`) và reject `Int` âm khi resolve về `u64`.
 - **Byte-size on-chain:** 3×32 bytes + Int(≤8B) trong `extra` + overhead map metadata ~40B ≈ **~180–200 byte datum** (so 104B commitment thuần) — vẫn nhỏ, đủ min-ADA `1_500_000` lovelace (§4.3). Metadata map cố ý tối thiểu để không đội phí; KHÔNG nhét thêm field nào (giữ INV-E5 — không lộ loại).
 - **Backend Settlement (Lựa chọn B, metadata label 1234):** payload KHÔNG phải map field-tên JSON-hex. Mỗi record = **CBOR** `{ "t": <uint discriminator>, "a": [ … ] }` với giá trị **byte thô** (không hex-string). Hai loại record:
   - `t=1` (anchor): `a = [ ref_id: Bytes(32), head_version_hash: Bytes(32), mmr_root: Bytes(32), seq: uint ]` — đúng thứ tự canonical `(ref_id, head_version_hash, mmr_root, seq)`.
   - `t=2` (rotation): `a = [ payload ]` — một bytestring (hoặc mảng chunk khi >64B).
   - **Chunk rule** (giới hạn 64B/mục metadata Cardano): độ dài `≤64B` → MỘT bytestring (cấm chunk); `>64B` → mảng chunk, mọi chunk trừ cuối đúng 64B.
-  - **Nguồn sự thật DUY NHẤT = `apis/settlement-metadata.json`** (test-vector CHUNG Rust↔TS, sinh bởi `cargo run --example dump_settlement_fixture`; Rust giữ decoder = ra đề, TS phải khớp). KHÔNG có metadata map CIP-68 (đó là Lựa chọn A/Mosaic). Consumer PHẢI decode theo `{t,a}` raw, KHÔNG theo map field-tên.
+  - **Luật TỪ CHỐI (bắt buộc — nửa âm của hợp đồng).** Fixture hiện chỉ phủ ca **dương** (round-trip hợp lệ), nên một cài đặt pass 8/8 vector vẫn có thể *nhận* encoding không chuẩn tắc — đúng lỗ malleability mà decoder Rust đang chống. Decoder ĐÚNG PHẢI reject:
+    1. bytestring đơn lẻ dài `>64B` → `BadChunking`;
+    2. mảng chunk có `<2` phần tử → `BadChunking`;
+    3. chunk cuối rỗng → `BadChunking`;
+    4. map record KHÔNG đúng 2 entry `(t, a)` → `BadShape` (chặn cả khoá trùng);
+    5. `t` lạ (không 1, không 2) → **BỎ QUA record, KHÔNG lỗi** (forward-compat có chủ ý).
+  - **Nguồn sự thật = `apis/settlement-metadata.json` cho nửa dương** (test-vector CHUNG Rust↔TS, sinh bởi `cargo run --example dump_settlement_fixture`; Rust giữ decoder = ra đề, TS phải khớp) **+ 5 luật từ chối trên cho nửa âm**. Fixture chỉ trở thành nguồn sự thật DUY NHẤT khi bổ sung mục `must_reject` (cbor_hex + lý do) — việc thuộc tầng code/artifact. KHÔNG có metadata map CIP-68 (đó là Lựa chọn A/Mosaic). Consumer PHẢI decode theo `{t,a}` raw, KHÔNG theo map field-tên.
 
 **(b) Error-semantics `AnchorSink` (mở rộng §4.1 `AnchorError`).** §4.1 mới có 3 biến thể; đủ cho case biên cần:
 
@@ -513,7 +519,7 @@ pub enum AnchorError {
   - Lớp cross-process, theo backend:
     - **Settlement legacy (`beacon_policy=None`, quét địa chỉ):** *best-effort*. Bị flood-eviction làm mù (#14) — mù CẢ guard bên GHI (`publish_batch` dùng `resolve`) lẫn bên đọc. Đủ cho publisher-1-ref_id / reader tin daemon; **KHÔNG** đủ cho reader bên-3 không tin publisher.
     - **Settlement + beacon_mode (§8.1(d)):** chống flood (resolve theo asset). Đủ cho bên-3 về **chống-flood**; nhưng đơn-điệu **vẫn dựa khoá publisher** — KHÔNG chống publisher-tự-rollback / key-compromise.
-    - **Mosaic A (Plutus validator `seq_out > seq_in`):** INV-E7 cross-process **đầy đủ, độc-lập-khoá** — chống cả key-compromise. ⚠️ **PHASE 2 — CHƯA hiện thực trong repo** (hiện chỉ có trait `MosaicBackend` + `MockMosaic`; KHÔNG có validator `.ak`/`plutus.json`). **Tới khi validator on-chain được build, KHÔNG có tier độc-lập-khoá nào khả dụng** — mọi đường đang ship (Settlement legacy + beacon) đều quy về tin-khoá-publisher.
+    - **Mosaic A (Plutus validator, `seq' == seq + 1`):** **đã build + chạy Preview** — mã ở `VeDataIO/Code: mosaic/aiken/validators/strata_anchor.ak`, KHÔNG ở repo này (ranh giới "Mosaic giữ validator"). Đây là tier duy nhất **chống-tụt-lùi độc-lập-khoá**: kẻ chiếm khoá publisher cũng không hạ được `seq` on-chain. **Giới hạn phải nói thật:** validator KHÔNG kiểm `mmr_root'` là mở rộng của `mmr_root` (thiếu vế inclusion mà `Strata-Math §7.1` đòi) ⟹ **không** chống *rewrite-then-re-anchor*: kẻ chiếm khoá dựng nhánh lịch sử khác rồi neo tiến lên vẫn qua. Chống rewrite hiện dựa khoá author + ngưỡng operator. Xem `Strata-Tech §5.4` (kèm lệch pha gap off-chain↔on-chain, chưa giải).
   - Cả ba lớp đều phải test riêng.
 
 **(c) Resolve ngược `anchor on-chain → verify mmr_root khớp chain`.** THÊM method vào trait (S1 DoD yêu cầu "proof resolvable on-chain"):
@@ -556,7 +562,7 @@ assert StrataChain::verify_version(on_chain.mmr_root, &vh, on_chain.seq, on_chai
 - Beacon = NFT **native**, `policy_id` = native minting policy `sig(publisher)` (KHÔNG Plutus validator — Settlement giữ "no on-chain script"), `assetName = ref_id` (32B), `unit = policy_id ‖ ref_id`.
 - **beacon-walk (write):** mỗi anchor, publisher tiêu UTxO đang giữ beacon + gửi beacon sang UTxO mới mang metadata anchor (label 1234, record `{t,a}`). Beacon luôn nằm trên UTxO anchor mới nhất.
 - **resolve (read):** `resolve(ref_id)` = tx gần nhất đụng `unit` (asset-index), **O(1)** theo lịch sử (hằng số ~3 request Blockfrost: asset→tx, tx→input-addr, tx→metadata; KHÔNG quét cửa sổ), miễn nhiễm flood; defense-in-depth: đối chiếu `input == publisher`, sai → `Rejected` (fail-closed).
-- **Mô hình tin cậy — CHỐT RÕ:** trust root = **khoá publisher**. Beacon-native chống **outsider** (flood, mint giả) NHƯNG **KHÔNG** chống **publisher-tự-rollback / key-compromise**: native policy chỉ chặn *mint lại*, KHÔNG chặn *di chuyển* beacon sang UTxO có `seq` thấp hơn; không validator nên không ép `seq_out > seq_in` on-chain. Đơn-điệu độc-lập-khoá là thuộc tính của **Mosaic A** (validator §5.4, Phase 2), KHÔNG phải beacon-native.
+- **Mô hình tin cậy — CHỐT RÕ:** trust root = **khoá publisher**. Beacon-native chống **outsider** (flood, mint giả) NHƯNG **KHÔNG** chống **publisher-tự-rollback / key-compromise**: native policy chỉ chặn *mint lại*, KHÔNG chặn *di chuyển* beacon sang UTxO có `seq` thấp hơn; không validator nên không ép đơn điệu `seq` on-chain. Đơn-điệu độc-lập-khoá là thuộc tính của **Mosaic A** (validator `Strata-Tech §5.4`, đã chạy Preview), KHÔNG phải beacon-native — và ngay ở Mosaic A cũng chỉ là *chống-tụt-lùi*, không phải *chống-rewrite* (xem (b)).
 - **Giới hạn quy mô:** beacon per-ref_id (1 NFT / 1 UTxO / ref_id) phù hợp tới **~10⁷ ref_id/publisher**; lớn hơn (→10¹¹) min-ADA khoá vượt tổng cung ADA → cần **aggregated-root** (1 cây commit nhiều ref_id, proof O(log N)) — roadmap, ngoài S1.
 
 ### §8.2 S2 — `DerivedIndex` / columnar query: kiểu đủ để code + FieldProof xuyên version
