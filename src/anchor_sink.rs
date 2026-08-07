@@ -49,7 +49,7 @@ pub struct AnchorReceipt {
     pub slot: Option<u64>,
 }
 
-/// Lỗi adapter (§8.1b — 6 biến thể phủ hết case biên).
+/// Lỗi adapter (§8.1b — 7 biến thể phủ hết case biên).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnchorError {
     /// Backend chưa cấu hình (thiếu key/URL).
@@ -60,6 +60,28 @@ pub enum AnchorError {
     Network(String),
     /// INV-E7: backend phát hiện anchor cũ hơn on-chain (fail cứng).
     RollbackAttempt { on_chain_seq: u64, attempted: u64 },
+    /// **Backend Mosaic-A: nhảy bậc seq.** Validator Plutus đang chạy ép
+    /// `datum_out.seq == datum_in.seq + 1` (`VeDataIO/Code: mosaic/aiken/lib/strata/anchor.ak:55-57`,
+    /// test `seq_advances_rejects_skip`). Neo một `seq` cao hơn `on_chain_seq + 1` sẽ bị
+    /// chuỗi từ chối, nhưng head local đã tiến ⇒ **mọi lần neo sau kẹt vĩnh viễn**.
+    /// Vì vậy sink chặn TẠI CHỖ, trước khi dựng tx (anh Đức chốt hướng B ngày 2026-08-07:
+    /// giữ luật on-chain, sửa tầng đẩy — neo đúng từng seq).
+    ///
+    /// `expected` = seq DUY NHẤT được phép neo tiếp theo; người gọi phải neo `expected`
+    /// trước (fail cứng, KHÔNG retryable — retry cùng `attempted` vẫn hỏng y hệt).
+    ///
+    /// KHÔNG áp cho lần neo ĐẦU TIÊN của một lineage (`on_chain_seq == None`): validator
+    /// không guard CREATE nên UTxO anchor đầu được mang `seq` bất kỳ — đó là đường hợp lệ
+    /// để đưa chuỗi đã sống off-chain lên neo giữa chừng.
+    SeqGap {
+        /// `seq` on-chain hiện tại (`None` = lineage chưa neo lần nào — biến thể này
+        /// hiện KHÔNG được dựng với `None`; trường giữ để sink tương lai chặn chặt hơn).
+        on_chain_seq: Option<u64>,
+        /// `seq` DUY NHẤT được phép neo tiếp theo.
+        expected: u64,
+        /// `seq` mà người gọi vừa thử neo.
+        attempted: u64,
+    },
     /// Datum vượt maxTxSize/protocol param (fail cứng).
     DatumTooLarge { bytes: usize },
     /// Backend UTxO (Mosaic A): min-ADA không đủ (fail cứng).
@@ -566,7 +588,12 @@ impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
         if priority == AnchorPriority::NoAnchor {
             return Ok(None); // sống tầng (a)/(b), không đẩy
         }
-        // Idempotency + rollback cross-process (§8.1b): query on-chain seq TRƯỚC khi build.
+        // Idempotency + rollback + nhảy bậc (§8.1b): query on-chain seq TRƯỚC khi build.
+        //
+        // Ba nhánh, KHÔNG được gộp: neo lại đúng seq = no-op; neo lùi = rollback (INV-E7);
+        // neo vượt quá một bậc = wedge. Nhánh thứ ba trước đây rơi vào `_ => {}` và được đẩy
+        // thẳng lên chuỗi, nơi validator từ chối (`seq' == seq + 1`) — nhưng lúc đó head
+        // local đã tiến nên KHÔNG có đường quay lại: mọi lần neo sau đều nhảy bậc y hệt.
         match self.backend.on_chain_seq(&anchor.ref_id)? {
             Some(s) if s == anchor.seq => return Ok(None), // đã neo — no-op idempotent
             Some(s) if s > anchor.seq => {
@@ -575,6 +602,17 @@ impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
                     attempted: anchor.seq,
                 });
             }
+            Some(s) if anchor.seq > s + 1 => {
+                return Err(AnchorError::SeqGap {
+                    on_chain_seq: Some(s),
+                    expected: s + 1,
+                    attempted: anchor.seq,
+                });
+            }
+            // `None` (chưa neo lần nào) KHÔNG bị chặn: validator chỉ guard SPEND, không guard
+            // CREATE, nên UTxO anchor đầu tiên được mang `seq` bất kỳ. Đây là đường hợp lệ để
+            // đưa một chuỗi đã sống off-chain lên neo giữa chừng. Ràng buộc +1 chỉ bắt đầu
+            // từ lần neo THỨ HAI trở đi — đúng bằng phạm vi mà chuỗi thật sự ép.
             _ => {}
         }
         let datum = map_anchor_to_datum(anchor);
