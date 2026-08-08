@@ -1,0 +1,83 @@
+# Mẫu workflow CI (ví dụ) để build workspace Strata
+# Mục đích: minh họa cách cấu hình runner để có thể fetch crate git từ
+# repo private LampNetCloud/Anchor bằng secret `ANCHOR_READ_TOKEN` hoặc
+# bằng deploy key SSH (xem phần chú thích dưới).
+#
+# LƯU Ý BẢO MẬT: không commit token/key vào mã nguồn. Thay vào đó, thêm
+# secret tương ứng trong Settings → Secrets → Actions trước khi chạy workflow.
+
+name: CI - workspace (with Anchor access)
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure git to use ANCHOR_READ_TOKEN (HTTPS)
+        if: ${{ secrets.ANCHOR_READ_TOKEN != '' }}
+        run: |
+          # Thay thế URL https://github.com/ bằng URL có token để cargo/git có thể fetch
+          # Ví dụ: https://<TOKEN>@github.com/
+          git config --global url."https://${{ secrets.ANCHOR_READ_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: (Optional) Configure SSH deploy key for Anchor
+        if: ${{ secrets.ANCHOR_DEPLOY_KEY != '' }}
+        run: |
+          # Nếu dùng deploy key, lưu private key rồi add vào ssh-agent
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ANCHOR_DEPLOY_KEY }}" > ~/.ssh/anchor_deploy_key
+          chmod 600 ~/.ssh/anchor_deploy_key
+          eval "$(ssh-agent -s)"
+          ssh-add ~/.ssh/anchor_deploy_key
+          # Tùy chọn: thêm github.com vào known_hosts để tránh prompt
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.96.0
+
+      - name: Install Node.js (for TS fixture tests)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install npm deps (workspace fixture)
+        working-directory: ./apis
+        run: npm install
+
+      - name: Run cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: Run cargo clippy
+        run: cargo clippy --all -- -D warnings
+
+      - name: Run cargo test
+        run: cargo test --workspace --all-features
+
+      - name: Run JS fixture tests
+        working-directory: ./apis
+        run: npm run test:fixture
+
+# Chú thích triển khai
+# - Option A (Đề xuất nhanh): thêm secret `ANCHOR_READ_TOKEN` trong repo Strata
+#   (Settings -> Secrets -> Actions). Secret này chứa token có quyền đọc repo
+#   LampNetCloud/Anchor (fine-grained PAT với phạm vi Repository: read).
+#   Workflow ở trên đã minh họa cách dùng token để rewrite URL git, giúp cargo
+#   fetch dependency git+https://github.com/.. mà không gặp lỗi 401.
+#
+# - Option B (tốt về mặt quyền): tạo deploy key SSH trên repo Anchor (read-only)
+#   rồi lưu private key làm secret `ANCHOR_DEPLOY_KEY` trên repo Strata. Workflow
+#   minh hoạ cách load private key vào ssh-agent. Cách này không gắn với user
+#   cụ thể và dễ thu hồi.
+#
+# - Cả hai phương án đều yêu cầu quyền Admin để thêm secret vào repo Strata
+#   hoặc quyền Admin trên repo Anchor để thêm deploy key. Vui lòng chọn phương
+#   án phù hợp với chính sách bảo mật của tổ chức.
