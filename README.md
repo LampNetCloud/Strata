@@ -23,3 +23,5 @@ Chi tiáº¿t: [spec/_CONTRACT.md](spec/_CONTRACT.md), [spec/Strata-Feat.md](spec/S
 cargo test
 # 44 unit + 11 integration (gá»“m red-team E1/E4/E5/E6/E7)
 ```
+\n## Ch?y CI & thi?t l?p môi tru?ng (tóm t?t)\n\nN?u mu?n ch?y tuong t? CI ho?c giúp reviewer kích ho?t workflow, các bu?c quan tr?ng:\n\n1) Pin toolchain: repo có ust-toolchain.toml (1.96.0) — dùng rustfmt/clippy tuong thích.\n2) N?u workspace tham chi?u crate git t? repo private LampNetCloud/Anchor, runner CI c?n quy?n d?c repo dó. Xem docs/CI-SETUP.md d? bi?t các phuong án (secret ANCHOR_READ_TOKEN, deploy key, ho?c public repo).\n3) Cài Node.js & ch?y 
+pm run test:fixture trong pis/ d? ki?m tra test-vector Rust?TS.\n\nVí d? l?nh local nhanh:\n\n`ash\nrustup toolchain install 1.96.0\ncargo fmt --all -- --check\ncargo clippy --all -- -D warnings\ncargo test --workspace\ncd apis && npm install && npm run test:fixture\n`\n\n
