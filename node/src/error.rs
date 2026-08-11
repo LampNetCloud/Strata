@@ -32,6 +32,21 @@ pub enum ApiError {
     AnchorRejected(String),
     /// Backend neo lỗi mạng (`Network`) — client retry được. 503.
     AnchorNetwork(String),
+    /// `ts` vượt quá xa hiện tại ⇒ gần như chắc chắn client gửi **mili giây** thay vì giây.
+    ///
+    /// Vì sao phải chặn Ở CỬA chứ không ở lõi: lõi (`chain.rs`) là hàm thuần, không có đồng
+    /// hồ — nó chỉ ép `ts` không-giảm, nên một `ts` tương lai xa vẫn hợp lệ với nó. Nhưng
+    /// nhận nó một lần là **khoá chết quyền ghi của ref đó tới tận năm 56000**: mọi version
+    /// sau với `ts` giây thật đều `TimestampRegress`. Không có route sửa, không có rollback.
+    /// Một ký tự thừa của `Date.now()` = mất hồ sơ vĩnh viễn. Đây là chỗ duy nhất chặn được.
+    TimestampTooFarFuture {
+        /// `ts` client gửi.
+        got: u64,
+        /// Đồng hồ daemon lúc nhận (unix secs).
+        now: u64,
+        /// Biên lệch cho phép (giây).
+        max_skew: u64,
+    },
 }
 
 impl From<StrataError> for ApiError {
@@ -158,6 +173,21 @@ fn split(e: &ApiError) -> (StatusCode, &'static str, Value) {
             StatusCode::SERVICE_UNAVAILABLE,
             "AnchorNetwork",
             json!({ "reason": m }),
+        ),
+        // 422 — cùng nhóm với `TimestampRegress` của lõi (cả hai là lỗi miền `ts`).
+        // Thông điệp nói THẲNG nguyên nhân thật (đơn vị), vì client đọc "ts không hợp lệ"
+        // sẽ đi sửa đồng hồ chứ không đi sửa đơn vị.
+        ApiError::TimestampTooFarFuture { got, now, max_skew } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "TimestampTooFarFuture",
+            json!({
+                "got": got,
+                "now": now,
+                "max_skew_secs": max_skew,
+                "detail": "ts tính bằng GIÂY unix, không phải mili giây. \
+                           Nhận một ts tương lai xa sẽ khoá quyền ghi của ref này vĩnh viễn \
+                           (mọi version sau đều TimestampRegress), nên daemon từ chối ở cửa."
+            }),
         ),
     }
 }
