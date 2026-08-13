@@ -743,17 +743,66 @@ async fn ts_in_milliseconds_rejected_at_the_door() {
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(body["error"], "TimestampTooFarFuture");
 
-    // Đối chứng: `ts` giây hợp lệ vẫn qua.
-    let (st_ok, _) = call(&app, "POST", "/v1/strata/create", Some(json!({
-        "author_did": hex::encode(DID),
-        "genesis_nonce": hex::encode([0x33u8; 32]),
-        "content_cid": "cafe",
-        "state_fields": [{ "key": "diagnosis", "value": V_A }],
-        "policy_hash": hex::encode(policy.policy_hash()),
-        "ts": now(),
-        "sig": sign_version(1, 0, [0u8; 32], b"\xca\xfe", &fields, DID, policy.policy_hash(), now())
-    }))).await;
+    // Đối chứng: `ts` giây hợp lệ vẫn qua. `now()` gọi ĐÚNG MỘT lần rồi dùng lại — gọi hai
+    // lần thì một lần rơi qua mốc giây làm chữ ký phủ `ts` khác ⇒ 403 ngẫu nhiên trên CI.
+    let t = now();
+    let (st_ok, _) = call(
+        &app,
+        "POST",
+        "/v1/strata/create",
+        Some(json!({
+            "author_did": hex::encode(DID),
+            "genesis_nonce": hex::encode([0x33u8; 32]),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "diagnosis", "value": V_A }],
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": t,
+            "sig": sign_version(1, 0, [0u8; 32], b"\xca\xfe", &fields, DID, policy.policy_hash(), t)
+        })),
+    )
+    .await;
     assert_eq!(st_ok, StatusCode::OK, "ts giây hợp lệ KHÔNG được bị chặn");
+}
+
+/// Trần tuyệt đối phải chặn được KỂ CẢ khi đồng hồ daemon vô dụng.
+///
+/// `check_ts` có hai lớp; lớp biên-lệch phụ thuộc `now_secs()`. Nếu chỉ có lớp đó thì một
+/// máy không RTC (đồng hồ boot ở epoch) làm guard tắt im lặng đúng lúc cần nhất. Test này
+/// khoá lớp thứ nhất: một `ts` mili giây bị từ chối vì nó vượt `TS_MILLIS_FLOOR`, không phải
+/// vì nó xa `now` — nên nó đúng bất kể đồng hồ.
+#[tokio::test]
+async fn ts_in_milliseconds_rejected_by_absolute_ceiling_not_by_clock() {
+    let (app, policy) = app();
+    // 10^12 + 1 giây = năm 33658 — vượt trần tuyệt đối, nhưng KHÔNG phải `Date.now()` hôm nay.
+    let far = 1_000_000_000_001u64;
+    let fields = vec![f("diagnosis", V_A)];
+    let sig = sign_version(
+        1,
+        0,
+        [0u8; 32],
+        b"\xca\xfe",
+        &fields,
+        DID,
+        policy.policy_hash(),
+        far,
+    );
+    let (st, body) = call(
+        &app,
+        "POST",
+        "/v1/strata/create",
+        Some(json!({
+            "author_did": hex::encode(DID),
+            "genesis_nonce": hex::encode([0x44u8; 32]),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "diagnosis", "value": V_A }],
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": far,
+            "sig": sig
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"], "TimestampTooFarFuture");
 }
 
 /// Khoá trường TRÙNG bị từ chối — nếu không, `state_root` đã ký + đã neo cam kết HAI giá trị
@@ -842,7 +891,8 @@ async fn audit_from_outsider_denied_and_cannot_poison_ts() {
     assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error"], "PolicyDenied");
 
-    // Và không đầu độc được `last_ts` bằng u64::MAX (chặn hai lớp: policy + trần ts).
+    // Và không đầu độc được `last_ts` bằng u64::MAX. Chặn ở cổng policy — `check_ts` nằm SAU
+    // nên nó không chạy cho người ngoài; trần ts được phủ riêng ở test dưới.
     let (st_max, _) = call(
         &app,
         "POST",
@@ -958,16 +1008,89 @@ async fn canonical_dry_route_matches_the_real_write_path() {
     assert_eq!(dry["ref_id"], body2["ref_id"]);
     assert_eq!(dry["version_hash"], body2["head_version_hash"]);
 
-    // Route khô KHÔNG ghi gì: gọi lại `create` cùng nonce vẫn phải là lần ghi ĐẦU (409 vì
-    // đã ghi ở trên, chứ không phải vì route khô đã tạo ref).
+    // Route khô KHÔNG ghi gì — khoá bằng một nonce CHƯA từng qua `create`: nếu route khô có
+    // ghi thì ref đó đã tồn tại và `/head` trả 200.
+    let nonce_never_written = [0x5au8; 32];
+    let (st_dry2, dry2) = call(
+        &app,
+        "POST",
+        "/v1/strata/_canonical",
+        Some(json!({
+            "seq": 0,
+            "prev_hash": hex::encode([0u8; 32]),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "diagnosis", "value": V_A }],
+            "author_did": hex::encode(DID),
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": 1_000,
+            "genesis_nonce": hex::encode(nonce_never_written)
+        })),
+    )
+    .await;
+    assert_eq!(st_dry2, StatusCode::OK, "{dry2}");
     let (st3, _) = call(
         &app,
         "GET",
-        &format!("/v1/strata/{}/head", body2["ref_id"].as_str().unwrap()),
+        &format!("/v1/strata/{}/head", dry2["ref_id"].as_str().unwrap()),
         None,
     )
     .await;
-    assert_eq!(st3, StatusCode::OK);
+    assert_eq!(
+        st3,
+        StatusCode::NOT_FOUND,
+        "route khô KHÔNG được tạo ref — 200 ở đây nghĩa là nó đã ghi"
+    );
+}
+
+/// Mã lỗi ở đường audit KHÔNG được phân biệt "DID này có trong policy hồ sơ đó không".
+///
+/// Với `is_allowed` đặt TRƯỚC `verify_strict`, người lạ gửi chữ ký rác và đọc mã lỗi là dò
+/// được: DID trong policy → `BadSignature`, DID ngoài policy → `PolicyDenied`. Không cần
+/// khoá, không cần quyền, chỉ cần `ref_id` (công khai) và một danh sách DID ứng viên. Với
+/// hồ sơ y tế thì chính quan hệ "bác sĩ D ghi được hồ sơ bệnh nhân P" là thứ phải giấu.
+#[tokio::test]
+async fn audit_error_code_does_not_leak_policy_membership() {
+    let (app, policy) = app();
+    let (r, _) = create_ok(&app, &policy).await;
+
+    let probe = |did: [u8; 32]| {
+        json!({
+            "kind": "audit",
+            "actor_did": hex::encode(did),
+            "action": "Read",
+            "signed_hash": hex::encode([0x22u8; 32]),
+            "location": hex::encode([0x33u8; 32]),
+            "ts": 1_000,
+            "sig": hex::encode([0u8; 64])   // chữ ký rác — người dò KHÔNG có khoá nào
+        })
+    };
+
+    // DID  = TRONG policy; DID2 = có khoá trong registry nhưng NGOÀI policy.
+    let (st_in, body_in) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/event"),
+        Some(probe(DID)),
+    )
+    .await;
+    let (st_out, body_out) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/event"),
+        Some(probe(DID2)),
+    )
+    .await;
+
+    assert_eq!(st_in, st_out, "status phải giống nhau");
+    assert_eq!(
+        body_in["error"], body_out["error"],
+        "mã lỗi phải GIỐNG NHAU cho DID trong và ngoài policy — khác nhau là một oracle dò \
+         thành viên policy: trong={body_in}, ngoài={body_out}"
+    );
+    assert_eq!(
+        body_in["error"], "BadSignature",
+        "cửa đầu tiên phải là cửa đòi SỞ HỮU KHOÁ, không phải cửa quyền"
+    );
 }
 
 /// `/head` phải trả đủ thứ client cần để append version kế — thiếu là bẫy onboarding.

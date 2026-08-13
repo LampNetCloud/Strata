@@ -94,22 +94,53 @@ fn body<T>(r: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
 /// cách giữa giây và mili giây — nên nó phân loại đúng ca duy nhất cần bắt: `Date.now()`.
 const MAX_TS_SKEW_SECS: u64 = 300;
 
-/// Đồng hồ tường của daemon (unix secs). Trước 1970 (bất khả) → 0, tức guard tự tắt thay vì
-/// panic — fail-open ở ĐÂY là đúng: một đồng hồ hỏng không được phép chặn đường ghi.
-fn now_secs() -> u64 {
+/// Trần TUYỆT ĐỐI cho `ts` tính bằng giây — **không phụ thuộc đồng hồ daemon**.
+///
+/// `10^12` giây unix rơi vào năm **33658**; mọi `ts` giây thật đều nhỏ hơn con số này trong
+/// suốt vòng đời hệ. Ngược lại `Date.now()` hôm nay đã ở `1.78 × 10^12`, tức **mọi** giá trị
+/// mili giây đương thời đều vượt trần. Vậy một phép so sánh hằng số phân loại đúng ca nguy
+/// hiểm nhất mà KHÔNG cần biết bây giờ là mấy giờ.
+const TS_MILLIS_FLOOR: u64 = 1_000_000_000_000;
+
+/// Đồng hồ tường của daemon (unix secs). `None` khi không đọc được (bất khả trên thực tế,
+/// nhưng `duration_since` trả `Result`).
+///
+/// Trả `Option` chứ KHÔNG `unwrap_or(0)`: `0` là một giá trị **hợp lệ trong miền**, nên trộn
+/// nó với "không biết" tạo ra hai lỗi ngược chiều nhau. Đồng hồ boot ở epoch (container
+/// không RTC) cho `now == 0` ⇒ guard tự tắt IM LẶNG đúng lúc cần nhất; còn đồng hồ ở
+/// `1970 + 5s` (chưa kịp NTP) cho `now == 5` ⇒ **mọi** ghi hợp lệ bị 422 kèm thông điệp lạc
+/// hướng `now: 5`. Nay `now` chỉ dùng cho lớp thứ hai, và lớp thứ nhất ([`TS_MILLIS_FLOOR`])
+/// không cần đồng hồ nên đồng hồ hỏng không tắt được nó.
+fn now_secs() -> Option<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
+        .ok()
         .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
-/// Chặn `ts` tương lai xa Ở CỬA (xem [`ApiError::TimestampTooFarFuture`]).
+/// Chặn `ts` tương lai xa Ở CỬA (xem [`ApiError::TimestampTooFarFuture`]), HAI LỚP.
+///
+/// 1. **Trần tuyệt đối** `TS_MILLIS_FLOOR` — không cần đồng hồ, không tắt được.
+/// 2. **Biên lệch** `MAX_TS_SKEW_SECS` quanh đồng hồ daemon — bắt các ca tương lai gần hơn;
+///    bỏ qua khi không đọc được đồng hồ.
+///
+/// Cân đánh đổi theo chiều đúng: chặn nhầm một ghi là **khả hồi** (client sửa rồi gửi lại),
+/// nhận nhầm một `ts` mili giây là **vĩnh viễn** (ref mất quyền ghi, không có route sửa).
 ///
 /// KHÔNG chặn `ts` quá KHỨ: lõi đã ép không-giảm (`TimestampRegress`), và nhập dữ liệu lịch
-/// sử là ca dùng hợp lệ. Chỉ chiều tương lai mới bất-khả-hồi.
+/// sử là ca dùng hợp lệ. Hệ quả phải nói rõ với bên tiêu thụ: `ts` là **lời khai của tác
+/// giả**, chỉ lần neo on-chain mới cho một cận trên thời gian — mà neo là tuỳ chọn.
 fn check_ts(ts: u64) -> ApiResult<()> {
-    let now = now_secs();
-    if now != 0 && ts > now.saturating_add(MAX_TS_SKEW_SECS) {
+    if ts >= TS_MILLIS_FLOOR {
+        return Err(ApiError::TimestampTooFarFuture {
+            got: ts,
+            now: now_secs().unwrap_or(0),
+            max_skew: MAX_TS_SKEW_SECS,
+        });
+    }
+    if let Some(now) = now_secs()
+        && ts > now.saturating_add(MAX_TS_SKEW_SECS)
+    {
         return Err(ApiError::TimestampTooFarFuture {
             got: ts,
             now,
@@ -221,6 +252,11 @@ async fn canonical(
     req: Result<Json<CanonicalReq>, JsonRejection>,
 ) -> ApiResult<Json<CanonicalResp>> {
     let req = body(req)?;
+    // Route khô phải chạy ĐÚNG bộ cổng của đường ghi, chỉ bỏ phần ghi. Thiếu `check_ts` ở
+    // đây thì nó "duyệt" một `ts` mili giây và trả về `version_hash`; client ký xong, gọi
+    // `create`, ăn 422 — tức công cụ dựng ra để đối chiếu trước khi ký lại bỏ lọt đúng lỗi
+    // mà nó tồn tại để bắt.
+    check_ts(req.ts)?;
     let fields = to_pairs(&req.state_fields).map_err(ApiError::Malformed)?;
     let state_root = build_state_root(&fields);
 
@@ -344,13 +380,19 @@ async fn event(
             // Nối với `ts` thì thành bất-khả-hồi: người ngoài ghi một mục `ts = u64::MAX`,
             // `AuditLog.last_ts` nhảy lên trần, và từ đó MỌI mục thật của chính chủ trả
             // `TimestampRegress` vĩnh viễn (`audit.rs` append-only, không có API xoá/reset).
-            // Thứ tự CÓ CHỦ Ý: phân quyền TRƯỚC, kiểm định dạng SAU. Người ngoài phải nhận
-            // "anh không có quyền" chứ không phải "ts của anh sai" — câu sau vừa gợi ý cách
-            // thử lại, vừa xác nhận hồ sơ tồn tại cho người đáng lẽ không được biết gì.
-            if !g.policy.is_allowed(&a.actor_did) {
-                return Err(StrataError::PolicyDenied.into());
-            }
-            check_ts(a.ts)?;
+            //
+            // THỨ TỰ CÓ CHỦ Ý — chữ ký TRƯỚC, policy SAU, `ts` cuối. Đặt `is_allowed` lên
+            // trước `verify_strict` (bản nháp đầu) mở ra một **oracle dò thành viên policy**:
+            // người lạ gửi chữ ký rác `00`×64 với một DID ứng viên và đọc mã lỗi — DID trong
+            // policy trả `BadSignature`, DID ngoài policy trả `PolicyDenied`. Ba request là
+            // biết "bác sĩ D có quyền ghi hồ sơ bệnh nhân P không", không cần khoá nào. Chính
+            // quan hệ đó mới là thứ phải giấu.
+            //
+            // Đặt `verify_strict` trước thì cửa đầu tiên đòi **sở hữu khoá riêng**: người
+            // không có khoá luôn nhận `BadSignature`, không phân biệt được gì. Người CÓ khoá
+            // đi tiếp và có thể học rằng DID của CHÍNH MÌNH không nằm trong policy — đó là
+            // quyền của chính họ, không phải rò rỉ. `check_ts` xuống cuối cùng vì `now` của
+            // daemon chỉ nên lộ cho bên đã qua cả xác thực lẫn phân quyền.
             let ae = AuditEntry {
                 created_ts: a.ts,
                 actor_did: a.actor_did,
@@ -370,6 +412,10 @@ async fn event(
             let sig = Signature::from_bytes(&a.sig);
             pk.verify_strict(&ae.canonical(), &sig)
                 .map_err(|_| ApiError::Core(StrataError::BadSignature))?;
+            if !g.policy.is_allowed(&a.actor_did) {
+                return Err(StrataError::PolicyDenied.into());
+            }
+            check_ts(a.ts)?;
 
             let index = g.audit.append_access(ae)?;
             let log_root = hex::encode(g.audit.root());
