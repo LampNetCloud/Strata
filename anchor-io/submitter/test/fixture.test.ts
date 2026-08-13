@@ -30,6 +30,8 @@ const fixturePath = resolve(here, "../../../apis/settlement-metadata.json");
 const fixture = JSON.parse(readFileSync(fixturePath, "utf-8")) as {
   label: number;
   cases: FixtureCase[];
+  must_reject: { name: string; why: string; expect_error: string; cbor_hex: string }[];
+  must_skip: { name: string; why: string; expect_records: number; cbor_hex: string }[];
 };
 
 const toHex = (b: Uint8Array): string =>
@@ -84,8 +86,36 @@ for (const must of ["rotation_64B_boundary_single", "rotation_65B_chunked_64_1"]
   }
 }
 
+// ── Nửa ÂM của fixture (PR #40 hướng (b)) ────────────────────────────────────
+//
+// `submit.ts` hiện là ENCODER-ONLY: nó dựng metadatum, không có đường decode CBOR nào.
+// Nên khối `must_reject` KHÔNG cưỡng chế được ở phía TS hôm nay — nó đang được cưỡng chế
+// bên Rust (`tests/settlement_fixture.rs::must_reject_thi_decoder_phai_tu_choi`).
+//
+// Vẫn kiểm ở đây hai điều, để cái gap đó KHÔNG vô hình:
+//   1. khối phải tồn tại — ai rút nó khỏi fixture thì cả hai phía cùng đỏ, không phải
+//      chỉ Rust đỏ còn TS im lặng đi tiếp;
+//   2. in ra lời nhắc, để ngày `submit.ts` có đường đọc (ví dụ beacon-walk resolve đọc
+//      metadatum thật) thì người viết thấy ngay là có sẵn bộ ca âm phải dùng.
+const MIN_MUST_REJECT = 6;
+if (!Array.isArray(fixture.must_reject) || fixture.must_reject.length < MIN_MUST_REJECT) {
+  failed++;
+  console.error(
+    `  FAIL fixture thiếu khối must_reject (cần >= ${MIN_MUST_REJECT} ca âm) — ` +
+      `không có nó thì vector chỉ là nguồn sự thật cho nửa dương`,
+  );
+}
+if (!Array.isArray(fixture.must_skip) || fixture.must_skip.length < 1) {
+  failed++;
+  console.error("  FAIL fixture thiếu khối must_skip (`t` lạ phải bỏ qua, không ném lỗi)");
+}
+
 if (failed > 0) {
   console.error(`\n${failed} case lệch — TS và Rust đã trôi khỏi nhau.`);
   process.exit(1);
 }
 console.log(`\n${fixture.cases.length}/${fixture.cases.length} case khớp vector chung.`);
+console.log(
+  `${fixture.must_reject.length} ca âm + ${fixture.must_skip.length} ca bỏ-qua có mặt trong vector ` +
+    `(cưỡng chế phía Rust — submit.ts chưa có đường đọc CBOR).`,
+);
