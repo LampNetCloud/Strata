@@ -1,0 +1,112 @@
+{
+  "_note": "Test-vector CHUNG cho canonical_core (Strata-Math §3.1). SINH TỰ ĐỘNG bởi `cargo run --example dump_canonical_core_fixture` — đừng sửa tay. Bên Rust khoá bằng tests/canonical_core_fixture.rs.",
+  "hash": {
+    "algo": "blake3",
+    "h_dom": "BLAKE3(tag || 0x00 || x)",
+    "tag_ver": "LN/STRATA/ver/v1",
+    "version_hash": "H_dom(tag_ver, canonical_core)"
+  },
+  "layout_note": "TLV length-prefix, KHÔNG phải CBOR. sig KHÔNG nằm trong canonical_core (CHỐT-1). Tổng = 148 + len(content_cid).",
+  "layout": [
+    {"order": 1, "field": "seq", "enc": "u64_be", "bytes": "8"},
+    {"order": 2, "field": "prev_hash", "enc": "raw", "bytes": "32"},
+    {"order": 3, "field": "len(content_cid)", "enc": "u32_be", "bytes": "4"},
+    {"order": 4, "field": "content_cid", "enc": "raw", "bytes": "n"},
+    {"order": 5, "field": "state_root", "enc": "raw", "bytes": "32"},
+    {"order": 6, "field": "author_did", "enc": "raw", "bytes": "32"},
+    {"order": 7, "field": "policy_hash", "enc": "raw", "bytes": "32"},
+    {"order": 8, "field": "ts", "enc": "u64_be", "bytes": "8"}
+  ],
+  "vectors": [
+    {
+      "name": "V1-genesis-empty-cid",
+      "why": "seq=0, prev_hash toàn 0, content_cid RỖNG — biên dưới của trường biến độ dài",
+      "seq": 0,
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "content_cid": "",
+      "state_root": "1111111111111111111111111111111111111111111111111111111111111111",
+      "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+      "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "ts": 1700000000,
+      "canonical_core_len": 148,
+      "canonical_core": "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333000000006553f100",
+      "version_hash": "a9f631773a15b4388db314e923591c1260278849aada5c4e5e2a3933eb5caffd"
+    },
+    {
+      "name": "V2-cid-32B",
+      "why": "content_cid đúng 32 byte — độ dài hay gặp nhất, dễ nhầm là trường cố định",
+      "seq": 1,
+      "prev_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "content_cid": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "state_root": "1111111111111111111111111111111111111111111111111111111111111111",
+      "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+      "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "ts": 1700000001,
+      "canonical_core_len": 180,
+      "canonical_core": "0000000000000001aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000020cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333000000006553f101",
+      "version_hash": "928b4cd41673ac011c2c7c8c5b4896de86c9281dd650b9cbeef9a117d27a39cc"
+    },
+    {
+      "name": "V3-cid-5B",
+      "why": "content_cid độ dài LẺ và ngắn — bắt lỗi cài đặt đệm hoặc bỏ length-prefix",
+      "seq": 2,
+      "prev_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "content_cid": "68656c6c6f",
+      "state_root": "1111111111111111111111111111111111111111111111111111111111111111",
+      "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+      "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "ts": 1700000002,
+      "canonical_core_len": 153,
+      "canonical_core": "0000000000000002bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0000000568656c6c6f111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333000000006553f102",
+      "version_hash": "9c4ad5848cabacf58c3dc58a84be97846c245e51ddcd0d66c97a42451382fe39"
+    },
+    {
+      "name": "V4-ts-trung-V3",
+      "why": "ts TRÙNG V3: hai version cùng một giây là HỢP LỆ (ràng buộc là >=, không phải >) — xem OriLife-Core#168",
+      "seq": 3,
+      "prev_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "content_cid": "776f726c64",
+      "state_root": "1111111111111111111111111111111111111111111111111111111111111111",
+      "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+      "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "ts": 1700000002,
+      "canonical_core_len": 153,
+      "canonical_core": "0000000000000003cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc00000005776f726c64111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333000000006553f102",
+      "version_hash": "74e35802fae53466946ad8b2aba2797b568064828d54e0821bde3cc0c8f10153"
+    },
+    {
+      "name": "V5-seq-multibyte",
+      "why": "seq vượt 1 byte để khoá thứ tự byte u64 big-endian — cài little-endian sẽ đỏ ở đây",
+      "seq": 72623859790382856,
+      "prev_hash": "dededededededededededededededededededededededededededededededede",
+      "content_cid": "78",
+      "state_root": "1111111111111111111111111111111111111111111111111111111111111111",
+      "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+      "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "ts": 4277009102,
+      "canonical_core_len": 149,
+      "canonical_core": "0102030405060708dededededededededededededededededededededededededededededededede000000017811111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333300000000feedface",
+      "version_hash": "3a008aeef45f468611ee16e0bddaece07ea27cef478cf94bc9aa49c438cbfcac"
+    }
+  ],
+  "negative_controls": [
+    {
+      "name": "NC1-truncated",
+      "why": "cắt cụt 3 byte cuối — decoder phải báo Truncated, KHÔNG được đọc bừa",
+      "bytes": "0000000000000002bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0000000568656c6c6f1111111111111111111111111111111111111111111111111111111111111111222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330000000065",
+      "expect_error": "Truncated"
+    },
+    {
+      "name": "NC2-trailing-bytes",
+      "why": "thừa 2 byte ở đuôi — decoder phải báo TrailingBytes, KHÔNG được bỏ qua im lặng",
+      "bytes": "0000000000000002bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0000000568656c6c6f111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333000000006553f102ffff",
+      "expect_error": "TrailingBytes"
+    },
+    {
+      "name": "NC3-length-overflow",
+      "why": "len(content_cid) khai u32::MAX — decoder phải báo LengthOverflow, KHÔNG được cấp phát theo số khai",
+      "bytes": "0000000000000002bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbffffffff68656c6c6f111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333000000006553f102",
+      "expect_error": "LengthOverflow"
+    }
+  ]
+}

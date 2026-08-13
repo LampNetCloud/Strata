@@ -314,27 +314,58 @@ mod tests {
         assert!(!v.verify_sig(&pk));
     }
 
+    /// Length-prefix của `content_cid`: giá trị đúng bằng độ dài, và decoder từ chối khi nó
+    /// nói dối.
+    ///
+    /// **Đổi tên từ `canonical_length_prefix_avoids_concat_ambiguity` (2026-08-13).** Tên cũ
+    /// hứa nhiều hơn thứ nó kiểm — bản cũ chỉ assert `cid="ab"` khác `cid="a"`, mà điều đó
+    /// đúng hiển nhiên vì hai chuỗi khác **độ dài**, không dính gì tới nhập nhằng nối chuỗi.
+    ///
+    /// Và nhập nhằng nối chuỗi **không tồn tại** với layout này: `content_cid` là trường biến
+    /// độ dài DUY NHẤT, kẹp giữa 40 byte đầu (`seq` 8 + `prev_hash` 32) và 104 byte đuôi
+    /// (`state_root` + `author_did` + `policy_hash` + `ts`) đều cố định, nên phần giữa luôn
+    /// khôi phục được từ tổng độ dài kể cả khi bỏ prefix. Phát hiện khi trả lời
+    /// `OriLifeTrace/OriLife-Core#161` — chỗ đó từng nêu nhầm và đã đính chính trên issue.
+    ///
+    /// Prefix vẫn load-bearing, nhưng vì hai lẽ khác, và đó là thứ test này kiểm:
+    /// (1) decoder cần nó để TỪ CHỐI input hỏng; (2) nó đi qua `u32_be`, tức mang van trần
+    /// `< 2³²` fail-loud của §1.7 quy tắc 3 (issue #18).
     #[test]
-    fn canonical_length_prefix_avoids_concat_ambiguity() {
-        // ("ab", root X) vs ("a", root bắt đầu 'b'…) — length-prefix chống nhập nhằng nối chuỗi.
-        let a = StrataVersion::unsigned(
+    fn canonical_len_prefix_is_exact_and_lies_are_rejected() {
+        const OFF: usize = 8 + 32; // ngay sau seq + prev_hash
+        let v = StrataVersion::unsigned(
             0,
             [0u8; 32],
-            b"ab".to_vec(),
-            [0u8; 32],
-            [0u8; 32],
-            [0u8; 32],
-            0,
-        );
-        let b = StrataVersion::unsigned(
-            0,
-            [0u8; 32],
-            b"a".to_vec(),
+            b"hello".to_vec(),
             [0u8; 32],
             [0u8; 32],
             [0u8; 32],
             0,
         );
-        assert_ne!(a.version_hash(), b.version_hash());
+        let core = v.canonical_core();
+
+        // (1) prefix phải ĐÚNG BẰNG len(cid) — không phải "có mặt là được".
+        let declared = u32::from_be_bytes(core[OFF..OFF + 4].try_into().unwrap()) as usize;
+        assert_eq!(declared, 5, "prefix phải khai đúng len(content_cid)");
+        assert_eq!(core.len(), 148 + 5, "tổng = 148 + len(content_cid)");
+
+        // (2) prefix khai THỪA → LengthOverflow; decoder không được cấp phát theo số khai.
+        let mut over = core.clone();
+        over[OFF..OFF + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(matches!(
+            parse_canonical_core(&over),
+            Err(CanonicalError::LengthOverflow { .. })
+        ));
+
+        // (3) prefix khai THIẾU → cid đọc hụt, phần dôi ra thành byte thừa ở đuôi.
+        let mut under = core.clone();
+        under[OFF..OFF + 4].copy_from_slice(&3u32.to_be_bytes());
+        assert!(matches!(
+            parse_canonical_core(&under),
+            Err(CanonicalError::TrailingBytes { .. })
+        ));
+
+        // (4) bản nguyên vẹn vẫn round-trip.
+        assert_eq!(parse_canonical_core(&core).unwrap().canonical_core(), core);
     }
 }
