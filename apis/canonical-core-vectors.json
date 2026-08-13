@@ -108,5 +108,69 @@
       "bytes": "0000000000000002bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbffffffff68656c6c6f111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333000000006553f102",
       "expect_error": "LengthOverflow"
     }
+  ],
+  "state_root_note": "INV-E6 / CHỐT-4. fvh = H_dom(tag_fval, field_value_bytes); leaf = H_dom(tag_leaf, u32_be(len(key)) || key || fvh); node = H_dom(tag_node, left || right); root = fold trên các leaf ĐÃ SORT theo key tăng dần, lá lẻ CARRY nguyên (không nhân đôi). Field RỖNG ⇒ root = 32 byte 0. field_value_bytes là giá trị inline HOẶC content_cid THUẦN (đã giải mã), KHÔNG phải chuỗi hex.",
+  "state_root_hash": {
+    "tag_fval": "LN/STRATA/state/fval/v1",
+    "tag_leaf": "LN/STRATA/state/leaf/v1",
+    "tag_node": "LN/STRATA/state/node/v1",
+    "duplicate_key": "KHÔNG HỢP LỆ — bên gọi PHẢI từ chối trước khi vào build_state_root. sort_by của Rust là sort ỔN ĐỊNH nên hai mục trùng key giữ nguyên thứ tự đầu vào ⇒ root ĐỔI THEO THỨ TỰ truyền vào. Xem Strata#39 điểm 2 (DuplicateFieldKey/E6) và OriLife-Core#324 mục B."
+  },
+  "state_root_vectors": [
+    {
+      "name": "S1-empty",
+      "why": "KHÔNG field nào — root là 32 byte 0, KHÔNG phải hash của chuỗi rỗng",
+      "fields_in_given_order": [
+
+      ],
+      "state_root": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "S2-single",
+      "why": "đúng 1 field — root BẰNG leaf, không có tầng nút nào chạy",
+      "fields_in_given_order": [
+        {"key": "616765", "key_utf8": "age", "key_len": 3, "field_value_bytes": "37", "fvh": "f382b5bad0a38f955df9419ba701aec57c795056db2e1528d1ce438dce48c1f4", "leaf": "82a5f2063c1b82045f4ff9d00f591d786c31d8b57f26fb76db6ea11833e043f3"}
+      ],
+      "state_root": "82a5f2063c1b82045f4ff9d00f591d786c31d8b57f26fb76db6ea11833e043f3"
+    },
+    {
+      "name": "S3-three-odd-carry",
+      "why": "3 lá: số lẻ ⇒ lá cuối CARRY NGUYÊN lên tầng trên, KHÔNG nhân đôi (CVE-2012-2459). Cài sai thành nhân đôi sẽ ra root khác",
+      "fields_in_given_order": [
+        {"key": "61", "key_utf8": "a", "key_len": 1, "field_value_bytes": "31", "fvh": "58d2fb4ad8e1205beaac152738b9fc78c749b50e84182060c12a798d7530700f", "leaf": "4bfbc571d19423107c2e71fcaa0b6cef81bc8473855124c705ef2ff0bb21c9ee"},
+        {"key": "62", "key_utf8": "b", "key_len": 1, "field_value_bytes": "32", "fvh": "7fc9f17f0fd8af072e9dd7328565561177d8af9b14a9e80bc53da388331f8275", "leaf": "4704259f7cb1a622856551cd81b6b0c73c30b821f6b4ff9b2d654f04a18fc8c1"},
+        {"key": "63", "key_utf8": "c", "key_len": 1, "field_value_bytes": "33", "fvh": "a4db04b5e54a1774525070c14f20ad1c2808a3c4da3da178cade74e39735951d", "leaf": "4b6f6aea515d8f84291b8f5e3add870342108c6ac7606c360e897bf69658b7b2"}
+      ],
+      "state_root": "c6dd519a237b86e0be5b2d7b372dc3fb8b93f46e3e19f865eb5930320e885979"
+    },
+    {
+      "name": "S4-four-unsorted-input",
+      "why": "4 field truyền vào theo thứ tự ĐẢO (d,c,b,a). Sort theo key là bắt buộc trước khi dựng cây, nên bên phải-khớp phải HOÁN VỊ danh sách này theo thứ tự bất kỳ và vẫn ra ĐÚNG root này — cài thiếu bước sort sẽ đỏ ngay",
+      "fields_in_given_order": [
+        {"key": "64", "key_utf8": "d", "key_len": 1, "field_value_bytes": "34", "fvh": "875a925bcc8625510f09c7179e8e666dfe14ea1f9cee7b85c3710c23ccca746e", "leaf": "b9185ec7846284164be45b8a5e45a848f41557902ec91b66932e73baed815f80"},
+        {"key": "63", "key_utf8": "c", "key_len": 1, "field_value_bytes": "33", "fvh": "a4db04b5e54a1774525070c14f20ad1c2808a3c4da3da178cade74e39735951d", "leaf": "4b6f6aea515d8f84291b8f5e3add870342108c6ac7606c360e897bf69658b7b2"},
+        {"key": "62", "key_utf8": "b", "key_len": 1, "field_value_bytes": "32", "fvh": "7fc9f17f0fd8af072e9dd7328565561177d8af9b14a9e80bc53da388331f8275", "leaf": "4704259f7cb1a622856551cd81b6b0c73c30b821f6b4ff9b2d654f04a18fc8c1"},
+        {"key": "61", "key_utf8": "a", "key_len": 1, "field_value_bytes": "31", "fvh": "58d2fb4ad8e1205beaac152738b9fc78c749b50e84182060c12a798d7530700f", "leaf": "4bfbc571d19423107c2e71fcaa0b6cef81bc8473855124c705ef2ff0bb21c9ee"}
+      ],
+      "state_root": "5262b71bd3d81c21d916799b25c822426edb6e1774ecdbd067cde564009fe672"
+    },
+    {
+      "name": "S5-key-28B-leaf-preimage-64B",
+      "why": "khoá dài 28 byte ⇒ tiền ảnh lá = 4+28+32 = 64 byte = ĐÚNG tiền ảnh nút. Hai domain-tag khác nhau là thứ DUY NHẤT chặn việc khai một nút trong thành một lá — dùng chung tag ở hai chỗ vẫn cho root hợp lệ mà mất hẳn lớp phòng vệ này",
+      "fields_in_given_order": [
+        {"key": "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b", "key_utf8": "kkkkkkkkkkkkkkkkkkkkkkkkkkkk", "key_len": 28, "field_value_bytes": "76", "fvh": "3c83831e81e390b5d8a7a90e359af4023e3fbf0b10a9c2787074dc2c9699fe48", "leaf": "45158982b29cc106b03f1e7405f922f0b27c7793bbd62d9bcdb154b42097eaa4"},
+        {"key": "7a", "key_utf8": "z", "key_len": 1, "field_value_bytes": "77", "fvh": "03dfce353362897edf52cb05862b6f06a5ee3bb78bf433aa290881f577481948", "leaf": "c6d99964ab6289c9ae0876fcbf11273110362fcd89e53bea4b8c0901ddc08cdc"}
+      ],
+      "state_root": "55ecf80d2178476bde04fcfd6d31282f6438707edde7b838897c04de0ed81fd6"
+    },
+    {
+      "name": "S6-cid-value-32B",
+      "why": "field mang CID: `field_value_bytes` là CID THUẦN 32 byte ĐÃ GIẢI MÃ, KHÔNG phải 64 ký tự hex ASCII (CHỐT-4 — không class byte, để field-proof không lộ loại). Đây là câu trả lời cho chỗ mập mờ ở OriLife-Core#161",
+      "fields_in_given_order": [
+        {"key": "636f6e74656e74", "key_utf8": "content", "key_len": 7, "field_value_bytes": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc", "fvh": "7bb42a7995024c6791534cf7512b043940335f781b8efb8c31ca8bf2050a1a5a", "leaf": "e6bb37854b096fb599ba656f7767dab2b651be30ea97ec73d56d6531adab5367"},
+        {"key": "61", "key_utf8": "a", "key_len": 1, "field_value_bytes": "31", "fvh": "58d2fb4ad8e1205beaac152738b9fc78c749b50e84182060c12a798d7530700f", "leaf": "4bfbc571d19423107c2e71fcaa0b6cef81bc8473855124c705ef2ff0bb21c9ee"}
+      ],
+      "state_root": "f716fdb9c69ca0281de79f7a63670b74b94f1ba05a0af2c7df3f2b3f5a8fbf10"
+    }
   ]
 }

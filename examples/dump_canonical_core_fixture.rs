@@ -12,11 +12,54 @@
 //! Chạy: `cargo run --example dump_canonical_core_fixture > apis/canonical-core-vectors.json`
 
 use lampnet_strata::hash::h_dom;
+use lampnet_strata::state::{
+    TAG_STATE_FVAL, TAG_STATE_LEAF, TAG_STATE_NODE, build_state_root, fval_hash, leaf_hash,
+};
 use lampnet_strata::version::{StrataVersion, TAG_VER};
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
+
+/// Một vector `state_root`: in cả trung gian (`fvh`, `leaf`) chứ không chỉ root.
+///
+/// Lý do in trung gian: nếu bên phải-khớp chỉ có root thì lúc lệch họ không biết lệch ở
+/// tầng nào — `fval` sai, `leaf` sai, hay thứ tự sort sai — và phải đoán. Có `fvh`/`leaf`
+/// thì chỗ lệch đầu tiên chỉ thẳng ra tầng hỏng.
+fn state_vector(name: &str, why: &str, fields: &[(Vec<u8>, Vec<u8>)]) -> String {
+    let mut per_field = Vec::new();
+    for (k, v) in fields {
+        let fvh = fval_hash(v);
+        per_field.push(format!(
+            r#"        {{"key": "{}", "key_utf8": {:?}, "key_len": {}, "field_value_bytes": "{}", "fvh": "{}", "leaf": "{}"}}"#,
+            hex(k),
+            String::from_utf8_lossy(k),
+            k.len(),
+            hex(v),
+            hex(&fvh),
+            hex(&leaf_hash(k, &fvh)),
+        ));
+    }
+    format!(
+        r#"    {{
+      "name": {name:?},
+      "why": {why:?},
+      "fields_in_given_order": [
+{}
+      ],
+      "state_root": "{}"
+    }}"#,
+        per_field.join(",\n"),
+        hex(&build_state_root(fields)),
+    )
+}
+
+fn f(k: &str, v: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    (k.as_bytes().to_vec(), v.to_vec())
+}
+
+/// `(tên, vì sao, các cặp (key, field_value_bytes) theo thứ tự TRUYỀN VÀO)`.
+type StateSet = (&'static str, &'static str, Vec<(Vec<u8>, Vec<u8>)>);
 
 fn vector(name: &str, why: &str, v: &StrataVersion) -> String {
     let c = v.canonical_core();
@@ -169,6 +212,71 @@ fn main() {
         hex(&trailing),
         hex(&overflow),
     );
+    println!("  ],");
+
+    // ── state_root (INV-E6, CHỐT-4) ──────────────────────────────────────────
+    // Xin bởi `OriLife-Core#161`: `build_state_root` bên đó viết TỪ SPEC, không có vector
+    // đối chiếu — khác hẳn `canonical_core` vốn đã có 5 vector khoá. Mà `state_root` là
+    // trường #5 của `canonical_core`, tức nó nằm trong `version_hash`, tức nó ĐƯỢC KÝ.
+    let cid32: Vec<u8> = (0..32u8)
+        .map(|i| i.wrapping_mul(7).wrapping_add(3))
+        .collect();
+
+    // Khoá dài đúng 28 byte: tiền ảnh lá = u32_be(4) + key(28) + fvh(32) = 64 byte,
+    // bằng ĐÚNG tiền ảnh nút (left 32 + right 32). Khi đó thứ DUY NHẤT ngăn một nút
+    // trong bị khai là một lá là hai domain-tag khác nhau. Vector này khoá chỗ đó.
+    let key28 = "k".repeat(28);
+
+    let sets: Vec<StateSet> = vec![
+        (
+            "S1-empty",
+            "KHÔNG field nào — root là 32 byte 0, KHÔNG phải hash của chuỗi rỗng",
+            vec![],
+        ),
+        (
+            "S2-single",
+            "đúng 1 field — root BẰNG leaf, không có tầng nút nào chạy",
+            vec![f("age", b"7")],
+        ),
+        (
+            "S3-three-odd-carry",
+            "3 lá: số lẻ ⇒ lá cuối CARRY NGUYÊN lên tầng trên, KHÔNG nhân đôi (CVE-2012-2459). Cài sai thành nhân đôi sẽ ra root khác",
+            vec![f("a", b"1"), f("b", b"2"), f("c", b"3")],
+        ),
+        (
+            "S4-four-unsorted-input",
+            "4 field truyền vào theo thứ tự ĐẢO (d,c,b,a). Sort theo key là bắt buộc trước khi dựng cây, nên bên phải-khớp phải HOÁN VỊ danh sách này theo thứ tự bất kỳ và vẫn ra ĐÚNG root này — cài thiếu bước sort sẽ đỏ ngay",
+            vec![f("d", b"4"), f("c", b"3"), f("b", b"2"), f("a", b"1")],
+        ),
+        (
+            "S5-key-28B-leaf-preimage-64B",
+            "khoá dài 28 byte ⇒ tiền ảnh lá = 4+28+32 = 64 byte = ĐÚNG tiền ảnh nút. Hai domain-tag khác nhau là thứ DUY NHẤT chặn việc khai một nút trong thành một lá — dùng chung tag ở hai chỗ vẫn cho root hợp lệ mà mất hẳn lớp phòng vệ này",
+            vec![f(&key28, b"v"), f("z", b"w")],
+        ),
+        (
+            "S6-cid-value-32B",
+            "field mang CID: `field_value_bytes` là CID THUẦN 32 byte ĐÃ GIẢI MÃ, KHÔNG phải 64 ký tự hex ASCII (CHỐT-4 — không class byte, để field-proof không lộ loại). Đây là câu trả lời cho chỗ mập mờ ở OriLife-Core#161",
+            vec![f("content", &cid32), f("a", b"1")],
+        ),
+    ];
+
+    println!(
+        r#"  "state_root_note": "INV-E6 / CHỐT-4. fvh = H_dom(tag_fval, field_value_bytes); leaf = H_dom(tag_leaf, u32_be(len(key)) || key || fvh); node = H_dom(tag_node, left || right); root = fold trên các leaf ĐÃ SORT theo key tăng dần, lá lẻ CARRY nguyên (không nhân đôi). Field RỖNG ⇒ root = 32 byte 0. field_value_bytes là giá trị inline HOẶC content_cid THUẦN (đã giải mã), KHÔNG phải chuỗi hex.","#
+    );
+    println!(r#"  "state_root_hash": {{"#);
+    println!(r#"    "tag_fval": "{TAG_STATE_FVAL}","#);
+    println!(r#"    "tag_leaf": "{TAG_STATE_LEAF}","#);
+    println!(r#"    "tag_node": "{TAG_STATE_NODE}","#);
+    println!(
+        r#"    "duplicate_key": "KHÔNG HỢP LỆ — bên gọi PHẢI từ chối trước khi vào build_state_root. sort_by của Rust là sort ỔN ĐỊNH nên hai mục trùng key giữ nguyên thứ tự đầu vào ⇒ root ĐỔI THEO THỨ TỰ truyền vào. Xem Strata#39 điểm 2 (DuplicateFieldKey/E6) và OriLife-Core#324 mục B.""#
+    );
+    println!(r#"  }},"#);
+    println!(r#"  "state_root_vectors": ["#);
+    let sbody: Vec<String> = sets
+        .iter()
+        .map(|(n, w, fs)| state_vector(n, w, fs))
+        .collect();
+    println!("{}", sbody.join(",\n"));
     println!("  ]");
     println!("}}");
 }

@@ -9,6 +9,7 @@
 //! encoder lẫn decoder.
 
 use lampnet_strata::hash::h_dom;
+use lampnet_strata::state::{TAG_STATE_NODE, build_state_root, fval_hash, leaf_hash};
 use lampnet_strata::version::{CanonicalError, StrataVersion, TAG_VER, parse_canonical_core};
 use serde_json::Value;
 
@@ -18,6 +19,7 @@ const FIXTURE: &str = include_str!("../apis/canonical-core-vectors.json");
 /// cùng lý do `settlement_fixture.rs` giữ hằng này.
 const MIN_VECTORS: usize = 5;
 const MIN_NEGATIVE_CONTROLS: usize = 3;
+const MIN_STATE_VECTORS: usize = 6;
 
 fn unhex(s: &str) -> Vec<u8> {
     assert!(s.len().is_multiple_of(2), "hex phải chẵn ký tự: {s}");
@@ -25,6 +27,10 @@ fn unhex(s: &str) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex hợp lệ"))
         .collect()
+}
+
+fn hexs(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn arr32(s: &str) -> [u8; 32] {
@@ -145,4 +151,106 @@ fn negative_controls_bi_tu_choi() {
         };
         assert_eq!(got, want, "[{name}] decoder từ chối nhưng SAI lý do");
     }
+}
+
+/// Khoá `state_root` (INV-E6, CHỐT-4) — dựng lại từ **các trường**, không so hex-với-hex.
+///
+/// Xin bởi `OriLife-Core#161`: bên đó cài `build_state_root` **từ spec, không có vector đối
+/// chiếu**, khác hẳn `canonical_core` vốn đã có vector khoá. Mà `state_root` là trường #5 của
+/// `canonical_core` ⇒ nằm trong `version_hash` ⇒ **được ký**. Lệch ở đây là ký sai vĩnh viễn.
+#[test]
+fn state_root_vectors_khop_builder() {
+    let f = fixture();
+    let svs = f["state_root_vectors"]
+        .as_array()
+        .expect("mảng state_root_vectors");
+    assert!(
+        svs.len() >= MIN_STATE_VECTORS,
+        "còn {} state vector (tối thiểu {MIN_STATE_VECTORS})",
+        svs.len()
+    );
+
+    for sv in svs {
+        let name = sv["name"].as_str().expect("name");
+        let items = sv["fields_in_given_order"]
+            .as_array()
+            .expect("fields_in_given_order");
+
+        let mut fields: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for it in items {
+            let key = unhex(it["key"].as_str().expect("key"));
+            let val = unhex(it["field_value_bytes"].as_str().expect("field_value_bytes"));
+
+            // Trung gian phải khớp từng tầng: sai ở đâu thì chỉ đúng tầng đó, không phải đoán.
+            let fvh = fval_hash(&val);
+            assert_eq!(
+                hexs(&fvh),
+                it["fvh"].as_str().expect("fvh"),
+                "[{name}] fvh lệch — tầng H_dom(tag_fval, field_value_bytes)"
+            );
+            assert_eq!(
+                hexs(&leaf_hash(&key, &fvh)),
+                it["leaf"].as_str().expect("leaf"),
+                "[{name}] leaf lệch — tầng u32_be(len(key)) ‖ key ‖ fvh"
+            );
+            assert_eq!(
+                key.len(),
+                it["key_len"].as_u64().expect("key_len") as usize,
+                "[{name}] key_len trong file không khớp key"
+            );
+
+            fields.push((key, val));
+        }
+
+        let want = sv["state_root"].as_str().expect("state_root");
+        assert_eq!(
+            hexs(&build_state_root(&fields)),
+            want,
+            "[{name}] state_root lệch"
+        );
+
+        // Sort theo key là BẮT BUỘC ⇒ hoán vị đầu vào không được đổi root.
+        // Đảo ngược là đủ để bắt bản cài quên sort (và vector S4 vốn đã truyền vào thứ tự đảo).
+        let mut rev = fields.clone();
+        rev.reverse();
+        assert_eq!(
+            hexs(&build_state_root(&rev)),
+            want,
+            "[{name}] root ĐỔI khi đảo thứ tự đầu vào — bước sort theo key bị thiếu"
+        );
+    }
+}
+
+/// Lá và nút phải nằm ở **hai miền băm khác nhau** — lớp phòng vệ mà `OriLife-Core#324` mục A
+/// chỉ ra là "đang đúng nhưng không có bài kiểm nào giữ".
+///
+/// Với khoá dài **28 byte**, tiền ảnh lá = `u32_be(4) + key(28) + fvh(32)` = **64 byte**, bằng
+/// đúng tiền ảnh nút = `left(32) + right(32)`. Khi đó thứ DUY NHẤT ngăn một nút trong bị khai
+/// là một lá là hai domain-tag khác nhau. Dùng chung tag ở hai chỗ vẫn cho root "hợp lệ", nên
+/// không có test này thì ai dọn mã gộp hai dòng lại sẽ thấy CI xanh.
+#[test]
+fn leaf_va_node_khong_dung_chung_mien_bam() {
+    let key28 = vec![b'k'; 28];
+    let fvh = fval_hash(b"v");
+
+    let mut preimage = Vec::with_capacity(64);
+    preimage.extend_from_slice(&(key28.len() as u32).to_be_bytes());
+    preimage.extend_from_slice(&key28);
+    preimage.extend_from_slice(&fvh);
+    assert_eq!(
+        preimage.len(),
+        64,
+        "tiền đề của test: khoá 28 byte cho tiền ảnh lá đúng 64 byte"
+    );
+
+    // Cùng 64 byte đó, đọc như một nút (hai nửa 32 byte).
+    let as_node = h_dom(TAG_STATE_NODE, &preimage);
+    let as_leaf = leaf_hash(&key28, &fvh);
+
+    assert_ne!(
+        hexs(&as_leaf),
+        hexs(&as_node),
+        "lá và nút băm ra CÙNG giá trị trên cùng 64 byte tiền ảnh — domain separation đã mất, \
+         một nút trong khai được thành một lá"
+    );
 }
