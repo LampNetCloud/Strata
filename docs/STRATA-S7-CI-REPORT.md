@@ -125,6 +125,28 @@ thay cho `x-access-token` hiện tại. Cả hai đều cần **một** thao tá
 Workflow có sẵn **bước preflight** kiểm secret và in hướng dẫn thẳng vào log, thay vì để
 `cargo fetch` chết với lỗi auth khó đọc.
 
+### 4.1 Workflow đã rewrite sang SSH (2026-08-13)
+
+Đoạn trên viết "đổi lại workflow phải rewrite sang SSH" ở thì tương lai, nhưng `ci.yml` khi
+đó vẫn nói fine-grained PAT — anh Đức bắt đúng chỗ đó ở review #31 điểm 3: *"đừng để workflow
+nói PAT còn report nói deploy key"*. Đã sửa, và hoá ra không chỉ là chữ:
+
+- **Tên secret:** `ANCHOR_READ_TOKEN` → **`ANCHOR_DEPLOY_KEY`** (nội dung = private key SSH).
+- **Bước config khác hẳn:** nạp khoá vào `~/.ssh/`, ghim host key bằng `ssh-keyscan` (không
+  tin lần-gặp-đầu), `IdentitiesOnly yes`, rồi `url."git@github.com:LampNetCloud/Anchor".insteadOf`.
+- **`CARGO_NET_GIT_FETCH_WITH_CLI=true` là BẮT BUỘC**, không phải tối ưu (review #31 điểm 1).
+  Cargo fetch git-dep bằng **libgit2**, không gọi git CLI — mà `insteadOf` là tính năng của
+  git CLI nên libgit2 bỏ qua nó hoàn toàn. Với SSH càng chắc chắn: libgit2 không đọc
+  `~/.ssh/config` lẫn ssh-agent. Thiếu cờ này thì bản vá SSH ở trên **không có tác dụng gì**,
+  và lỗi chỉ lộ ra sau khi anh Đức đã cấp khoá — tức mất thêm một vòng chờ.
+- **Rewrite thu hẹp về đúng repo `Anchor`** (review #31 điểm 2). Bản cũ rewrite ở mức
+  `https://github.com/` nên khoá nằm trong `~/.gitconfig` và **mọi step sau đọc được**, kể cả
+  action bên thứ ba như `Swatinem/rust-cache@v2`; và mọi fetch tới github.com đều mang khoá.
+
+*Bài học ghi lại:* ba lỗi này đều **không thể phát hiện bằng cách đọc lại workflow của chính
+mình** — chúng nằm ở chỗ giao giữa cargo/libgit2/git CLI và ở chỗ report đi trước code. Cần
+một người thứ hai đọc, hoặc một lần chạy thật; mà lần chạy thật thì đang bị chặn ở tầng quyền.
+
 ## 5. Số đo (tại máy, toolchain 1.96.0 đã pin)
 
 ```
