@@ -156,7 +156,7 @@ Enforce ở `src/chain.rs:201` và `:362` (`if v.ts < head.ts` → `TimestampReg
 |---|---|---|
 | 1 | PR #42 — đường GHI chuyển sang `read_anchor()`; nhánh `None` fail cứng; chặn `AnchorPriority` thưa ở constructor | anh Đức — **đã trả lời bằng chữ 13/08, code CHƯA đẩy** (`38cd2c9c` vẫn là commit duy nhất) |
 | 2a | **Đội cây OriLife đi đường nào** | ✅ **CHỐT 2026-08-14 — batch-root/Settlement.** Mosaic-A giữ cho hồ sơ giá-trị-cao lẻ. Xem §9.3 |
-| 2b | Chọn hướng (A) `impl MosaicBackend` Rust vs (B) Strata → Mosaic intake | ✅ **CHỐT 2026-08-14 — (B), dạng B1** (Strata gửi payload ĐÃ encode). Xem §9.6 |
+| 2b | Chọn hướng (A) `impl MosaicBackend` Rust vs (B) Strata → Mosaic intake | ✅ **CHỐT 2026-08-14 — (B), dạng B1′**: Mosaic quyết lô · Strata kiểm INV-E7 + encode · Mosaic dựng tx + submit. Xem §9.6 |
 | 2c | Luật `Strata#1` *"KHÔNG dựng tx neo trong Strata"* đã bị vượt trên thực tế — sửa luật hay khoanh phạm vi | anh Đức — xem §9.7 |
 | 2d | Beacon `policyId` phụ thuộc khoá ví publisher, mà đích là **ví của chính người dùng** | chưa có nhà — xem §9.8, nối `VeDataIO/Core#87` |
 | 3 | `ts` — đổi hướng dẫn OriLife từ `max(prev_ts+1, now)` sang `max(prev_ts, now)` | anh Đức |
@@ -316,7 +316,7 @@ Một chỗ **lệch có chủ ý** so với đề nghị ở body #48: anh Đ�
 
 ---
 
-### 9.6 CHỐT câu 1 — hướng **(B)**, dạng **B1**
+### 9.6 CHỐT câu 1 — hướng **(B)**, dạng **B1′**
 
 Chốt 2026-08-14 (phía VeData). Đường submit production là **(B) Strata đẩy lô sang Mosaic**, không phải (A) `impl MosaicBackend` bằng Rust.
 
@@ -331,39 +331,78 @@ Chốt 2026-08-14 (phía VeData). Đường submit production là **(B) Strata �
 
 Cộng thêm: sau chốt 2a, (A) **mất người tiêu thụ ở quy mô** — nó là seam của đường Mosaic-A mà đội cây không đi nữa.
 
-**Dạng B1 — Mosaic nhận payload ĐÃ encode.** Ngã ba bên trong (B), chốt về phía giữ **một** encoder:
+**Dạng B1′ — Mosaic quyết lô, Strata kiểm + encode, Mosaic dựng tx.**
+
+> ⚠️ Bản đầu của mục này chốt **B1** ("Strata gửi payload đã encode, Mosaic chỉ submit"). **Đã sửa 2026-08-14 trong cùng ngày** — B1 đặt việc **quyết thành phần lô** vào Strata, tức bỏ không `BatchCoordinator` của Mosaic. Giữ nguyên vết để thấy chỗ trượt: khi chia việc theo *"ai giữ byte-format"* thì rất dễ kéo luôn *"ai quyết lô"* đi theo, mà hai thứ đó **không cùng một câu hỏi**.
+
+| Bước | Ai làm | Vì sao |
+|---|---|---|
+| Quyết **khi nào** bắn lô + lô gồm **anchor nào** | **Mosaic** `BatchCoordinator` (`ts/src/coordinator.ts`) | đây là việc **neo**; Mosaic đã có hàng đợi ưu tiên + ngưỡng depth/age + 4 strategy §7.4 |
+| Kiểm **INV-E7 chống rollback** từng anchor, rồi encode label 1234 | **Strata** `publish_batch` (`src/anchor_sink.rs:405`) + `encode_records` (`src/settlement.rs:159`) | `resolve()` là **chain logic**; encoder giữ **một** bản, đã ghim fixture |
+| Dựng tx + ký + submit + trả `txid` | **Mosaic** | *"Mosaic giữ tx"* — và `submit.ts` **rời khỏi Strata** (§9.7) |
 
 ```
-POST /mosaic/v1/strata-anchor-batch
-{ "label": 1234, "payload_cbor": "<hex>", "ref_ids": ["<hex32>", …], "beacon": true }
-→ { "txid": "…", "policy_id": "…" }
+Mosaic BatchCoordinator  ──(N anchor đã chọn)──▶  Strata: publish_batch → kiểm INV-E7 + encode_records
+                         ◀──({payload_cbor, ref_ids})──
+                         ──▶  dựng tx + ký + submit  ──▶  { txid, policy_id }  ──▶  Strata ghi receipt
 ```
 
-Strata encode bằng `src/settlement.rs` (đã có, đã ghim bằng fixture chung `apis/settlement-metadata.json` — 8 ca dương + 6 ca âm + 1 ca bỏ-qua, PR #49). Mosaic dựng tx + ký + submit + trả `txid`.
+**Chỗ suýt bỏ sót, và nó là chỗ mất bất biến:** `publish_batch` chạy `resolve()` cho **từng** anchor để chặn rollback. Nếu Mosaic tự gộp lô rồi submit thẳng **không đi qua `publish_batch`**, thì **mất luôn gác INV-E7** — lô vẫn lên chuỗi, vẫn trông đúng, chỉ là không còn ai chặn một anchor tụt-lùi-seq. Nên lô phải đi qua Strata **một nhịp** để kiểm, dù Mosaic là bên quyết thành phần lô.
 
-Vì sao **không** chọn B2 (Strata gửi danh sách anchor có cấu trúc, Mosaic tự encode): B2 sinh **bản encoder thứ hai** bằng TS phải giữ parity byte với bản Rust — đúng lớp vấn đề mà `#47`/`#49` sinh ra để quản, và là lớp lỗi đã cắn ở `stamp_id` 32-vs-36 byte. Một byte-format nên có **một** nguồn.
+**Đánh đổi phải nói thẳng:** B1′ có một round-trip Mosaic → Strata → Mosaic, tức **Strata phải sống lúc Mosaic bắn lô**. Đổi lại: một encoder duy nhất, INV-E7 còn nguyên, và không module nào làm việc của module kia.
 
-⚠️ `payload_cbor` **không đục hoàn toàn**: beacon cần `ref_ids` vì `unit = policyId ‖ ref_id`. Nói rõ ở đây để bên hiện thực không thiết kế cửa theo giả định "Mosaic không cần biết gì về nội dung".
+Vì sao **không** chọn B2 (Mosaic tự encode label 1234 bằng TS): B2 sinh **bản encoder thứ hai** phải giữ parity byte với bản Rust — đúng lớp vấn đề mà `#47`/`#49` sinh ra để quản, và là lớp lỗi đã cắn ở `stamp_id` 32-vs-36 byte. **Và** nó vẫn phải gọi Strata riêng một nhịp để kiểm INV-E7, nên nó **không** tiết kiệm được round-trip — chỉ thêm một encoder.
 
-**Một chỗ Mosaic có sẵn nhưng KHÔNG dùng được:** `tx-builder/src/strataAnchorPlan.ts` + `strataAnchorDatum.ts` đã mirror `strata_anchor.ak` — nhưng đó là đường **Mosaic-A CIP-68**, tức đúng đường 89,6 tADA mà 2a vừa loại. Phần Mosaic đã có sẵn cho Strata lại **không phải** phần đội cây cần. Mosaic **chưa có** encoder label 1234 (nó chỉ biết `ANCHOR_METADATA_LABEL = 7368` ở `ts/src/params.ts:118`, và label 0 legacy) — nhưng dưới B1 thì nó **không cần có**.
+⚠️ `payload_cbor` **không đục hoàn toàn**: beacon cần `ref_ids` vì `unit = policyId ‖ ref_id`. Nói rõ để bên hiện thực không thiết kế cửa theo giả định "Mosaic không cần biết gì về nội dung".
+
+**Một chỗ Mosaic có sẵn nhưng KHÔNG dùng được:** `tx-builder/src/strataAnchorPlan.ts` + `strataAnchorDatum.ts` đã mirror `strata_anchor.ak` — nhưng đó là đường **Mosaic-A CIP-68**, tức đúng đường 89,6 tADA mà 2a vừa loại. Phần Mosaic đã có sẵn cho Strata lại **không phải** phần đội cây cần. Mosaic **chưa có** encoder label 1234 (nó chỉ biết `ANCHOR_METADATA_LABEL = 7368` ở `ts/src/params.ts:118`, và label 0 legacy) — dưới B1′ nó **không cần có**.
+
+#### 9.6.1 Hai cây Merkle, hai trục — không phải một việc làm hai lần
+
+Câu hỏi đặt ra khi rà B1: *Mosaic mới là nơi xây cây Merkle, sao lại nói nó không cần hiểu merkle root?* Câu đó đúng, và bản đầu của mục này phát biểu **quá rộng**. Đo lại thì có **ba** cây, ở **hai trục khác nhau**:
+
+| Cây | Leaf | Cam kết gì | Thuộc ai |
+|---|---|---|---|
+| MMR lineage — `src/chain.rs` | `version_hash` | lịch sử version của **một** hồ sơ (INV-E3/E8) | **là chính chuỗi Strata** — gỡ đi thì không còn Strata |
+| Checkpoint sub-MMR — `src/batch.rs` (S3) | entry | gộp N entry **trong cùng một lineage** theo epoch | chain logic — Strata |
+| Cây lô — `Core/mosaic/merkle-builder/` (M4) | `anchor_request` | gộp **nhiều đối tượng khác nhau** vào một tx | **việc neo — Mosaic** |
+
+Hai trục: Strata gộp **theo thời gian trong một hồ sơ**; Mosaic gộp **nhiều hồ sơ vào một tx**. Không trùng việc.
+
+Mosaic **có** thư viện Merkle đầy đủ — MMR §9.1, SMT compact-pruned §9.3, Lazy-MMR + WAL §9.2, proof 33-byte + gói CBOR §12.4 (`merkle-builder/src/`). Phát biểu đúng phải hẹp lại: *trong luồng B1′, Mosaic không phải **tính lại cây MMR lineage của Strata*** — vì cây đó không phải sản phẩm của việc neo, nó là **cấu trúc dữ liệu của chính Strata**.
+
+Ghi ra vì cái sai này có hình dạng dễ lặp: **từ "module X không cần làm việc này trong luồng này" nhảy sang "module X không làm việc này"** — một câu về *luồng* bị đọc thành một câu về *năng lực*, và lần đọc sau sẽ dùng nó để kết luận sai về ranh giới module.
 
 ### 9.7 Luật `Strata#1` đã bị vượt trên thực tế — ghi ra thay vì lờ đi
 
 Luật ranh giới từ `Strata#1`: *"Strata giữ logic chain; **Mosaic giữ tx; KHÔNG dựng tx neo trong Strata**"*.
 
-Nhưng `anchor-io/submitter/submit.ts` **đang dựng tx ngay trong repo Strata** — build + sign + submit qua Lucid, và đó là **đường đã chạy thật**, đã nghiệm thu on-chain Preview. Hai khả năng: hoặc luật chỉ nhắm tx **script** CIP-68 chứ không nhắm metadata label 1234, hoặc luật đã bị vượt mà không ai ghi. **Xin anh Đức khoanh phạm vi** — câu trả lời quyết luôn hình dạng cửa B1.
+Nhưng `anchor-io/submitter/submit.ts` **đang dựng tx ngay trong repo Strata** — build + sign + submit qua Lucid, và đó là **đường đã chạy thật**, đã nghiệm thu on-chain Preview. Hai khả năng: hoặc luật chỉ nhắm tx **script** CIP-68 chứ không nhắm metadata label 1234, hoặc luật đã bị vượt mà không ai ghi. **Xin anh Đức khoanh phạm vi.**
 
-**Chốt phía VeData, không chờ:** **không xoá `submit.ts`.** Nó là bằng chứng đường này chạy được thật, và đó là thứ đắt nhất trong cả mối nối. Điều kiện thay thế viết thành luật:
+**ĐÍCH đã chốt phía VeData: gỡ hẳn việc dựng tx neo ra khỏi Strata.** Không phải "hợp thức hoá chỗ đã vượt" — luật `Strata#1` giữ nguyên hiệu lực, và `submit.ts` là thứ phải đi.
 
-> Đường Mosaic chỉ được thay `submit.ts` sau khi nó **(a)** qua đúng bộ fixture chung `apis/settlement-metadata.json`, **và (b)** submit được một tx thật trên Preview.
+**Nhưng không xoá ngay**, vì nó là bằng chứng đường này chạy được thật — thứ đắt nhất trong cả mối nối. Điều kiện chuyển giao viết thành luật:
 
-Trước khi đủ cả hai, `submit.ts` vẫn là đường sống. Lý do đã trả giá một lần: *một đường chỉ dùng khi hỏng mà không chạy thật thì chỉ TRÔNG như tồn tại* — đúng vụ fallback L1 từng là stub.
+> `submit.ts` là **đường sống TẠM**. Nó chỉ được xoá sau khi bản Mosaic **(a)** qua đúng bộ fixture chung `apis/settlement-metadata.json`, **và (b)** submit được một tx thật trên Preview. Đủ cả hai ⇒ **xoá**, không giữ song song.
 
-### 9.8 Đích là **ví của chính người dùng** — và điều đó phá giả định của beacon
+Hai vế đó không thừa. Vế (a) chặn port sai byte; vế (b) chặn port đúng byte mà không bao giờ chạy — *một đường chỉ dùng khi hỏng mà không chạy thật thì chỉ TRÔNG như tồn tại*, đúng vụ fallback L1 từng là stub. Và mệnh đề "đủ cả hai ⇒ **xoá**" cũng không thừa: giữ hai đường submit song song là có hai chỗ cầm khoá ví, tức nhân đôi đúng thứ đang muốn gom về một nhà.
 
-Hướng dài hạn (Thịnh chốt 2026-08-14): ví submit **thuộc về chính người dùng**, không phải ví nền tảng.
+### 9.8 Đích là **ví của chính người dùng, ráp qua PhoenixKey** — và điều đó phá giả định của beacon
 
-**Hệ quả một — nó đảo lại một nhận định của chính báo cáo này.** Ở vòng đo đầu, việc intake bắt buộc chữ ký CIP-30 của **owner** (`ts/src/intake/signature.ts`, fail-closed, không verifier mặc định) bị xếp là **điểm vênh** của (B): Strata-với-tư-cách-dịch-vụ không cầm khoá owner nên không ký được. Nhận định đó đúng với **hôm nay**, nhưng dưới mô hình ví-người-dùng thì chữ ký owner **sẽ có** — và cửa intake hiện tại lại đúng là hình dạng dài hạn. ⇒ Cửa service-to-service của B1 là **bản CHUYỂN TIẾP**, không phải bản cuối. Ghi vào docstring của cửa đó khi hiện thực, nếu không thì nó sẽ sống lâu như mọi bản trung gian được trình bày như bản cuối.
+Hướng dài hạn (Thịnh chốt 2026-08-14): ví submit **thuộc về chính người dùng**, không phải ví nền tảng. Đường ráp là **PhoenixKey** — một nền tảng ví/tài khoản riêng, **anh Tuân phụ trách**. Thịnh nói rõ **"cái đó là sau này"**, nên nó **KHÔNG nằm trong phạm vi đợt này**; ghi ở đây vì nó đổi cách đọc hai thứ đang thiết kế hôm nay, và thiết kế mà không biết đích thì sẽ phải làm lại.
+
+**Hạ tầng phía Mosaic đã dựng sẵn đường này — khi PhoenixKey tới là RÁP VÀO, không phải làm mới:**
+
+| Có sẵn | Ở đâu | Làm gì |
+|---|---|---|
+| Phân giải DID qua PhoenixKey | `Core/mosaic/ts/src/intake/phoenixkey.ts` | resolve `owner_did` → DID document, **fail-closed** |
+| Ràng chữ ký owner theo **khoá** | `Core/mosaic/ts/src/intake/signature.ts` | CIP-30 owner-UT binding, domain-tag `MOSAIC-ANCHOR-REQ-v1`, verifier **injectable**, không có default không-an-toàn |
+
+`signature.ts` đã tách sẵn `OwnerSignatureVerifier` thành interface, và tự khai rằng bản MVP (`Ed25519BindingVerifier`) sẽ được **thay bằng verifier Mesh.js / COSE_Sign1 (CIP-30) sau CÙNG một interface**. Tức chỗ cắm PhoenixKey đã có hình dạng, chỉ chưa có bên cắm vào. Cùng nguồn canonical DID mà OriLife-Core đang dùng (`author_did = blake2b_256` của DID canonical).
+
+**Hệ quả một — nó đảo lại một nhận định của chính báo cáo này.** Ở vòng đo đầu, việc intake bắt buộc chữ ký CIP-30 của **owner** bị xếp là **điểm vênh** của (B): Strata-với-tư-cách-dịch-vụ không cầm khoá owner nên không ký được. Nhận định đó đúng với **hôm nay**, nhưng dưới mô hình ví-người-dùng thì chữ ký owner **sẽ có** — và cửa intake hiện tại lại đúng là hình dạng dài hạn. ⇒ Cửa service-to-service của B1′ là **bản CHUYỂN TIẾP**, không phải bản cuối.
+
+**Việc phải làm ngay, dù PhoenixKey là chuyện sau này:** ghi câu đó vào **docstring của cửa `strata-anchor-batch`** lúc hiện thực, kèm điều kiện thu hồi (*"khi owner-signature qua PhoenixKey có hiệu lực, cửa này gộp về cửa intake chính"*). Không ghi thì nó sẽ sống lâu như mọi bản trung gian được trình bày như bản cuối — đúng bài học `threadPin` ở `VEDATA-MOSAIC-M15-REPORT.md §11.4`.
 
 **Hệ quả hai — beacon (issue `#14`) mất giả định nền.** `submit.ts:101-103` dựng policy native `sig(pkh)`, nên
 
