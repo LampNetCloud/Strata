@@ -131,14 +131,32 @@ fn now_secs() -> Option<u64> {
 /// sử là ca dùng hợp lệ. Hệ quả phải nói rõ với bên tiêu thụ: `ts` là **lời khai của tác
 /// giả**, chỉ lần neo on-chain mới cho một cận trên thời gian — mà neo là tuỳ chọn.
 fn check_ts(ts: u64) -> ApiResult<()> {
+    check_ts_at(ts, now_secs())
+}
+
+/// Phần THUẦN của [`check_ts`] — nhận đồng hồ làm tham số thay vì tự đi lấy.
+///
+/// Tách ra vì lớp 1 và lớp 2 **trùng miền trên mọi đầu vào mà một test đi qua HTTP gửi tới
+/// được**: mọi `ts` vượt `TS_MILLIS_FLOOR` (`10^12`) thì cũng vượt `now + 300` với `now` là
+/// đồng hồ thật (`≈ 1,79 × 10^9`). Nên test qua router **không phân biệt được hai lớp** — gỡ
+/// hẳn lớp 1 mà toàn bộ bộ kiểm vẫn xanh, kể cả bài mang tên `..._not_by_clock`.
+///
+/// Ca duy nhất lớp 1 gánh một mình là `now == None`: đồng hồ đặt **trước** epoch nên
+/// `duration_since(UNIX_EPOCH)` lỗi ⇒ lớp 2 bị `if let Some(now)` bỏ qua. Chỉ tới được ca đó
+/// khi đồng hồ là **tham số**; `SystemTime::now()` gọi thẳng trong hàm thì không có đường
+/// dựng lại nó trong test.
+///
+/// *Một lớp phòng vệ không có bài kiểm phân biệt được nó với lớp bên cạnh là một lớp sắp bị
+/// gộp mất trong lần dọn mã tới — và CI sẽ đồng ý với người gộp.*
+fn check_ts_at(ts: u64, now: Option<u64>) -> ApiResult<()> {
     if ts >= TS_MILLIS_FLOOR {
         return Err(ApiError::TimestampTooFarFuture {
             got: ts,
-            now: now_secs().unwrap_or(0),
+            now: now.unwrap_or(0),
             max_skew: MAX_TS_SKEW_SECS,
         });
     }
-    if let Some(now) = now_secs()
+    if let Some(now) = now
         && ts > now.saturating_add(MAX_TS_SKEW_SECS)
     {
         return Err(ApiError::TimestampTooFarFuture {
@@ -594,4 +612,56 @@ fn anchor_blocking(
         backend: backend.clone(),
     });
     Ok(AnchorResp::new(&committed, txid, backend))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ts` giây thật của hôm nay (2026) — mốc "phải qua" trong mọi ca dưới đây.
+    const TS_SECS_TODAY: u64 = 1_786_000_000;
+    /// `Date.now()` đương thời tính bằng **mili giây** — đúng ca lớp 1 sinh ra để bắt.
+    const TS_MILLIS_TODAY: u64 = 1_786_000_000_000;
+
+    /// Lớp 1 phải chặn `ts` mili giây **khi không có đồng hồ nào** để dựa vào.
+    ///
+    /// Đây là bài kiểm mà bộ test qua HTTP không viết được: ở đó `now` luôn là đồng hồ thật,
+    /// nên lớp 2 bắt hộ và lớp 1 có gỡ đi cũng không ai thấy.
+    #[test]
+    fn tran_tuyet_doi_chan_ts_mili_giay_ngay_ca_khi_khong_co_dong_ho() {
+        assert!(
+            check_ts_at(TS_MILLIS_TODAY, None).is_err(),
+            "không đọc được đồng hồ thì lớp 1 là gác DUY NHẤT còn lại — nó phải chặn"
+        );
+        assert!(
+            check_ts_at(TS_MILLIS_FLOOR, None).is_err(),
+            "biên: >= là chặn"
+        );
+    }
+
+    /// Vế còn lại của cùng một ca: không có đồng hồ thì `ts` giây **hợp lệ** vẫn phải qua.
+    ///
+    /// Thiếu vế này thì `check_ts_at(_, None) -> Err` luôn cũng làm bài trên xanh, và daemon
+    /// trên máy đồng hồ hỏng sẽ từ chối sạch mọi ghi mà bộ kiểm vẫn báo đạt.
+    #[test]
+    fn khong_co_dong_ho_thi_ts_giay_that_van_qua() {
+        assert!(check_ts_at(TS_SECS_TODAY, None).is_ok());
+        assert!(check_ts_at(0, None).is_ok(), "ts quá khứ KHÔNG bị cửa chặn");
+    }
+
+    /// Lớp 2 vẫn phải làm việc của nó: tương lai gần thì chỉ có đồng hồ mới bắt được, vì
+    /// những giá trị đó nằm xa dưới `TS_MILLIS_FLOOR`.
+    #[test]
+    fn bien_lech_bat_tuong_lai_gan_ma_tran_tuyet_doi_khong_thay() {
+        let now = TS_SECS_TODAY;
+        assert!(
+            check_ts_at(now + MAX_TS_SKEW_SECS, Some(now)).is_ok(),
+            "đúng biên là qua"
+        );
+        assert!(check_ts_at(now + MAX_TS_SKEW_SECS + 1, Some(now)).is_err());
+        assert!(
+            check_ts_at(now + MAX_TS_SKEW_SECS + 1, None).is_ok(),
+            "chính vì lớp 2 im khi không có đồng hồ nên lớp 1 mới cần tồn tại"
+        );
+    }
 }
