@@ -7,6 +7,7 @@
 use crate::hexs;
 use lampnet_merkle_anchor::mmr::InclusionProof;
 use lampnet_strata::state::FieldProof;
+use lampnet_strata::state::find_duplicate_key;
 use lampnet_strata::version::{Hash32, StrataVersion};
 use lampnet_strata::{AnchorPriority, StrataAnchor};
 use serde::{Deserialize, Serialize};
@@ -34,31 +35,38 @@ impl FieldDto {
 
 /// Chuyển cả danh sách; lỗi hex đầu tiên làm hỏng cả request (fail-closed).
 ///
-/// **Từ chối khoá TRÙNG.** `state.rs` ghi trong doc-comment rằng khoá là duy nhất "sau khi
-/// caller bảo đảm" — caller chính là chỗ này, và trước đây nó không bảo đảm gì. Hệ quả đã
-/// dựng lại được đầu-cuối: gửi `[{diagnosis, aa}, {diagnosis, bb}]` thì `sorted_leaves` sort
-/// ỔN ĐỊNH nên sinh HAI lá riêng dưới CÙNG một `state_root` — root đó đi vào `version_hash`,
+/// **Từ chối khoá TRÙNG** (INV-E6, `#39` điểm 2 — phạm vi chốt ở `#40` P6): trùng key là
+/// `MalformedRequest` ⇒ **400**, kể cả khi hai mục cùng giá trị.
+///
+/// `state.rs` ghi trong doc-comment rằng khoá là duy nhất "sau khi caller bảo đảm" — caller
+/// chính là chỗ này, và trước đây nó không bảo đảm gì. Hệ quả đã dựng lại được đầu-cuối: gửi
+/// `[{diagnosis, aa}, {diagnosis, bb}]` thì `sorted_leaves` sort ỔN ĐỊNH nên sinh HAI lá
+/// riêng dưới CÙNG một `state_root` — root đó đi vào `canonical_core` ⇒ vào `version_hash`,
 /// được ký Ed25519 và neo on-chain. Sau đó tồn tại **hai field-proof đều verify đúng**, cùng
 /// khoá `diagnosis`, một trả `aa` một trả `bb`, cùng `state_root` đã neo. Người ghi luôn có
-/// đường chối — non-repudiation của INV-E6 sụp.
+/// đường chối — non-repudiation của INV-E6 sụp. Cùng lẽ đó, đảo thứ tự hai mục trùng key
+/// cho **hai root khác nhau**: không gác thì hỏng **im lặng**, chỉ còn một chữ ký nói về một
+/// root phụ thuộc thứ tự người gọi xếp danh sách.
 ///
-/// Đây là cổng ở CỬA. Vá triệt để phải ở lõi (`build_state_root`/`prove_field` là API `pub`
-/// của SDK, đội khác gọi thẳng không qua daemon) — thuộc đợt đổi byte-layout, đã ghi nợ.
+/// Đây là cổng ở **CỬA**, và cửa là chỗ đúng: `build_state_root` vô-lỗi và được gọi ở nhiều
+/// chỗ nội bộ (`derived_index`, `composite`) nơi tập field đã qua đây. Còn hở, ghi rõ để
+/// không ai tưởng đã đóng: `build_state_root`/`prove_field` là API `pub` của SDK, đội tích
+/// hợp gọi thẳng crate vẫn dựng được `state_root` mâu thuẫn — họ nay có
+/// [`find_duplicate_key`] để gọi, nhưng **gọi hay không vẫn là lựa chọn của họ**. Đóng hẳn
+/// thuộc `#39` + đợt đổi byte-layout.
 pub fn to_pairs(fields: &[FieldDto]) -> Result<StateFields, String> {
     let pairs: StateFields = fields
         .iter()
         .map(FieldDto::to_pair)
         .collect::<Result<_, _>>()?;
 
-    let mut seen: std::collections::BTreeSet<&[u8]> = std::collections::BTreeSet::new();
-    for (k, _) in &pairs {
-        if !seen.insert(k.as_slice()) {
-            return Err(format!(
-                "state_fields: khoá trùng {:?} — một khoá chỉ được xuất hiện MỘT lần; \
-                 khoá trùng làm state_root cam kết hai giá trị mâu thuẫn cho cùng trường",
-                String::from_utf8_lossy(k)
-            ));
-        }
+    if let Some(dup) = find_duplicate_key(&pairs) {
+        return Err(format!(
+            "state_fields: khoá trùng {:?} — một khoá chỉ được xuất hiện MỘT lần (INV-E6); \
+             khoá trùng làm state_root cam kết hai giá trị mâu thuẫn cho cùng trường, và làm \
+             root phụ thuộc thứ tự truyền vào — mà state_root thì được ký",
+            String::from_utf8_lossy(&dup)
+        ));
     }
     Ok(pairs)
 }
@@ -376,5 +384,55 @@ impl AnchorResp {
             anchor_txid: txid,
             backend,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dto(k: &str, v: &str) -> FieldDto {
+        FieldDto {
+            key: k.into(),
+            value: v.into(),
+        }
+    }
+
+    #[test]
+    fn to_pairs_nhan_key_phan_biet() {
+        let out = to_pairs(&[dto("a", "01"), dto("b", "02")]).expect("key phân biệt phải qua");
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn to_pairs_tu_choi_trung_key() {
+        let err = to_pairs(&[dto("a", "01"), dto("b", "02"), dto("a", "ff")])
+            .expect_err("trùng key phải bị từ chối (INV-E6)");
+        assert!(
+            err.contains("khoá trùng"),
+            "thông điệp phải nói rõ lý do: {err}"
+        );
+        assert!(
+            err.contains('a'),
+            "thông điệp phải chỉ ĐÚNG key nào trùng: {err}"
+        );
+    }
+
+    /// `#40` P6 chốt reject **kể cả same-value** — đây là ca dễ bị nới nhất, vì "hai mục
+    /// giống hệt nhau thì hại gì" nghe hợp lý. Hại là: nó vẫn thêm một LÁ nên vẫn đổi root.
+    #[test]
+    fn to_pairs_tu_choi_trung_key_ke_ca_cung_gia_tri() {
+        to_pairs(&[dto("dup", "07"), dto("dup", "07")])
+            .expect_err("trùng key cùng giá trị VẪN phải bị từ chối");
+    }
+
+    /// Gác trùng key không được nuốt mất lỗi hex — hai cửa fail-closed độc lập.
+    #[test]
+    fn to_pairs_van_bao_loi_hex() {
+        let err = to_pairs(&[dto("a", "zz")]).expect_err("hex hỏng phải bị từ chối");
+        assert!(
+            !err.contains("khoá trùng"),
+            "phải là lỗi hex, không phải lỗi trùng: {err}"
+        );
     }
 }

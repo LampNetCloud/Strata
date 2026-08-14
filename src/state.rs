@@ -47,6 +47,32 @@ fn node_hash(left: &Hash32, right: &Hash32) -> Hash32 {
     h_dom(TAG_STATE_NODE, &buf)
 }
 
+/// Trả về key đầu tiên xuất hiện **nhiều hơn một lần** trong `fields`, nếu có (INV-E6).
+///
+/// **Vì sao phải gác:** [`build_state_root`] sort bằng `sort_by`, mà `sort_by` của Rust là
+/// sort **ổn định** — hai mục trùng key giữ nguyên thứ tự đầu vào. Nên cùng một tập dữ liệu,
+/// truyền vào theo hai thứ tự khác nhau, cho **hai `state_root` khác nhau**. Mà `state_root`
+/// là trường #5 của `canonical_core` ⇒ nằm trong `version_hash` ⇒ **được ký**. Một root phụ
+/// thuộc thứ tự người gọi xếp danh sách là một chữ ký nói về thứ mình không kiểm soát.
+///
+/// Lẽ độc lập thứ hai: [`prove_field`] chứng minh một trường **theo tên**. Chứng minh theo
+/// tên chỉ có nghĩa khi một tên ứng với đúng một giá trị — trùng key làm hỏng chính cửa đó,
+/// không chỉ làm root đổi.
+///
+/// Phạm vi reject theo `#40` P6: **chỉ `state_fields`**, KHÔNG `field_policy`, và reject
+/// **kể cả khi hai mục cùng giá trị** — cùng giá trị vẫn đổi SỐ LÁ nên vẫn đổi root.
+///
+/// **Vì sao không tự chặn bên trong [`build_state_root`]:** hàm đó vô-lỗi và được gọi ở
+/// nhiều chỗ nội bộ (`derived_index`, `composite`) nơi tập field đã qua cửa. Chỗ phải gọi là
+/// **biên nhận dữ liệu ngoài** — `node/src/dto.rs::to_pairs`.
+pub fn find_duplicate_key(fields: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<u8>> {
+    let mut keys: Vec<&[u8]> = fields.iter().map(|(k, _)| k.as_slice()).collect();
+    keys.sort_unstable();
+    keys.windows(2)
+        .find(|w| w[0] == w[1])
+        .map(|w| w[0].to_vec())
+}
+
 /// Sắp các field theo key tăng dần và trả về leaf-hash tương ứng (tất định).
 fn sorted_leaves(fields: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Hash32)> {
     let mut v: Vec<(Vec<u8>, Hash32)> = fields
@@ -256,5 +282,56 @@ mod tests {
         let p = prove_field(&f, b"file").unwrap();
         assert_eq!(p.value, pure_cid);
         assert!(verify_field_proof(&p));
+    }
+
+    // ── INV-E6: trùng key ────────────────────────────────────────────────────
+
+    #[test]
+    fn find_duplicate_key_bat_dung_ca_trung_gia_tri() {
+        let k = |s: &str| s.as_bytes().to_vec();
+
+        assert_eq!(find_duplicate_key(&[]), None);
+        assert_eq!(
+            find_duplicate_key(&[(k("a"), vec![1]), (k("b"), vec![2])]),
+            None
+        );
+
+        // Trùng key, KHÁC giá trị.
+        assert_eq!(
+            find_duplicate_key(&[(k("a"), vec![1]), (k("b"), vec![2]), (k("a"), vec![9])]),
+            Some(k("a"))
+        );
+
+        // Trùng key, CÙNG giá trị — vẫn phải bắt (#40 P6 chốt reject kể cả same-value),
+        // vì cùng giá trị vẫn thêm một LÁ nên vẫn đổi root.
+        assert_eq!(
+            find_duplicate_key(&[(k("dup"), vec![7]), (k("dup"), vec![7])]),
+            Some(k("dup"))
+        );
+    }
+
+    /// Đây là LÝ DO của gác trên, viết thành số: `sort_by` là sort ỔN ĐỊNH nên hai mục
+    /// trùng key giữ nguyên thứ tự đầu vào ⇒ đảo thứ tự ⇒ ĐỔI `state_root`. Root đó nằm
+    /// trong `canonical_core` ⇒ trong `version_hash` ⇒ đã được KÝ.
+    ///
+    /// Test này cố ý khẳng định hành vi HỎNG, không phải hành vi mong muốn: ngày nào ai đó
+    /// làm `build_state_root` bất biến theo thứ tự cả khi trùng key, test này đỏ và người
+    /// đó phải quay lại đọc vì sao gác nằm ở biên.
+    #[test]
+    fn trung_key_lam_state_root_phu_thuoc_thu_tu() {
+        let k = |s: &str| s.as_bytes().to_vec();
+        let a = [(k("x"), vec![1]), (k("x"), vec![2]), (k("y"), vec![3])];
+        let mut b = a.clone();
+        b.swap(0, 1);
+
+        assert_ne!(
+            build_state_root(&a),
+            build_state_root(&b),
+            "nếu hai root này BẰNG nhau thì lý do của find_duplicate_key đã đổi — đọc lại docstring"
+        );
+
+        // Và cả hai đều bị gác bắt, nên không đường nào trong hai đường trên tới được chuỗi.
+        assert!(find_duplicate_key(&a).is_some());
+        assert!(find_duplicate_key(&b).is_some());
     }
 }
