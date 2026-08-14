@@ -155,8 +155,8 @@ Enforce ở `src/chain.rs:201` và `:362` (`if v.ts < head.ts` → `TimestampReg
 | # | Việc | Chờ ai |
 |---|---|---|
 | 1 | PR #42 — đường GHI chuyển sang `read_anchor()`; nhánh `None` fail cứng; chặn `AnchorPriority` thưa ở constructor | anh Đức — **đã trả lời bằng chữ 13/08, code CHƯA đẩy** (`38cd2c9c` vẫn là commit duy nhất) |
-| 2a | **Đội cây OriLife đi đường nào** | ✅ **CHỐT 2026-08-14 — batch-root/Settlement.** Mosaic-A giữ cho hồ sơ giá-trị-cao lẻ. Xem §9.3 |
-| 2b | Chọn hướng (A) `impl MosaicBackend` Rust vs (B) Strata → Mosaic intake | ✅ **CHỐT 2026-08-14 — (B), dạng B1′**: Mosaic quyết lô · Strata kiểm INV-E7 + encode · Mosaic dựng tx + submit. Xem §9.6 |
+| 2a | **Đội cây OriLife đi đường nào** | ✅ **TRƯỚC MẮT — batch-root/Settlement.** Mosaic-A giữ cho hồ sơ giá-trị-cao lẻ. Xem §9.3 |
+| 2b | Chọn hướng (A) `impl MosaicBackend` Rust vs (B) Strata → Mosaic intake | ✅ **TRƯỚC MẮT — (B), dạng B1′**: Mosaic quyết lô · Strata kiểm INV-E7 + encode · Mosaic dựng tx + submit. Xem §9.6 |
 | 2c | Luật `Strata#1` *"KHÔNG dựng tx neo trong Strata"* đã bị vượt trên thực tế — sửa luật hay khoanh phạm vi | anh Đức — xem §9.7 |
 | 2d | Beacon `policyId` phụ thuộc khoá ví publisher, mà đích là **ví của chính người dùng** | chưa có nhà — xem §9.8, nối `VeDataIO/Core#87` |
 | 3 | `ts` — đổi hướng dẫn OriLife từ `max(prev_ts+1, now)` sang `max(prev_ts, now)` | anh Đức |
@@ -281,9 +281,9 @@ Một chỗ cố ý **không** viết cho gọn: nợ ở lõi **không** khép 
 
 Và một bẫy nhỏ đi kèm: thông điệp lỗi thống nhất theo từ ngữ #48 ("khoá trùng") ⇒ **2 assertion trong test #50 phải đổi theo**. Không đổi thì test vẫn xanh — `expect_err` bắt đúng lỗi, chỉ có `assert!(err.contains(...))` là so vào một chuỗi không còn tồn tại. Đúng lớp *test mang tên mạnh hơn nội dung*.
 
-### 9.3 CHỐT câu 2 của MB-6 — đội cây OriLife đi **batch-root/Settlement**
+### 9.3 Câu 2 của MB-6 — trước mắt đội cây OriLife đi **batch-root/Settlement**
 
-Chốt 2026-08-14 (phía VeData). Mosaic-A **không** dùng cho đội cây; giữ cho **hồ sơ giá-trị-cao lẻ**.
+Trước mắt: Mosaic-A **không** dùng cho đội cây; giữ cho **hồ sơ giá-trị-cao lẻ**.
 
 Căn cứ, theo thứ tự sức nặng:
 
@@ -316,9 +316,9 @@ Một chỗ **lệch có chủ ý** so với đề nghị ở body #48: anh Đ�
 
 ---
 
-### 9.6 CHỐT câu 1 — hướng **(B)**, dạng **B1′**
+### 9.6 Câu 1 — trước mắt đi hướng **(B)**, dạng **B1′**
 
-Chốt 2026-08-14 (phía VeData). Đường submit production là **(B) Strata đẩy lô sang Mosaic**, không phải (A) `impl MosaicBackend` bằng Rust.
+Trước mắt, đường submit production là **(B) Strata đẩy lô sang Mosaic**, không phải (A) `impl MosaicBackend` bằng Rust.
 
 **Căn cứ đo được, không phải sở thích kiến trúc:**
 
@@ -379,7 +379,7 @@ Luật ranh giới từ `Strata#1`: *"Strata giữ logic chain; **Mosaic giữ t
 
 Nhưng `anchor-io/submitter/submit.ts` **đang dựng tx ngay trong repo Strata** — build + sign + submit qua Lucid, và đó là **đường đã chạy thật**, đã nghiệm thu on-chain Preview. Hai khả năng: hoặc luật chỉ nhắm tx **script** CIP-68 chứ không nhắm metadata label 1234, hoặc luật đã bị vượt mà không ai ghi. **Xin anh Đức khoanh phạm vi.**
 
-**ĐÍCH đã chốt phía VeData: gỡ hẳn việc dựng tx neo ra khỏi Strata.** Không phải "hợp thức hoá chỗ đã vượt" — luật `Strata#1` giữ nguyên hiệu lực, và `submit.ts` là thứ phải đi.
+**ĐÍCH: gỡ hẳn việc dựng tx neo ra khỏi Strata.** Không phải "hợp thức hoá chỗ đã vượt" — luật `Strata#1` giữ nguyên hiệu lực, và `submit.ts` là thứ phải đi.
 
 **Nhưng không xoá ngay**, vì nó là bằng chứng đường này chạy được thật — thứ đắt nhất trong cả mối nối. Điều kiện chuyển giao viết thành luật:
 
@@ -389,7 +389,7 @@ Hai vế đó không thừa. Vế (a) chặn port sai byte; vế (b) chặn port
 
 ### 9.8 Đích là **ví của chính người dùng, ráp qua PhoenixKey** — và điều đó phá giả định của beacon
 
-Hướng dài hạn (Thịnh chốt 2026-08-14): ví submit **thuộc về chính người dùng**, không phải ví nền tảng. Đường ráp là **PhoenixKey** — một nền tảng ví/tài khoản riêng, **anh Tuân phụ trách**. Thịnh nói rõ **"cái đó là sau này"**, nên nó **KHÔNG nằm trong phạm vi đợt này**; ghi ở đây vì nó đổi cách đọc hai thứ đang thiết kế hôm nay, và thiết kế mà không biết đích thì sẽ phải làm lại.
+Hướng dài hạn: ví submit **thuộc về chính người dùng**, không phải ví nền tảng. Đường ráp là **PhoenixKey** — một nền tảng ví/tài khoản riêng, **anh Tuân phụ trách**. Đó là **chuyện sau này**, **KHÔNG nằm trong phạm vi đợt này**; ghi ở đây vì nó đổi cách đọc hai thứ đang thiết kế hôm nay, và thiết kế mà không biết đích thì sẽ phải làm lại.
 
 **Hạ tầng phía Mosaic đã dựng sẵn đường này — khi PhoenixKey tới là RÁP VÀO, không phải làm mới:**
 
@@ -442,9 +442,9 @@ Mục (2) không phải suy luận — **chính header validator tự khai** (`V
 
 **Vì sao beacon tồn tại — và nó không phải đồ trang trí.** CIP-68 cho ta **một UTxO sống** để hỏi thẳng *"đỉnh lineage này ở đâu"*. Settlement chỉ để lại **vết lịch sử trong metadata**, muốn tìm đỉnh thì phải **quét** — mà quét thì làm mù được bằng tx rác rẻ tiền (đúng `#14`). Beacon chính là **bản thay thế rẻ tiền của CIP-68** cho đường Settlement: mint một asset `policyId ‖ ref_id` để có thứ **tra chỉ mục asset** thay vì quét. ⇒ Chọn Settlement thì beacon là thứ giữ cho đường **ĐỌC** còn dùng được ở quy mô, không phải tuỳ chọn cho vui. Và nó nối thẳng vào vướng mắc `policyId = f(pkh)` ở §9.8.
 
-**CHỐT phạm vi (Thịnh, 2026-08-14): làm theo đường găng — đội cây → Settlement. NFT/CIP-68 hoãn sang hoàn cảnh thích hợp hơn.**
+**Phạm vi trước mắt: làm theo đường găng — đội cây → Settlement. NFT/CIP-68 để vào một hoàn cảnh thích hợp khác.**
 
-Đây là **hoãn**, không phải **bỏ** — và khác biệt đó phải giữ nguyên trong mọi lần đọc lại:
+Đây là **để dành cho hoàn cảnh khác**, không phải **bỏ** — và khác biệt đó phải giữ nguyên trong mọi lần đọc lại:
 
 - ✅ **Giữ nguyên**, không xoá: `strata_anchor.ak`, `strataAnchorPlan.ts`, `strataAnchorDatum.ts`, `MosaicAnchorSink`, `trait MosaicBackend`. Chúng đã chạy Preprod thật; xoá đi là vứt một thứ đã nghiệm thu để rồi viết lại.
 - ⛔ **Không đầu tư thêm** vào nhánh này trong lúc đường găng đang chạy — cụ thể là **không** hiện thực `MosaicBackend` production (đúng chốt §9.6), và **không** dựng thread-NFT one-shot chỉ vì nó đang thiếu.
