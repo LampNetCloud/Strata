@@ -377,7 +377,9 @@ Ghi ra vì cái sai này có hình dạng dễ lặp: **từ "module X không c�
 
 Luật ranh giới từ `Strata#1`: *"Strata giữ logic chain; **Mosaic giữ tx; KHÔNG dựng tx neo trong Strata**"*.
 
-Nhưng `anchor-io/submitter/submit.ts` **đang dựng tx ngay trong repo Strata** — build + sign + submit qua Lucid, và đó là **đường đã chạy thật**, đã nghiệm thu on-chain Preview. Hai khả năng: hoặc luật chỉ nhắm tx **script** CIP-68 chứ không nhắm metadata label 1234, hoặc luật đã bị vượt mà không ai ghi. **Xin anh Đức khoanh phạm vi.**
+**Luật này đúng và áp dụng đầy đủ — không có gì phải khoanh lại.** Nó nhắm **mọi** tx neo, không phân biệt tx script CIP-68 hay tx metadata label 1234: việc dựng tx neo thuộc Mosaic.
+
+Nhưng `anchor-io/submitter/submit.ts` **đang dựng tx ngay trong repo Strata** — build + sign + submit qua Lucid. Tức đây là **một chỗ đã vượt luật**, không phải một vùng xám cần diễn giải. Điều đáng giữ là: **đó là đường đã chạy thật**, đã nghiệm thu on-chain Preview.
 
 **ĐÍCH: gỡ hẳn việc dựng tx neo ra khỏi Strata.** Không phải "hợp thức hoá chỗ đã vượt" — luật `Strata#1` giữ nguyên hiệu lực, và `submit.ts` là thứ phải đi.
 
