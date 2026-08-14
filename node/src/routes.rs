@@ -53,6 +53,8 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/strata/create", post(create))
+        // Route KHÔ: dựng lại canonical/hash mà KHÔNG ghi. Không đụng store, không cần ref.
+        .route("/v1/strata/_canonical", post(canonical))
         // Cùng path, hai method: POST = thêm version; GET ?at= = giá trị tại thời điểm t.
         .route("/v1/strata/:ref/version", post(append).get(version_at))
         .route("/v1/strata/:ref/event", post(event))
@@ -86,6 +88,68 @@ fn body<T>(r: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
         .map_err(|e| ApiError::Malformed(e.body_text()))
 }
 
+/// Biên lệch đồng hồ cho phép giữa `ts` client khai và đồng hồ daemon (giây).
+///
+/// 300 s đủ rộng cho lệch NTP/múi giờ thực tế, và hẹp hơn **7 bậc độ lớn** so với khoảng
+/// cách giữa giây và mili giây — nên nó phân loại đúng ca duy nhất cần bắt: `Date.now()`.
+const MAX_TS_SKEW_SECS: u64 = 300;
+
+/// Trần TUYỆT ĐỐI cho `ts` tính bằng giây — **không phụ thuộc đồng hồ daemon**.
+///
+/// `10^12` giây unix rơi vào năm **33658**; mọi `ts` giây thật đều nhỏ hơn con số này trong
+/// suốt vòng đời hệ. Ngược lại `Date.now()` hôm nay đã ở `1.78 × 10^12`, tức **mọi** giá trị
+/// mili giây đương thời đều vượt trần. Vậy một phép so sánh hằng số phân loại đúng ca nguy
+/// hiểm nhất mà KHÔNG cần biết bây giờ là mấy giờ.
+const TS_MILLIS_FLOOR: u64 = 1_000_000_000_000;
+
+/// Đồng hồ tường của daemon (unix secs). `None` khi không đọc được (bất khả trên thực tế,
+/// nhưng `duration_since` trả `Result`).
+///
+/// Trả `Option` chứ KHÔNG `unwrap_or(0)`: `0` là một giá trị **hợp lệ trong miền**, nên trộn
+/// nó với "không biết" tạo ra hai lỗi ngược chiều nhau. Đồng hồ boot ở epoch (container
+/// không RTC) cho `now == 0` ⇒ guard tự tắt IM LẶNG đúng lúc cần nhất; còn đồng hồ ở
+/// `1970 + 5s` (chưa kịp NTP) cho `now == 5` ⇒ **mọi** ghi hợp lệ bị 422 kèm thông điệp lạc
+/// hướng `now: 5`. Nay `now` chỉ dùng cho lớp thứ hai, và lớp thứ nhất ([`TS_MILLIS_FLOOR`])
+/// không cần đồng hồ nên đồng hồ hỏng không tắt được nó.
+fn now_secs() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Chặn `ts` tương lai xa Ở CỬA (xem [`ApiError::TimestampTooFarFuture`]), HAI LỚP.
+///
+/// 1. **Trần tuyệt đối** `TS_MILLIS_FLOOR` — không cần đồng hồ, không tắt được.
+/// 2. **Biên lệch** `MAX_TS_SKEW_SECS` quanh đồng hồ daemon — bắt các ca tương lai gần hơn;
+///    bỏ qua khi không đọc được đồng hồ.
+///
+/// Cân đánh đổi theo chiều đúng: chặn nhầm một ghi là **khả hồi** (client sửa rồi gửi lại),
+/// nhận nhầm một `ts` mili giây là **vĩnh viễn** (ref mất quyền ghi, không có route sửa).
+///
+/// KHÔNG chặn `ts` quá KHỨ: lõi đã ép không-giảm (`TimestampRegress`), và nhập dữ liệu lịch
+/// sử là ca dùng hợp lệ. Hệ quả phải nói rõ với bên tiêu thụ: `ts` là **lời khai của tác
+/// giả**, chỉ lần neo on-chain mới cho một cận trên thời gian — mà neo là tuỳ chọn.
+fn check_ts(ts: u64) -> ApiResult<()> {
+    if ts >= TS_MILLIS_FLOOR {
+        return Err(ApiError::TimestampTooFarFuture {
+            got: ts,
+            now: now_secs().unwrap_or(0),
+            max_skew: MAX_TS_SKEW_SECS,
+        });
+    }
+    if let Some(now) = now_secs()
+        && ts > now.saturating_add(MAX_TS_SKEW_SECS)
+    {
+        return Err(ApiError::TimestampTooFarFuture {
+            got: ts,
+            now,
+            max_skew: MAX_TS_SKEW_SECS,
+        });
+    }
+    Ok(())
+}
+
 fn action_from_str(s: &str) -> ApiResult<AuditAction> {
     Ok(match s {
         "Create" => AuditAction::Create,
@@ -110,6 +174,7 @@ async fn create(
     req: Result<Json<CreateReq>, JsonRejection>,
 ) -> ApiResult<Json<CreateResp>> {
     let req = body(req)?;
+    check_ts(req.ts)?;
     let fields = to_pairs(&req.state_fields).map_err(ApiError::Malformed)?;
 
     // Tập author của policy: mặc định một-thành-viên = người tạo (xem `CreateReq`).
@@ -168,11 +233,69 @@ async fn create(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// POST /v1/strata/_canonical — route KHÔ, KHÔNG ghi, KHÔNG cần ref tồn tại
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Dựng lại `state_root` + `canonical_core` + `version_hash` từ đúng các trường client sắp
+/// ký, rồi trả về — **không** chạm `store`, **không** cần chữ ký, **không** đẻ trạng thái.
+///
+/// Đây là đường đối chiếu byte mà trước nay không có. Client phải tự cài lại cây state
+/// (sort khoá tăng dần, lá lẻ **carry** chứ không nhân đôi) và encoding canonical (u64 BE,
+/// len-prefix `u32_be` cho `content_cid`) ở ngôn ngữ của mình; lệch một bit thì đường ghi
+/// trả `403 BadSignature` — một thông điệp không hề nhắc tới `state_root`, nên người tích
+/// hợp không có manh mối nào. Route này biến hai ngày đoán mò thành một lượt HTTP.
+///
+/// An toàn: mọi giá trị trả về đều là thứ đường ghi thành công đã trả (`version_hash`,
+/// `state_root`, `ref_id`) hoặc suy được từ input của chính client (`canonical_core`) —
+/// không lộ thêm gì. Không có `ref` trong đường dẫn nên không rò sự tồn tại của hồ sơ nào.
+async fn canonical(
+    req: Result<Json<CanonicalReq>, JsonRejection>,
+) -> ApiResult<Json<CanonicalResp>> {
+    let req = body(req)?;
+    // Route khô phải chạy ĐÚNG bộ cổng của đường ghi, chỉ bỏ phần ghi. Thiếu `check_ts` ở
+    // đây thì nó "duyệt" một `ts` mili giây và trả về `version_hash`; client ký xong, gọi
+    // `create`, ăn 422 — tức công cụ dựng ra để đối chiếu trước khi ký lại bỏ lọt đúng lỗi
+    // mà nó tồn tại để bắt.
+    check_ts(req.ts)?;
+    let fields = to_pairs(&req.state_fields).map_err(ApiError::Malformed)?;
+    let state_root = build_state_root(&fields);
+
+    let v = StrataVersion::unsigned(
+        req.seq,
+        req.prev_hash,
+        req.content_cid.clone(),
+        state_root,
+        req.author_did,
+        req.policy_hash,
+        req.ts,
+    );
+
+    // `genesis_nonce` có ⇒ trả luôn ref_id dự kiến, để client đối chiếu TRƯỚC khi `create`
+    // (sai nonce = sai ref_id = bất-khả-hồi, không có route đổi).
+    let ref_id = match &req.genesis_nonce {
+        Some(h) => {
+            let nonce = hexs::decode_fixed::<32>(h)
+                .map_err(|e| ApiError::Malformed(format!("genesis_nonce: {e}")))?;
+            Some(encode_ref_id(&gen_ref_id_raw(&req.author_did, &nonce)))
+        }
+        None => None,
+    };
+
+    Ok(Json(CanonicalResp {
+        canonical_core: hex::encode(v.canonical_core()),
+        version_hash: hex::encode(v.version_hash()),
+        state_root: hex::encode(state_root),
+        ref_id,
+    }))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // POST /v1/strata/:ref/version — §2.2 append_version
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Phần thân dùng chung cho `POST /version` và `POST /event` với `kind="version"` (§2.6 cách 1).
 fn append_inner(e: &mut ChainEntry, req: &AppendReq) -> ApiResult<AppendResp> {
+    check_ts(req.ts)?;
     let fields = to_pairs(&req.state_fields).map_err(ApiError::Malformed)?;
     let head = e.chain.head();
     let head_seq = head.seq;
@@ -245,6 +368,31 @@ async fn event(
         EventReq::Version(a) => Ok(Json(append_inner(&mut g, &a)?).into_response()),
         // Cách 2: entry vào audit-log (không đẻ version).
         EventReq::Audit(a) => {
+            // ── Hai cổng dưới đây vá một lỗ ĐÃ DỰNG LẠI ĐƯỢC bằng 2 request HTTP ──────
+            //
+            // Đường audit và đường version cùng ghi vào MỘT `ChainEntry`, nhưng trước đây
+            // chỉ đường version đi qua `check_auth` → `policy.is_allowed`. Đường audit chỉ
+            // phân giải khoá từ key-registry TOÀN CỤC rồi `verify_strict` — nghĩa là bất kỳ
+            // ai có DID trong registry (đủ điều kiện để tạo hồ sơ của CHÍNH MÌNH) đều ghi
+            // được vào nhật ký truy cập của hồ sơ NGƯỜI KHÁC. Chữ ký hợp lệ, nhưng hợp lệ
+            // cho sai hồ sơ: xác thực ≠ phân quyền.
+            //
+            // Nối với `ts` thì thành bất-khả-hồi: người ngoài ghi một mục `ts = u64::MAX`,
+            // `AuditLog.last_ts` nhảy lên trần, và từ đó MỌI mục thật của chính chủ trả
+            // `TimestampRegress` vĩnh viễn (`audit.rs` append-only, không có API xoá/reset).
+            //
+            // THỨ TỰ CÓ CHỦ Ý — chữ ký TRƯỚC, policy SAU, `ts` cuối. Đặt `is_allowed` lên
+            // trước `verify_strict` (bản nháp đầu) mở ra một **oracle dò thành viên policy**:
+            // người lạ gửi chữ ký rác `00`×64 với một DID ứng viên và đọc mã lỗi — DID trong
+            // policy trả `BadSignature`, DID ngoài policy trả `PolicyDenied`. Ba request là
+            // biết "bác sĩ D có quyền ghi hồ sơ bệnh nhân P không", không cần khoá nào. Chính
+            // quan hệ đó mới là thứ phải giấu.
+            //
+            // Đặt `verify_strict` trước thì cửa đầu tiên đòi **sở hữu khoá riêng**: người
+            // không có khoá luôn nhận `BadSignature`, không phân biệt được gì. Người CÓ khoá
+            // đi tiếp và có thể học rằng DID của CHÍNH MÌNH không nằm trong policy — đó là
+            // quyền của chính họ, không phải rò rỉ. `check_ts` xuống cuối cùng vì `now` của
+            // daemon chỉ nên lộ cho bên đã qua cả xác thực lẫn phân quyền.
             let ae = AuditEntry {
                 created_ts: a.ts,
                 actor_did: a.actor_did,
@@ -264,6 +412,10 @@ async fn event(
             let sig = Signature::from_bytes(&a.sig);
             pk.verify_strict(&ae.canonical(), &sig)
                 .map_err(|_| ApiError::Core(StrataError::BadSignature))?;
+            if !g.policy.is_allowed(&a.actor_did) {
+                return Err(StrataError::PolicyDenied.into());
+            }
+            check_ts(a.ts)?;
 
             let index = g.audit.append_access(ae)?;
             let log_root = hex::encode(g.audit.root());
@@ -287,6 +439,12 @@ async fn head(State(st): State<AppState>, Path(r): Path<String>) -> ApiResult<Js
         head_version_hash: hex::encode(h.version_hash()),
         mmr_root: hex::encode(g.chain.mmr_root()),
         content_cid: hex::encode(&h.content_cid),
+        // Ba trường này là ĐIỀU KIỆN để append version kế. Thiếu chúng, client chỉ cầm
+        // `ref_id` phải lách bằng `GET /version?at=<số lớn>` hoặc đoán `policy_hash` rồi ăn
+        // 403 — cả hai đều là bẫy onboarding, không phải quyết định thiết kế.
+        ts: h.ts,
+        policy_hash: hex::encode(h.policy_hash),
+        author_did: hex::encode(h.author_did),
     }))
 }
 

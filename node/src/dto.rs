@@ -33,8 +33,34 @@ impl FieldDto {
 }
 
 /// Chuyển cả danh sách; lỗi hex đầu tiên làm hỏng cả request (fail-closed).
+///
+/// **Từ chối khoá TRÙNG.** `state.rs` ghi trong doc-comment rằng khoá là duy nhất "sau khi
+/// caller bảo đảm" — caller chính là chỗ này, và trước đây nó không bảo đảm gì. Hệ quả đã
+/// dựng lại được đầu-cuối: gửi `[{diagnosis, aa}, {diagnosis, bb}]` thì `sorted_leaves` sort
+/// ỔN ĐỊNH nên sinh HAI lá riêng dưới CÙNG một `state_root` — root đó đi vào `version_hash`,
+/// được ký Ed25519 và neo on-chain. Sau đó tồn tại **hai field-proof đều verify đúng**, cùng
+/// khoá `diagnosis`, một trả `aa` một trả `bb`, cùng `state_root` đã neo. Người ghi luôn có
+/// đường chối — non-repudiation của INV-E6 sụp.
+///
+/// Đây là cổng ở CỬA. Vá triệt để phải ở lõi (`build_state_root`/`prove_field` là API `pub`
+/// của SDK, đội khác gọi thẳng không qua daemon) — thuộc đợt đổi byte-layout, đã ghi nợ.
 pub fn to_pairs(fields: &[FieldDto]) -> Result<StateFields, String> {
-    fields.iter().map(FieldDto::to_pair).collect()
+    let pairs: StateFields = fields
+        .iter()
+        .map(FieldDto::to_pair)
+        .collect::<Result<_, _>>()?;
+
+    let mut seen: std::collections::BTreeSet<&[u8]> = std::collections::BTreeSet::new();
+    for (k, _) in &pairs {
+        if !seen.insert(k.as_slice()) {
+            return Err(format!(
+                "state_fields: khoá trùng {:?} — một khoá chỉ được xuất hiện MỘT lần; \
+                 khoá trùng làm state_root cam kết hai giá trị mâu thuẫn cho cùng trường",
+                String::from_utf8_lossy(k)
+            ));
+        }
+    }
+    Ok(pairs)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -145,6 +171,59 @@ pub struct HeadResp {
     pub head_version_hash: String,
     pub mmr_root: String,
     pub content_cid: String,
+    /// `ts` của head — client PHẢI gửi `ts >= ` giá trị này ở version kế (đơn điệu thời gian,
+    /// `chain.rs` `TimestampRegress`). Thiếu trường này thì client chỉ cầm `ref_id` không
+    /// append tiếp được, phải lách bằng `GET /version?at=<số lớn>`.
+    pub ts: u64,
+    /// Cam kết policy của head — client phải gửi ĐÚNG giá trị này ở version kế, nếu không
+    /// nhận `403 PolicyHashMismatch`. Cùng lý do như `ts`: không có thì phải đoán.
+    pub policy_hash: String,
+    /// Tác giả head (tiện đối chiếu; không phải yêu cầu để append).
+    pub author_did: String,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// POST /v1/strata/_canonical — route KHÔ (dry-run), KHÔNG ghi
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Đầu vào giống hệt `create`/`version` nhưng daemon **không ghi gì**: chỉ dựng lại
+/// `state_root` + `canonical_core` + `version_hash` rồi trả về.
+///
+/// Vì sao cần: client phải tự cài lại HAI cây băm (state-tree + MMR) và MỘT encoding
+/// canonical ở ngôn ngữ của mình, rồi ký lên `version_hash`. Sai một bit ⇒ `403 BadSignature`
+/// với thông điệp không hề nhắc tới `state_root`. Không có đường nào đối chiếu trước khi ghi
+/// ⇒ người tích hợp ngồi đoán. Route này là đường đối chiếu đó.
+///
+/// Genesis: gửi `seq = 0`, `prev_hash = "00"×32`, kèm `genesis_nonce` để nhận luôn `ref_id`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CanonicalReq {
+    pub seq: u64,
+    #[serde(with = "hexs::h32")]
+    pub prev_hash: [u8; 32],
+    #[serde(with = "hexs::hvar")]
+    pub content_cid: Vec<u8>,
+    #[serde(default)]
+    pub state_fields: Vec<FieldDto>,
+    #[serde(with = "hexs::h32")]
+    pub author_did: [u8; 32],
+    #[serde(with = "hexs::h32")]
+    pub policy_hash: [u8; 32],
+    pub ts: u64,
+    /// Hex 32B. Có ⇒ trả kèm `ref_id` dự kiến (`H_dom(author_did ‖ nonce)`).
+    #[serde(default)]
+    pub genesis_nonce: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CanonicalResp {
+    /// Toàn bộ `canonical_core` dạng hex — client so BYTE với bản mình dựng.
+    pub canonical_core: String,
+    /// Thứ phải ký (PureEd25519 TRỰC TIẾP trên 32 byte này, không băm thêm lần nữa).
+    pub version_hash: String,
+    /// `state_root` daemon dựng từ `state_fields` — chỗ lệch phổ biến nhất.
+    pub state_root: String,
+    /// `lnref1…` khi request có `genesis_nonce`; `null` khi không.
+    pub ref_id: Option<String>,
 }
 
 // ────────────────────────────────────────────────────────────────────────────

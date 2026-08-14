@@ -694,3 +694,420 @@ async fn anchor_without_backend_is_501_but_no_anchor_still_ok() {
     .await;
     assert_eq!(st, StatusCode::OK);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Cổng cửa 2026-08-11 — mỗi test khoá lại MỘT lỗ đã dựng lại được bằng PoC
+// ════════════════════════════════════════════════════════════════════════════
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// `ts` mili giây (`Date.now()`) bị chặn Ở CỬA.
+///
+/// Không chặn thì lõi NHẬN nó (lõi chỉ ép không-giảm, không có đồng hồ), và từ đó mọi
+/// version với `ts` giây thật đều `TimestampRegress` — ref mất quyền ghi tới năm 56000.
+#[tokio::test]
+async fn ts_in_milliseconds_rejected_at_the_door() {
+    let (app, policy) = app();
+    let ms = now() * 1_000; // đúng thứ Date.now() trả
+    let fields = vec![f("diagnosis", V_A)];
+    let sig = sign_version(
+        1,
+        0,
+        [0u8; 32],
+        b"\xca\xfe",
+        &fields,
+        DID,
+        policy.policy_hash(),
+        ms,
+    );
+    let (st, body) = call(
+        &app,
+        "POST",
+        "/v1/strata/create",
+        Some(json!({
+            "author_did": hex::encode(DID),
+            "genesis_nonce": hex::encode([0x33u8; 32]),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "diagnosis", "value": V_A }],
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": ms,
+            "sig": sig
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"], "TimestampTooFarFuture");
+
+    // Đối chứng: `ts` giây hợp lệ vẫn qua. `now()` gọi ĐÚNG MỘT lần rồi dùng lại — gọi hai
+    // lần thì một lần rơi qua mốc giây làm chữ ký phủ `ts` khác ⇒ 403 ngẫu nhiên trên CI.
+    let t = now();
+    let (st_ok, _) = call(
+        &app,
+        "POST",
+        "/v1/strata/create",
+        Some(json!({
+            "author_did": hex::encode(DID),
+            "genesis_nonce": hex::encode([0x33u8; 32]),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "diagnosis", "value": V_A }],
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": t,
+            "sig": sign_version(1, 0, [0u8; 32], b"\xca\xfe", &fields, DID, policy.policy_hash(), t)
+        })),
+    )
+    .await;
+    assert_eq!(st_ok, StatusCode::OK, "ts giây hợp lệ KHÔNG được bị chặn");
+}
+
+/// Trần tuyệt đối phải chặn được KỂ CẢ khi đồng hồ daemon vô dụng.
+///
+/// `check_ts` có hai lớp; lớp biên-lệch phụ thuộc `now_secs()`. Nếu chỉ có lớp đó thì một
+/// máy không RTC (đồng hồ boot ở epoch) làm guard tắt im lặng đúng lúc cần nhất. Test này
+/// khoá lớp thứ nhất: một `ts` mili giây bị từ chối vì nó vượt `TS_MILLIS_FLOOR`, không phải
+/// vì nó xa `now` — nên nó đúng bất kể đồng hồ.
+#[tokio::test]
+async fn ts_in_milliseconds_rejected_by_absolute_ceiling_not_by_clock() {
+    let (app, policy) = app();
+    // 10^12 + 1 giây = năm 33658 — vượt trần tuyệt đối, nhưng KHÔNG phải `Date.now()` hôm nay.
+    let far = 1_000_000_000_001u64;
+    let fields = vec![f("diagnosis", V_A)];
+    let sig = sign_version(
+        1,
+        0,
+        [0u8; 32],
+        b"\xca\xfe",
+        &fields,
+        DID,
+        policy.policy_hash(),
+        far,
+    );
+    let (st, body) = call(
+        &app,
+        "POST",
+        "/v1/strata/create",
+        Some(json!({
+            "author_did": hex::encode(DID),
+            "genesis_nonce": hex::encode([0x44u8; 32]),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "diagnosis", "value": V_A }],
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": far,
+            "sig": sig
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"], "TimestampTooFarFuture");
+}
+
+/// Khoá trường TRÙNG bị từ chối — nếu không, `state_root` đã ký + đã neo cam kết HAI giá trị
+/// mâu thuẫn cho cùng một khoá, và tồn tại hai field-proof đều verify đúng.
+#[tokio::test]
+async fn duplicate_field_key_rejected() {
+    let (app, policy) = app();
+    let fields = vec![f("diagnosis", V_A)];
+    let sig = sign_version(
+        1,
+        0,
+        [0u8; 32],
+        b"\xca\xfe",
+        &fields,
+        DID,
+        policy.policy_hash(),
+        1_000,
+    );
+    let (st, body) = call(
+        &app,
+        "POST",
+        "/v1/strata/create",
+        Some(json!({
+            "author_did": hex::encode(DID),
+            "genesis_nonce": hex::encode([0x33u8; 32]),
+            "content_cid": "cafe",
+            "state_fields": [
+                { "key": "diagnosis", "value": V_A },
+                { "key": "diagnosis", "value": V_B }
+            ],
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": 1_000,
+            "sig": sig
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "MalformedRequest");
+    assert!(
+        body["detail"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("khoá trùng"),
+        "thông điệp phải nói rõ nguyên nhân: {body}"
+    );
+}
+
+/// Người NGOÀI policy không ghi được vào nhật ký truy cập của hồ sơ người khác.
+///
+/// Trước đây đường audit chỉ `verify_strict` bằng key-registry TOÀN CỤC — xác thực đúng,
+/// nhưng đúng cho sai hồ sơ. DID2 có khoá trong registry mà KHÔNG có trong policy.
+#[tokio::test]
+async fn audit_from_outsider_denied_and_cannot_poison_ts() {
+    let (app, policy) = app();
+    let (r, _) = create_ok(&app, &policy).await;
+
+    let entry = |did: [u8; 32], seed: u8, ts: u64| {
+        let ae = lampnet_strata::AuditEntry {
+            created_ts: ts,
+            actor_did: did,
+            action: lampnet_strata::AuditAction::Read,
+            signed_hash: [0x22; 32],
+            location: [0x33; 32],
+        };
+        use ed25519_dalek::Signer;
+        let s = sk(seed).sign(&ae.canonical());
+        json!({
+            "kind": "audit",
+            "actor_did": hex::encode(did),
+            "action": "Read",
+            "signed_hash": hex::encode([0x22u8; 32]),
+            "location": hex::encode([0x33u8; 32]),
+            "ts": ts,
+            "sig": hex::encode(s.to_bytes())
+        })
+    };
+
+    // DID2 = ngoài policy → 403, KHÔNG phải 200.
+    let (st, body) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/event"),
+        Some(entry(DID2, 2, 1_000)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "PolicyDenied");
+
+    // Và không đầu độc được `last_ts` bằng u64::MAX. Chặn ở cổng policy — `check_ts` nằm SAU
+    // nên nó không chạy cho người ngoài; trần ts được phủ riêng ở test dưới.
+    let (st_max, _) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/event"),
+        Some(entry(DID2, 2, u64::MAX)),
+    )
+    .await;
+    assert_eq!(st_max, StatusCode::FORBIDDEN);
+
+    // Chính chủ vẫn ghi được — log KHÔNG bị khoá.
+    let (st_owner, body_owner) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/event"),
+        Some(entry(DID, 1, 2_000)),
+    )
+    .await;
+    assert_eq!(st_owner, StatusCode::OK, "{body_owner}");
+    assert_eq!(body_owner["index"], 0, "mục đầu tiên phải là của chính chủ");
+}
+
+/// Chính chủ cũng không đầu độc được `ts` của audit-log (trần ts áp cho mọi actor).
+#[tokio::test]
+async fn audit_ts_far_future_rejected_even_for_owner() {
+    let (app, policy) = app();
+    let (r, _) = create_ok(&app, &policy).await;
+    let ae = lampnet_strata::AuditEntry {
+        created_ts: u64::MAX,
+        actor_did: DID,
+        action: lampnet_strata::AuditAction::Read,
+        signed_hash: [0x22; 32],
+        location: [0x33; 32],
+    };
+    use ed25519_dalek::Signer;
+    let s = sk(1).sign(&ae.canonical());
+    let (st, body) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/event"),
+        Some(json!({
+            "kind": "audit",
+            "actor_did": hex::encode(DID),
+            "action": "Read",
+            "signed_hash": hex::encode([0x22u8; 32]),
+            "location": hex::encode([0x33u8; 32]),
+            "ts": u64::MAX,
+            "sig": hex::encode(s.to_bytes())
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"], "TimestampTooFarFuture");
+}
+
+/// Route KHÔ trả ĐÚNG byte mà đường ghi thật dùng — nếu lệch thì nó vô dụng.
+#[tokio::test]
+async fn canonical_dry_route_matches_the_real_write_path() {
+    let (app, policy) = app();
+    let nonce = [0x33u8; 32];
+
+    let (st, dry) = call(
+        &app,
+        "POST",
+        "/v1/strata/_canonical",
+        Some(json!({
+            "seq": 0,
+            "prev_hash": hex::encode([0u8; 32]),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "diagnosis", "value": V_A }],
+            "author_did": hex::encode(DID),
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": 1_000,
+            "genesis_nonce": hex::encode(nonce)
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{dry}");
+
+    // `state_root` khô == core tính từ cùng fields.
+    let fields = vec![f("diagnosis", V_A)];
+    assert_eq!(dry["state_root"], hex::encode(build_state_root(&fields)));
+
+    // Ký ĐÚNG version_hash route khô trả về, rồi ghi thật → phải qua.
+    let vh: Hash32 = hex::decode(dry["version_hash"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    use ed25519_dalek::Signer;
+    let sig = hex::encode(sk(1).sign(&vh).to_bytes());
+
+    let (st2, body2) = call(
+        &app,
+        "POST",
+        "/v1/strata/create",
+        Some(json!({
+            "author_did": hex::encode(DID),
+            "genesis_nonce": hex::encode(nonce),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "diagnosis", "value": V_A }],
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": 1_000,
+            "sig": sig
+        })),
+    )
+    .await;
+    assert_eq!(
+        st2,
+        StatusCode::OK,
+        "ký trên version_hash của route khô phải ghi được: {body2}"
+    );
+
+    // ref_id khô == ref_id thật, và head_version_hash thật == version_hash khô.
+    assert_eq!(dry["ref_id"], body2["ref_id"]);
+    assert_eq!(dry["version_hash"], body2["head_version_hash"]);
+
+    // Route khô KHÔNG ghi gì — khoá bằng một nonce CHƯA từng qua `create`: nếu route khô có
+    // ghi thì ref đó đã tồn tại và `/head` trả 200.
+    let nonce_never_written = [0x5au8; 32];
+    let (st_dry2, dry2) = call(
+        &app,
+        "POST",
+        "/v1/strata/_canonical",
+        Some(json!({
+            "seq": 0,
+            "prev_hash": hex::encode([0u8; 32]),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "diagnosis", "value": V_A }],
+            "author_did": hex::encode(DID),
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": 1_000,
+            "genesis_nonce": hex::encode(nonce_never_written)
+        })),
+    )
+    .await;
+    assert_eq!(st_dry2, StatusCode::OK, "{dry2}");
+    let (st3, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/strata/{}/head", dry2["ref_id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(
+        st3,
+        StatusCode::NOT_FOUND,
+        "route khô KHÔNG được tạo ref — 200 ở đây nghĩa là nó đã ghi"
+    );
+}
+
+/// Mã lỗi ở đường audit KHÔNG được phân biệt "DID này có trong policy hồ sơ đó không".
+///
+/// Với `is_allowed` đặt TRƯỚC `verify_strict`, người lạ gửi chữ ký rác và đọc mã lỗi là dò
+/// được: DID trong policy → `BadSignature`, DID ngoài policy → `PolicyDenied`. Không cần
+/// khoá, không cần quyền, chỉ cần `ref_id` (công khai) và một danh sách DID ứng viên. Với
+/// hồ sơ y tế thì chính quan hệ "bác sĩ D ghi được hồ sơ bệnh nhân P" là thứ phải giấu.
+#[tokio::test]
+async fn audit_error_code_does_not_leak_policy_membership() {
+    let (app, policy) = app();
+    let (r, _) = create_ok(&app, &policy).await;
+
+    let probe = |did: [u8; 32]| {
+        json!({
+            "kind": "audit",
+            "actor_did": hex::encode(did),
+            "action": "Read",
+            "signed_hash": hex::encode([0x22u8; 32]),
+            "location": hex::encode([0x33u8; 32]),
+            "ts": 1_000,
+            "sig": hex::encode([0u8; 64])   // chữ ký rác — người dò KHÔNG có khoá nào
+        })
+    };
+
+    // DID  = TRONG policy; DID2 = có khoá trong registry nhưng NGOÀI policy.
+    let (st_in, body_in) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/event"),
+        Some(probe(DID)),
+    )
+    .await;
+    let (st_out, body_out) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/event"),
+        Some(probe(DID2)),
+    )
+    .await;
+
+    assert_eq!(st_in, st_out, "status phải giống nhau");
+    assert_eq!(
+        body_in["error"], body_out["error"],
+        "mã lỗi phải GIỐNG NHAU cho DID trong và ngoài policy — khác nhau là một oracle dò \
+         thành viên policy: trong={body_in}, ngoài={body_out}"
+    );
+    assert_eq!(
+        body_in["error"], "BadSignature",
+        "cửa đầu tiên phải là cửa đòi SỞ HỮU KHOÁ, không phải cửa quyền"
+    );
+}
+
+/// `/head` phải trả đủ thứ client cần để append version kế — thiếu là bẫy onboarding.
+#[tokio::test]
+async fn head_carries_everything_needed_to_append_next() {
+    let (app, policy) = app();
+    let (r, _) = create_ok(&app, &policy).await;
+    let (st, body) = call(&app, "GET", &format!("/v1/strata/{r}/head"), None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["ts"], 1_000,
+        "thiếu ts ⇒ client phải lách bằng /version?at="
+    );
+    assert_eq!(
+        body["policy_hash"],
+        hex::encode(policy.policy_hash()),
+        "thiếu policy_hash ⇒ client đoán rồi ăn 403"
+    );
+    assert_eq!(body["author_did"], hex::encode(DID));
+}
