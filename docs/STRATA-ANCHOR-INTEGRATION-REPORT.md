@@ -156,7 +156,9 @@ Enforce ở `src/chain.rs:201` và `:362` (`if v.ts < head.ts` → `TimestampReg
 |---|---|---|
 | 1 | PR #42 — đường GHI chuyển sang `read_anchor()`; nhánh `None` fail cứng; chặn `AnchorPriority` thưa ở constructor | anh Đức — **đã trả lời bằng chữ 13/08, code CHƯA đẩy** (`38cd2c9c` vẫn là commit duy nhất) |
 | 2a | **Đội cây OriLife đi đường nào** | ✅ **CHỐT 2026-08-14 — batch-root/Settlement.** Mosaic-A giữ cho hồ sơ giá-trị-cao lẻ. Xem §9.3 |
-| 2b | Chọn hướng (A) `impl MosaicBackend` Rust vs (B) Strata → Mosaic intake | anh Đức + VeData — **hạ mức** sau 2a, xem §9.3 |
+| 2b | Chọn hướng (A) `impl MosaicBackend` Rust vs (B) Strata → Mosaic intake | ✅ **CHỐT 2026-08-14 — (B), dạng B1** (Strata gửi payload ĐÃ encode). Xem §9.6 |
+| 2c | Luật `Strata#1` *"KHÔNG dựng tx neo trong Strata"* đã bị vượt trên thực tế — sửa luật hay khoanh phạm vi | anh Đức — xem §9.7 |
+| 2d | Beacon `policyId` phụ thuộc khoá ví publisher, mà đích là **ví của chính người dùng** | chưa có nhà — xem §9.8, nối `VeDataIO/Core#87` |
 | 3 | `ts` — đổi hướng dẫn OriLife từ `max(prev_ts+1, now)` sang `max(prev_ts, now)` | anh Đức |
 | 4 | Ghim "TLV, không CBOR" vào `_CONTRACT.md` (câu chữ spec) | anh Đức |
 | 5 | ~~Land test-vector `canonical_core` thành fixture cố định Rust↔Python~~ | ✅ **XONG** — PR #47 **MERGED** |
@@ -311,4 +313,70 @@ Một chỗ **lệch có chủ ý** so với đề nghị ở body #48: anh Đ�
 - **Bài kiểm phủ định cần bài kiểm khẳng định đứng cạnh.** `check_ts_at(x, None) -> Err` một mình không phân biệt được "gác đúng" với "từ chối tất". Cặp đôi mới khoá được hành vi.
 - **Hai PR vá cùng một chỗ là chuyện bình thường khi hàng chờ dài — nhưng chỉ lộ khi ĐỌC diff, không lộ khi đọc tiêu đề.** #48 tiêu đề "6 lỗ cổng daemon", #50 tiêu đề "gác trùng key"; nghe như hai việc. Trước khi land một hàng chờ, so **danh sách file** của mọi PR mở trước, không so tiêu đề.
 - **Đổi thông điệp lỗi là đổi hợp đồng của test.** Hoà giải hai bản vá xong thì phải soi lại mọi `assert!(err.contains(...))` — chúng so vào chuỗi, và chuỗi vừa đổi.
+
+---
+
+### 9.6 CHỐT câu 1 — hướng **(B)**, dạng **B1**
+
+Chốt 2026-08-14 (phía VeData). Đường submit production là **(B) Strata đẩy lô sang Mosaic**, không phải (A) `impl MosaicBackend` bằng Rust.
+
+**Căn cứ đo được, không phải sở thích kiến trúc:**
+
+| | (A) `impl MosaicBackend` | (B) đẩy lô sang Mosaic |
+|---|---|---|
+| Hôm nay tồn tại | `impl MosaicBackend for` khớp **đúng 1** kết quả — `MockMosaic` (`tests/anchor_sink.rs:111`). Daemon cắm `DisabledSink` ⇒ neo thật **501** (`node/src/bin/strata_node.rs:9-10`) | Mosaic có `tx-builder/` chạy thật (`meshAnchorChain.ts`, `emergencySubmitter.ts`) + intake M2 |
+| Batch | ❌ `submit_anchor(datum: &PlutusData)` nhận **một** datum ⇒ 1 tx / 1 lineage | ✅ có `BatchCoordinator` |
+| Khoá ví | Strata phải cầm khoá ký — thêm một chỗ giữ secret | Mosaic giữ — đúng ranh giới *"Mosaic giữ tx"* |
+| Chain-index | Strata phải tự có đường trả **mọi UTxO ứng viên kèm asset** (`anchor_sink.rs:479-486`) | dùng lại hạ tầng Mosaic |
+
+Cộng thêm: sau chốt 2a, (A) **mất người tiêu thụ ở quy mô** — nó là seam của đường Mosaic-A mà đội cây không đi nữa.
+
+**Dạng B1 — Mosaic nhận payload ĐÃ encode.** Ngã ba bên trong (B), chốt về phía giữ **một** encoder:
+
+```
+POST /mosaic/v1/strata-anchor-batch
+{ "label": 1234, "payload_cbor": "<hex>", "ref_ids": ["<hex32>", …], "beacon": true }
+→ { "txid": "…", "policy_id": "…" }
+```
+
+Strata encode bằng `src/settlement.rs` (đã có, đã ghim bằng fixture chung `apis/settlement-metadata.json` — 8 ca dương + 6 ca âm + 1 ca bỏ-qua, PR #49). Mosaic dựng tx + ký + submit + trả `txid`.
+
+Vì sao **không** chọn B2 (Strata gửi danh sách anchor có cấu trúc, Mosaic tự encode): B2 sinh **bản encoder thứ hai** bằng TS phải giữ parity byte với bản Rust — đúng lớp vấn đề mà `#47`/`#49` sinh ra để quản, và là lớp lỗi đã cắn ở `stamp_id` 32-vs-36 byte. Một byte-format nên có **một** nguồn.
+
+⚠️ `payload_cbor` **không đục hoàn toàn**: beacon cần `ref_ids` vì `unit = policyId ‖ ref_id`. Nói rõ ở đây để bên hiện thực không thiết kế cửa theo giả định "Mosaic không cần biết gì về nội dung".
+
+**Một chỗ Mosaic có sẵn nhưng KHÔNG dùng được:** `tx-builder/src/strataAnchorPlan.ts` + `strataAnchorDatum.ts` đã mirror `strata_anchor.ak` — nhưng đó là đường **Mosaic-A CIP-68**, tức đúng đường 89,6 tADA mà 2a vừa loại. Phần Mosaic đã có sẵn cho Strata lại **không phải** phần đội cây cần. Mosaic **chưa có** encoder label 1234 (nó chỉ biết `ANCHOR_METADATA_LABEL = 7368` ở `ts/src/params.ts:118`, và label 0 legacy) — nhưng dưới B1 thì nó **không cần có**.
+
+### 9.7 Luật `Strata#1` đã bị vượt trên thực tế — ghi ra thay vì lờ đi
+
+Luật ranh giới từ `Strata#1`: *"Strata giữ logic chain; **Mosaic giữ tx; KHÔNG dựng tx neo trong Strata**"*.
+
+Nhưng `anchor-io/submitter/submit.ts` **đang dựng tx ngay trong repo Strata** — build + sign + submit qua Lucid, và đó là **đường đã chạy thật**, đã nghiệm thu on-chain Preview. Hai khả năng: hoặc luật chỉ nhắm tx **script** CIP-68 chứ không nhắm metadata label 1234, hoặc luật đã bị vượt mà không ai ghi. **Xin anh Đức khoanh phạm vi** — câu trả lời quyết luôn hình dạng cửa B1.
+
+**Chốt phía VeData, không chờ:** **không xoá `submit.ts`.** Nó là bằng chứng đường này chạy được thật, và đó là thứ đắt nhất trong cả mối nối. Điều kiện thay thế viết thành luật:
+
+> Đường Mosaic chỉ được thay `submit.ts` sau khi nó **(a)** qua đúng bộ fixture chung `apis/settlement-metadata.json`, **và (b)** submit được một tx thật trên Preview.
+
+Trước khi đủ cả hai, `submit.ts` vẫn là đường sống. Lý do đã trả giá một lần: *một đường chỉ dùng khi hỏng mà không chạy thật thì chỉ TRÔNG như tồn tại* — đúng vụ fallback L1 từng là stub.
+
+### 9.8 Đích là **ví của chính người dùng** — và điều đó phá giả định của beacon
+
+Hướng dài hạn (Thịnh chốt 2026-08-14): ví submit **thuộc về chính người dùng**, không phải ví nền tảng.
+
+**Hệ quả một — nó đảo lại một nhận định của chính báo cáo này.** Ở vòng đo đầu, việc intake bắt buộc chữ ký CIP-30 của **owner** (`ts/src/intake/signature.ts`, fail-closed, không verifier mặc định) bị xếp là **điểm vênh** của (B): Strata-với-tư-cách-dịch-vụ không cầm khoá owner nên không ký được. Nhận định đó đúng với **hôm nay**, nhưng dưới mô hình ví-người-dùng thì chữ ký owner **sẽ có** — và cửa intake hiện tại lại đúng là hình dạng dài hạn. ⇒ Cửa service-to-service của B1 là **bản CHUYỂN TIẾP**, không phải bản cuối. Ghi vào docstring của cửa đó khi hiện thực, nếu không thì nó sẽ sống lâu như mọi bản trung gian được trình bày như bản cuối.
+
+**Hệ quả hai — beacon (issue `#14`) mất giả định nền.** `submit.ts:101-103` dựng policy native `sig(pkh)`, nên
+
+```
+policyId = mintingPolicyToId(scriptFromNative({type:"sig", keyHash: pkh}))
+unit     = policyId ‖ ref_id            (submit.ts:195-201)
+```
+
+`policyId` là **hàm của khoá ví publisher**. Beacon được thiết kế cho **một** publisher cố định. Ví của chính người dùng ⇒ **policyId khác nhau theo từng người ghi** ⇒ `resolve()` tra một `policyId` cố định là **sai hẳn**: nó sẽ không thấy beacon của bất kỳ lineage nào do người khác ghi, và tính chất chống flood-eviction của `#14` **im lặng ngừng hoạt động**. Không lỗi nào bật ra.
+
+Cách duy nhất giữ được tính chất đó là **ghim publisher theo từng lineage** — tức reader phải biết trước "lineage này của pkh nào" rồi mới suy ra policyId để tra. Đó **đúng cùng hình dạng bài toán** `threadPin` / thread-NFT one-shot bên Mosaic (`Core#50` MB-5, `VEDATA-MOSAIC-M15-REPORT.md §11`): một định danh phải được **khai trước**, không được **đoán từ dữ liệu on-chain**.
+
+**Trước mắt** (giai đoạn chuyển tiếp): giữ ví chung hiện tại ⇒ `policyId` không đổi ⇒ **không phải di trú beacon**. Đánh đổi phải nói thẳng: nó giữ nguyên hình dạng "một secret cho cả hệ" mà `VeDataIO/Core#87` đang chất vấn (`wallet.rs:3` tự khai *"secret DUY NHẤT của hệ thống"*). Đây là **nợ có điều kiện mở**, không phải một chốt đóng.
+
+⚠️ **Và đây là chỗ dễ mất tiền nhất nếu làm sai thứ tự:** ngày nào đổi ví submit — dù là sang ví riêng của Mosaic hay sang ví người dùng — thì **phải quyết di trú beacon trong CÙNG lượt**. Đổi ví trước rồi tính beacon sau nghĩa là có một quãng thời gian mà beacon mới nằm dưới policy mới, beacon cũ nằm dưới policy cũ, và không đường đọc nào thấy đủ cả hai.
 
