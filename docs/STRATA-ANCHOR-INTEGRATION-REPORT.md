@@ -150,19 +150,21 @@ Enforce ở `src/chain.rs:201` và `:362` (`if v.ts < head.ts` → `TimestampReg
 
 ---
 
-## 5. Việc còn mở (cập nhật 2026-08-13 (b))
+## 5. Việc còn mở (cập nhật 2026-08-14)
 
 | # | Việc | Chờ ai |
 |---|---|---|
-| 1 | PR #42 — đường GHI có chuyển sang `read_anchor()` không; nhánh `None` giữ mở hay fail cứng | anh Đức |
-| 2 | Chọn hướng (A) `impl MosaicBackend` Rust vs (B) Strata → Mosaic intake | anh Đức + VeData |
+| 1 | PR #42 — đường GHI chuyển sang `read_anchor()`; nhánh `None` fail cứng; chặn `AnchorPriority` thưa ở constructor | anh Đức — **đã trả lời bằng chữ 13/08, code CHƯA đẩy** (`38cd2c9c` vẫn là commit duy nhất) |
+| 2a | **Đội cây OriLife đi đường nào** | ✅ **CHỐT 2026-08-14 — batch-root/Settlement.** Mosaic-A giữ cho hồ sơ giá-trị-cao lẻ. Xem §9.3 |
+| 2b | Chọn hướng (A) `impl MosaicBackend` Rust vs (B) Strata → Mosaic intake | anh Đức + VeData — **hạ mức** sau 2a, xem §9.3 |
 | 3 | `ts` — đổi hướng dẫn OriLife từ `max(prev_ts+1, now)` sang `max(prev_ts, now)` | anh Đức |
 | 4 | Ghim "TLV, không CBOR" vào `_CONTRACT.md` (câu chữ spec) | anh Đức |
-| 5 | ~~Land test-vector `canonical_core` thành fixture cố định Rust↔Python~~ | ✅ **XONG** — PR #47 |
+| 5 | ~~Land test-vector `canonical_core` thành fixture cố định Rust↔Python~~ | ✅ **XONG** — PR #47 **MERGED** |
 | 6 | Thread-NFT one-shot bắt buộc cho anchor thread (đóng lỗ CREATE) | chưa có nhà — xem `Core#50` **MB-5 / P0b** |
-| 7 | ~~Enforce `DuplicateFieldKey` (E6) — `#39` điểm 2~~ | ✅ **XONG** — PR #50 |
-| 8 | ~~Vector `state_root` + chốt encoding `field_value_bytes` cho OriLife~~ | ✅ **XONG** — PR #47 (S1–S6) |
-| 9 | CI repo — còn đúng một nút: khoá đọc `LampNetCloud/Anchor` + `gh secret set` | anh Đức (cần admin repo) |
+| 7 | ~~Enforce `DuplicateFieldKey` (E6) — `#39` điểm 2~~ | ✅ **XONG** — PR #50 **MERGED** (hoà giải với #48 — xem §9.2) |
+| 8 | ~~Vector `state_root` + chốt encoding `field_value_bytes` cho OriLife~~ | ✅ **XONG** — PR #47 (S1–S6); phía OriLife `#324` **MERGED 2026-08-14 04:07** |
+| 9 | CI repo — còn đúng một nút: khoá đọc `LampNetCloud/Anchor` + `gh secret set` | anh Đức (cần admin repo) — **chặn PR #31**, xem §9.4 |
+| 10 | Spec `#40` phải gộp 3 mục mới trước khi land | 2/3 đã xác định (từ #48 đã land), mục thứ 3 chờ #42 — xem §9.4 |
 
 ---
 
@@ -232,3 +234,81 @@ Ghi thêm: docstring `prove_field` **đã tự khai** giả định *"key duy nh
 - **Một lớp phòng vệ không có test là một lớp phòng vệ sắp mất.** Cách phát hiện duy nhất là **cố ý phá nó rồi chạy lại bộ kiểm** — đọc mã thì nó vẫn trông đúng. Lợi tìm ra chỗ lá/nút bằng đúng cách đó, và bên Strata hở y hệt.
 - **"Bên kia sẽ canh" phải kiểm, không được giả định.** Review của Lợi hạ mức mục trùng key vì tin Strata từ chối; Strata thì chưa. Hai bên cùng dựa vào nhau là **không bên nào gác** — và nó đọc như đã gác.
 - **Gác đặt ở biên nhận dữ liệu ngoài, không đặt ở hàm tính.** Đổi chữ ký `build_state_root` là đổi lan man qua `derived_index`/`composite` nơi field đã qua cửa, mà vẫn không gác chỗ dữ liệu thật đi vào.
+
+---
+
+## 9. Đợt 2026-08-14 — phiên critical path: dọn hàng chờ PR + chốt câu 2
+
+Vào phiên với **9 PR mở**. Ra phiên với **3** — và câu hỏi nặng nhất của MB-6 đã có đáp án.
+
+### 9.1 Sáu PR đã land, mỗi cái qua một phép thử **cố ý phá**
+
+Không PR nào được merge chỉ vì "test xanh". Với mỗi cái, gác chính bị gỡ ra rồi chạy lại bộ kiểm — nếu bộ kiểm vẫn xanh thì cái gác đó chưa được ai canh.
+
+| PR | Nội dung | Phép thử | Kết quả |
+|---|---|---|---|
+| **#48** (anh Đức) | 6 lỗ cổng daemon + route khô `_canonical` | `is_allowed` → `if false` | ✅ ĐỎ đúng 1 bài |
+| **#48** | trần `ts` hai lớp | `TS_MILLIS_FLOOR` → `u64::MAX` | ❌ **193/193 VẪN XANH** — xem §9.2 |
+| **#50** | gác trùng key `state_fields` | (hoà giải, xem §9.2) | — |
+| **#47** | vector `canonical_core` + `state_root` | hoán `policy_hash` ↔ `author_did` trong encoder | ✅ ĐỎ `vectors_khop_encoder` |
+| **#49** | nửa ÂM fixture label 1234 | `if chunks.len() < 2` → `if false` | ✅ ĐỎ `must_reject_thi_decoder_phai_tu_choi` |
+| **#51** | seam đồng hồ cho `check_ts` | lặp lại mutation của #48 | ✅ nay ĐỎ |
+| **#27** | spec Tech §1.7 trần `<2³²` | (spec, đã đối chiếu mã ở vòng review trước) | — |
+
+Số test: **185 → 208**. `cargo fmt --all -- --check` và `cargo clippy --workspace --all-targets -- -D warnings` exit 0 ở mọi mốc.
+
+Chọn mutation có chủ ý, không lấy chỗ dễ. Ví dụ ở **#47**: hoán hai trường **cùng độ dài 32 byte** ở vị trí liền nhau — không đổi tổng độ dài, nên mọi bài kiểm chỉ so `len` đều bỏ lọt. Đó đúng là lớp lỗi mà bảng vector sinh ra để bắt.
+
+### 9.2 Hai chỗ chỉ lộ ra vì chạy thật, không lộ ra khi đọc mã
+
+**(a) Trần `ts` của #48 mutation-survivable — lớp phòng vệ không ai canh.**
+
+`check_ts` có hai lớp: trần tuyệt đối `TS_MILLIS_FLOOR = 10¹²` (không cần đồng hồ) và biên lệch `±300 s` quanh đồng hồ daemon. Gỡ **hẳn** lớp 1 thì **193/193 vẫn xanh** — kể cả bài mang tên `ts_in_milliseconds_rejected_by_absolute_ceiling_not_by_clock`, chính cái tên hứa là nó kiểm trần chứ không kiểm đồng hồ.
+
+Không phải bài kiểm viết ẩu, mà là **không viết khác được từ phía HTTP**: mọi `ts` vượt `10¹²` thì cũng vượt `now + 300` với `now` là đồng hồ thật (`≈ 1,79 × 10⁹`). Hai lớp **trùng miền trên mọi đầu vào mà một request gửi tới được**.
+
+Ca duy nhất lớp 1 gánh một mình: `now == None` — đồng hồ đặt **trước** epoch ⇒ `duration_since(UNIX_EPOCH)` lỗi ⇒ lớp 2 bị `if let Some(now)` bỏ qua. Không tới được ca đó chừng nào `SystemTime::now()` còn gọi thẳng trong hàm.
+
+Vá ở **#51**: tách `check_ts_at(ts, now: Option<u64>)` thuần, `check_ts` gọi nó với `now_secs()`. Không đổi một byte hành vi. Ba bài kiểm, và **vế thứ hai quan trọng ngang vế thứ nhất** — `check_ts_at(ts_giây_thật, None)` phải `Ok`; thiếu vế đó thì một hiện thực `Err`-luôn cũng làm bài thứ nhất xanh, và daemon trên máy đồng hồ hỏng sẽ từ chối sạch mọi ghi mà CI vẫn báo đạt.
+
+**(b) #48 và #50 vá CÙNG một chỗ — phát hiện trước khi merge, không phải sau.**
+
+Cả hai cùng gác trùng key ở `to_pairs`. Hoà giải chứ không chọn một bên: giữ docstring của #48 (kể hậu quả đầu-cuối — hai field-proof cùng khoá `diagnosis`, một trả `aa` một trả `bb`, cùng `state_root` đã neo, non-repudiation sụp), giữ hiện thực của #50 (`find_duplicate_key` đặt ở `src/state.rs` cạnh `build_state_root`, `pub`), gộp thêm lẽ **độc lập** về đảo-thứ-tự-đổi-root.
+
+Một chỗ cố ý **không** viết cho gọn: nợ ở lõi **không** khép lại bằng việc có `find_duplicate_key`. Docstring nói thẳng — đội tích hợp gọi thẳng crate nay *có sẵn hàm để gọi*, nhưng **gọi hay không vẫn là lựa chọn của họ**. Viết "đã có hàm" mà bỏ vế sau thì lần đọc sau sẽ tưởng `#39` đóng được.
+
+Và một bẫy nhỏ đi kèm: thông điệp lỗi thống nhất theo từ ngữ #48 ("khoá trùng") ⇒ **2 assertion trong test #50 phải đổi theo**. Không đổi thì test vẫn xanh — `expect_err` bắt đúng lỗi, chỉ có `assert!(err.contains(...))` là so vào một chuỗi không còn tồn tại. Đúng lớp *test mang tên mạnh hơn nội dung*.
+
+### 9.3 CHỐT câu 2 của MB-6 — đội cây OriLife đi **batch-root/Settlement**
+
+Chốt 2026-08-14 (phía VeData). Mosaic-A **không** dùng cho đội cây; giữ cho **hồ sơ giá-trị-cao lẻ**.
+
+Căn cứ, theo thứ tự sức nặng:
+
+1. **Chi phí, đo thật.** 100 cây: `~0,896 tADA` (batch-root/Settlement, 1 tx / N record) vs `~89,6 tADA` (Mosaic-A, 1 tx / 1 lineage) — **100×**, tăng **tuyến tính**. Nguồn: `VEDATA-MOSAIC-LOAD-FEE-REPORT.md`, 18 mẫu, `0,8948–0,9003 tADA`. Quy mô đích của đội cây là **100k**.
+2. **Thứ đắt tiền đó mua được ÍT HƠN quảng cáo.** Lý do duy nhất chịu giá 100× là "INV-E7 độc lập khoá" — validator ép on-chain, không tin khoá publisher. Nhưng validator **chỉ kiểm ĐỘ DÀI `mmr_root'`**, nên chuỗi chống **tụt-lùi-seq**, **không** chống **rewrite**. Cái mua được hẹp hơn cái trả tiền.
+3. **Và nó chưa đóng ở đầu vào.** `strata/anchor.ak` gác SPEND, **không gác CREATE**, chưa có thread-NFT one-shot (mục 6 §5, `Core#50` MB-5/P0b). Người lạ đặt sẵn luồng neo cho một cây **trước khi** cây đó được neo lần đầu — lúc đó chưa có luồng thật nào để đối chiếu. Trả giá 100× cho một bất biến còn hở ở cửa vào là trả trước cho thứ chưa giao.
+
+**Hệ quả lên câu 1 — đúng như §7.4 dự đoán, và theo chiều hạ mức.** Câu 1 hỏi đường production là (A) `impl MosaicBackend` Rust hay (B) Strata → Mosaic intake. `MosaicBackend` là seam của **đường Mosaic-A**. Đội cây không đi đường đó nữa ⇒ (A) mất người tiêu thụ ở quy mô, và **viết `MosaicBackend` trước là công cốc** đúng như `Strata-API.md:421` gợi ý. Câu 1 **không còn chặn** đường cây; nó chỉ còn chặn nhánh hồ sơ giá-trị-cao lẻ. Vẫn cần anh Đức chốt, nhưng nó rời khỏi đường găng.
+
+⚠️ **Điều kiện đi kèm, ghi ra để không ai đọc chốt này thành "Mosaic-A bỏ đi":** Mosaic-A vẫn là đường **duy nhất** cho INV-E7 độc lập khoá. Trước khi nhánh giá-trị-cao dùng nó ở quy mô, phải đóng **cả hai** lỗ mục 2 và 3 ở trên — nếu không thì cái giá 100× mua về một bất biến chưa chạy đủ.
+
+### 9.4 Ba PR còn mở, và mỗi cái chặn bởi thứ gì
+
+| PR | Chặn bởi | Ghi chú |
+|---|---|---|
+| **#42** | anh Đức chưa đẩy 3 sửa đã hứa 13/08 | `resolve()` thay `on_chain_seq()` · nhánh `None` fail cứng · chặn `AnchorPriority` thưa ở constructor. Không tự đẩy thay vì anh nói rõ *"anh cập nhật vào nhánh này, em đợi bản cập nhật rồi hẵng bấm merge"* |
+| **#40** | phải gộp 3 mục spec | `TimestampTooFarFuture` (lỗi cửa **thứ 7**, ngoài 6 biến thể #40 đang chốt thành danh sách đóng) · route `_canonical` (route **thứ 9**, #40 liệt 8) — **cả hai nay đã xác định vì #48 đã land**; mục thứ 3 là `SeqGap` của #42, **chờ #42** |
+| **#31** | secret `ANCHOR_DEPLOY_KEY` | Workflow tự báo lỗi đúng nguyên nhân và tự in 3 bước thêm khoá. **Cổng kêu to là hành vi đúng**, không phải CI hỏng — nhưng nó cần quyền admin repo mà `lrybi` không có |
+
+Thứ tự land đã tuân: **#31 cuối** (vì secret chưa có), **#40 cuối nhóm spec** (vì phải phản ánh #42 và #48).
+
+Một chỗ **lệch có chủ ý** so với đề nghị ở body #48: anh Đức đề nghị land #48 **sau #42**. Đã land **trước**, vì #42 đang đợi chính anh, mà ràng buộc thật chỉ là *#40 land cuối* — ràng buộc đó không đổi khi #48 vào trước. Đã ghi lý do lên #48 kèm lời hoàn lại nếu anh thấy có lý do khác.
+
+### 9.5 Lưu vết phương pháp — bổ sung cho §8
+
+- **Hai lớp gác trùng miền thì chỉ có MỘT lớp được canh.** Đọc mã thấy hai lớp; chạy mutation mới biết bộ kiểm chỉ chạm được một. Khi viết phòng vệ nhiều lớp, phải hỏi ngay: *có đầu vào nào phân biệt được lớp này với lớp kia không* — không có thì lớp thừa sẽ bị gộp mất trong lần dọn mã tới, và CI sẽ đồng ý với người gộp.
+- **Bài kiểm phủ định cần bài kiểm khẳng định đứng cạnh.** `check_ts_at(x, None) -> Err` một mình không phân biệt được "gác đúng" với "từ chối tất". Cặp đôi mới khoá được hành vi.
+- **Hai PR vá cùng một chỗ là chuyện bình thường khi hàng chờ dài — nhưng chỉ lộ khi ĐỌC diff, không lộ khi đọc tiêu đề.** #48 tiêu đề "6 lỗ cổng daemon", #50 tiêu đề "gác trùng key"; nghe như hai việc. Trước khi land một hàng chờ, so **danh sách file** của mọi PR mở trước, không so tiêu đề.
+- **Đổi thông điệp lỗi là đổi hợp đồng của test.** Hoà giải hai bản vá xong thì phải soi lại mọi `assert!(err.contains(...))` — chúng so vào chuỗi, và chuỗi vừa đổi.
+
