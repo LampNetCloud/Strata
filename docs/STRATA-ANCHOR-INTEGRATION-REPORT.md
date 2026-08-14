@@ -239,7 +239,7 @@ Ghi thêm: docstring `prove_field` **đã tự khai** giả định *"key duy nh
 
 ---
 
-## 9. Đợt 2026-08-14 — phiên critical path: dọn hàng chờ PR + chốt câu 2
+## 9. Đợt 2026-08-14 — phiên critical path: dọn hàng chờ PR + trả câu 2
 
 Vào phiên với **9 PR mở**. Ra phiên với **3** — và câu hỏi nặng nhất của MB-6 đã có đáp án.
 
@@ -293,7 +293,7 @@ Căn cứ, theo thứ tự sức nặng:
 
 **Hệ quả lên câu 1 — đúng như §7.4 dự đoán, và theo chiều hạ mức.** Câu 1 hỏi đường production là (A) `impl MosaicBackend` Rust hay (B) Strata → Mosaic intake. `MosaicBackend` là seam của **đường Mosaic-A**. Đội cây không đi đường đó nữa ⇒ (A) mất người tiêu thụ ở quy mô, và **viết `MosaicBackend` trước là công cốc** đúng như `Strata-API.md:421` gợi ý. Câu 1 **không còn chặn** đường cây; nó chỉ còn chặn nhánh hồ sơ giá-trị-cao lẻ. Vẫn cần anh Đức chốt, nhưng nó rời khỏi đường găng.
 
-⚠️ **Điều kiện đi kèm, ghi ra để không ai đọc chốt này thành "Mosaic-A bỏ đi":** Mosaic-A vẫn là đường **duy nhất** cho INV-E7 độc lập khoá. Trước khi nhánh giá-trị-cao dùng nó ở quy mô, phải đóng **cả hai** lỗ mục 2 và 3 ở trên — nếu không thì cái giá 100× mua về một bất biến chưa chạy đủ.
+⚠️ **Điều kiện đi kèm, ghi ra để không ai đọc điều này thành "Mosaic-A bỏ đi":** Mosaic-A vẫn là đường **duy nhất** cho INV-E7 độc lập khoá. Trước khi nhánh giá-trị-cao dùng nó ở quy mô, phải đóng **cả hai** lỗ mục 2 và 3 ở trên — nếu không thì cái giá 100× mua về một bất biến chưa chạy đủ.
 
 ### 9.4 Ba PR còn mở, và mỗi cái chặn bởi thứ gì
 
@@ -329,11 +329,11 @@ Trước mắt, đường submit production là **(B) Strata đẩy lô sang Mos
 | Khoá ví | Strata phải cầm khoá ký — thêm một chỗ giữ secret | Mosaic giữ — đúng ranh giới *"Mosaic giữ tx"* |
 | Chain-index | Strata phải tự có đường trả **mọi UTxO ứng viên kèm asset** (`anchor_sink.rs:479-486`) | dùng lại hạ tầng Mosaic |
 
-Cộng thêm: sau chốt 2a, (A) **mất người tiêu thụ ở quy mô** — nó là seam của đường Mosaic-A mà đội cây không đi nữa.
+Cộng thêm: khi đội cây đi Settlement (2a), (A) **mất người tiêu thụ ở quy mô** — nó là seam của đường Mosaic-A mà đội cây không đi nữa.
 
 **Dạng B1′ — Mosaic quyết lô, Strata kiểm + encode, Mosaic dựng tx.**
 
-> ⚠️ Bản đầu của mục này chốt **B1** ("Strata gửi payload đã encode, Mosaic chỉ submit"). **Đã sửa 2026-08-14 trong cùng ngày** — B1 đặt việc **quyết thành phần lô** vào Strata, tức bỏ không `BatchCoordinator` của Mosaic. Giữ nguyên vết để thấy chỗ trượt: khi chia việc theo *"ai giữ byte-format"* thì rất dễ kéo luôn *"ai quyết lô"* đi theo, mà hai thứ đó **không cùng một câu hỏi**.
+> ⚠️ Bản đầu của mục này đi theo **B1** ("Strata gửi payload đã encode, Mosaic chỉ submit"). **Đã sửa 2026-08-14 trong cùng ngày** — B1 đặt việc **quyết thành phần lô** vào Strata, tức bỏ không `BatchCoordinator` của Mosaic. Giữ nguyên vết để thấy chỗ trượt: khi chia việc theo *"ai giữ byte-format"* thì rất dễ kéo luôn *"ai quyết lô"* đi theo, mà hai thứ đó **không cùng một câu hỏi**.
 
 | Bước | Ai làm | Vì sao |
 |---|---|---|
@@ -415,13 +415,13 @@ unit     = policyId ‖ ref_id            (submit.ts:195-201)
 
 Cách duy nhất giữ được tính chất đó là **ghim publisher theo từng lineage** — tức reader phải biết trước "lineage này của pkh nào" rồi mới suy ra policyId để tra. Đó **đúng cùng hình dạng bài toán** `threadPin` / thread-NFT one-shot bên Mosaic (`Core#50` MB-5, `VEDATA-MOSAIC-M15-REPORT.md §11`): một định danh phải được **khai trước**, không được **đoán từ dữ liệu on-chain**.
 
-**Trước mắt** (giai đoạn chuyển tiếp): giữ ví chung hiện tại ⇒ `policyId` không đổi ⇒ **không phải di trú beacon**. Đánh đổi phải nói thẳng: nó giữ nguyên hình dạng "một secret cho cả hệ" mà `VeDataIO/Core#87` đang chất vấn (`wallet.rs:3` tự khai *"secret DUY NHẤT của hệ thống"*). Đây là **nợ có điều kiện mở**, không phải một chốt đóng.
+**Trước mắt** (giai đoạn chuyển tiếp): giữ ví chung hiện tại ⇒ `policyId` không đổi ⇒ **không phải di trú beacon**. Đánh đổi phải nói thẳng: nó giữ nguyên hình dạng "một secret cho cả hệ" mà `VeDataIO/Core#87` đang chất vấn (`wallet.rs:3` tự khai *"secret DUY NHẤT của hệ thống"*). Đây là **nợ có điều kiện mở**, không phải một kết luận đóng.
 
 ⚠️ **Và đây là chỗ dễ mất tiền nhất nếu làm sai thứ tự:** ngày nào đổi ví submit — dù là sang ví riêng của Mosaic hay sang ví người dùng — thì **phải quyết di trú beacon trong CÙNG lượt**. Đổi ví trước rồi tính beacon sau nghĩa là có một quãng thời gian mà beacon mới nằm dưới policy mới, beacon cũ nằm dưới policy cũ, và không đường đọc nào thấy đủ cả hai.
 
 ### 9.9 NFT / CIP-68 — ba thứ khác nhau đang bị gọi chung, và mức cần thiết khác hẳn nhau
 
-Câu hỏi phát sinh khi chốt phạm vi: *chọn Settlement rồi thì NFT/CIP-68 còn cần không?* Trả lời được thì phải tách ba thứ ra trước — chúng hay bị gộp làm một.
+Câu hỏi phát sinh khi khoanh phạm vi: *chọn Settlement rồi thì NFT/CIP-68 còn cần không?* Trả lời được thì phải tách ba thứ ra trước — chúng hay bị gộp làm một.
 
 | # | Thứ | Làm gì | Trạng thái thật |
 |---|---|---|---|
@@ -447,7 +447,7 @@ Mục (2) không phải suy luận — **chính header validator tự khai** (`V
 Đây là **để dành cho hoàn cảnh khác**, không phải **bỏ** — và khác biệt đó phải giữ nguyên trong mọi lần đọc lại:
 
 - ✅ **Giữ nguyên**, không xoá: `strata_anchor.ak`, `strataAnchorPlan.ts`, `strataAnchorDatum.ts`, `MosaicAnchorSink`, `trait MosaicBackend`. Chúng đã chạy Preprod thật; xoá đi là vứt một thứ đã nghiệm thu để rồi viết lại.
-- ⛔ **Không đầu tư thêm** vào nhánh này trong lúc đường găng đang chạy — cụ thể là **không** hiện thực `MosaicBackend` production (đúng chốt §9.6), và **không** dựng thread-NFT one-shot chỉ vì nó đang thiếu.
+- ⛔ **Không đầu tư thêm** vào nhánh này trong lúc đường găng đang chạy — cụ thể là **không** hiện thực `MosaicBackend` production (đúng §9.6), và **không** dựng thread-NFT one-shot chỉ vì nó đang thiếu.
 - 🔓 **Điều kiện mở lại:** khi có ca dùng thật đòi **INV-E7 độc lập khoá** cho một hồ sơ lẻ mà giá ~0,9 tADA/lineage chấp nhận được. Lúc đó việc **đầu tiên** phải làm là mục (2) thread-NFT one-shot — không phải nối `MosaicBackend`. Nối trước (2) là dựng đường sống lên trên một bất biến còn hở ở cửa vào.
 
 ⚠️ **Câu dễ đọc nhầm nhất, ghi ra để chặn:** *"chọn Settlement rồi thì bỏ hết NFT"* — **sai**. Bỏ được (1) và (2); **(3) beacon thì không**, vì nó phục vụ đường Settlement chứ không phục vụ CIP-68.
