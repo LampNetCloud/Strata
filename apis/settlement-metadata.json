@@ -65,5 +65,53 @@
       ],
       "expected_cbor_hex": "82a26174016161845820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb5820cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc09a2617402616181825840030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bc5824c3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8"
     }
+  ],
+  "must_reject_note": "Ca ÂM. Tám ca `cases` ở trên toàn ca dương — một bản cài pass 8/8 vẫn có thể NHẬN encoding không canonical vì không ca nào ép nó từ chối thứ gì. Bên nào đọc metadatum label 1234 PHẢI từ chối đúng các `cbor_hex` dưới đây.",
+  "must_reject": [
+    {
+      "name": "le64_wrapped_in_array",
+      "why": "ref_id 32B bọc trong mảng 1 chunk — <=64B thì CẤM chunk, nếu không thì một giá trị có hai encoding",
+      "expect_error": "BadChunking",
+      "cbor_hex": "81a26174016161848158201111111111111111111111111111111111111111111111111111111111111111582022222222222222222222222222222222222222222222222222222222222222225820333333333333333333333333333333333333333333333333333333333333333300"
+    },
+    {
+      "name": "middle_chunk_not_64",
+      "why": "payload 65B chia [32,33] thay vì [64,1] — chunk giữa khác 64B thì cùng một bytes có nhiều cách chia",
+      "expect_error": "BadChunking",
+      "cbor_hex": "81a2617402616181825820030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc5821030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3"
+    },
+    {
+      "name": "last_chunk_empty",
+      "why": "chia [64,0] — chunk cuối rỗng là chunk thừa, cùng bytes lại có thêm một encoding",
+      "expect_error": "BadChunking",
+      "cbor_hex": "81a2617402616181825840030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bc40"
+    },
+    {
+      "name": "map_three_entries",
+      "why": "map có entry thứ ba — parser khác nhau thấy giá trị khác nhau khi map có key lạ/trùng",
+      "expect_error": "BadShape",
+      "cbor_hex": "81a361740161618458201111111111111111111111111111111111111111111111111111111111111111582022222222222222222222222222222222222222222222222222222222222222225820333333333333333333333333333333333333333333333333333333333333333300617809"
+    },
+    {
+      "name": "record_not_a_map",
+      "why": "record là mảng thay vì map — hình dạng sai ngay tầng ngoài",
+      "expect_error": "BadShape",
+      "cbor_hex": "818101"
+    },
+    {
+      "name": "bytestring_over_64",
+      "why": "một bytestring 65B không chunk — vượt trần bytestring của metadata Cardano",
+      "expect_error": "BadChunking",
+      "cbor_hex": "81a26174026161815841030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3"
+    }
+  ],
+  "must_skip_note": "Chiều ngược lại: `t` chưa biết phải BỎ QUA chứ không ném lỗi. Cài quá nghiêm ở đây thì mọi reader cũ chết ngày thêm loại record mới.",
+  "must_skip": [
+    {
+      "name": "unknown_t_is_skipped_not_error",
+      "why": "t=99 chưa biết phải BỎ QUA, không được ném lỗi (forward-compat); record t=1 sau nó vẫn phải decode ra",
+      "expect_records": 1,
+      "cbor_hex": "82a26174186361618144030a1118a261740161618458201111111111111111111111111111111111111111111111111111111111111111582022222222222222222222222222222222222222222222222222222222222222225820333333333333333333333333333333333333333333333333333333333333333307"
+    }
   ]
 }
