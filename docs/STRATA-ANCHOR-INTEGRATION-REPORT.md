@@ -419,3 +419,36 @@ Cách duy nhất giữ được tính chất đó là **ghim publisher theo từ
 
 ⚠️ **Và đây là chỗ dễ mất tiền nhất nếu làm sai thứ tự:** ngày nào đổi ví submit — dù là sang ví riêng của Mosaic hay sang ví người dùng — thì **phải quyết di trú beacon trong CÙNG lượt**. Đổi ví trước rồi tính beacon sau nghĩa là có một quãng thời gian mà beacon mới nằm dưới policy mới, beacon cũ nằm dưới policy cũ, và không đường đọc nào thấy đủ cả hai.
 
+### 9.9 NFT / CIP-68 — ba thứ khác nhau đang bị gọi chung, và mức cần thiết khác hẳn nhau
+
+Câu hỏi phát sinh khi chốt phạm vi: *chọn Settlement rồi thì NFT/CIP-68 còn cần không?* Trả lời được thì phải tách ba thứ ra trước — chúng hay bị gộp làm một.
+
+| # | Thứ | Làm gì | Trạng thái thật |
+|---|---|---|---|
+| 1 | **Datum CIP-68** (`strata_anchor.ak`) | anchor là **UTxO sống**, spend-recreate `seq+1`, validator ép đơn điệu ⇒ INV-E7 **độc lập khoá** | có, đã chạy Preprod |
+| 2 | **Thread-NFT one-shot** | thứ làm cho lời hứa của (1) **thật sự đứng** — chặn người lạ CREATE UTxO giả cùng `ref_id` | ❌ **CHƯA CÓ** |
+| 3 | **Beacon NFT** (Settlement, `#14`) | cho `resolve()` một **asset để tra** thay vì quét metadata ⇒ miễn nhiễm flood-eviction | có, **tuỳ chọn** (`beacon?: boolean`) |
+
+Mục (2) không phải suy luận — **chính header validator tự khai** (`VeDataIO/Core: mosaic/aiken/validators/strata_anchor.ak:22-35`):
+
+> *"RANH GIỚI TIN CẬY (đọc kỹ trước khi tích hợp — **chưa có thread-NFT**): Validator này **KHÔNG** bind một thread identity token duy nhất (không one-shot mint kiểu RT-100/UT-222 của `mosaic_genesis`)… cơ chế cụ thể **CHƯA** quyết."*
+
+`mosaic_genesis.ak` **có** one-shot RT-100/UT-222 — nhưng đó là thread của **Mosaic**, không phải thread anchor của Strata. Đừng đọc "Mosaic đã có one-shot" thành "anchor Strata đã được gác".
+
+**Mức cần thiết, theo từng nhánh:**
+
+- **Đường găng (đội cây → Settlement): CIP-68 không cần chút nào.** Label 1234 là metadata thuần — không UTxO, không datum, không NFT. Đó **chính là** lý do nó rẻ 100×.
+- **Nhánh hồ sơ giá-trị-cao (Mosaic-A): CIP-68 là toàn bộ lý do nhánh đó tồn tại** — nhưng hôm nay nó **thiếu chân**. Không có (2) thì kẻ lạ tốn một min-ADA cấy UTxO `seq = 2^63` mang `ref_id` nạn nhân, operator thật kẹt vĩnh viễn ở `RollbackAttempt`. Tức đang trả giá 100× cho một bất biến **chưa chạy đủ**. Che tạm hôm nay chỉ có `threadPin` off-chain trong `.env` — mà `VEDATA-MOSAIC-M15-REPORT.md §11.4` tự ghi đó là **bản trung gian**.
+
+**Vì sao beacon tồn tại — và nó không phải đồ trang trí.** CIP-68 cho ta **một UTxO sống** để hỏi thẳng *"đỉnh lineage này ở đâu"*. Settlement chỉ để lại **vết lịch sử trong metadata**, muốn tìm đỉnh thì phải **quét** — mà quét thì làm mù được bằng tx rác rẻ tiền (đúng `#14`). Beacon chính là **bản thay thế rẻ tiền của CIP-68** cho đường Settlement: mint một asset `policyId ‖ ref_id` để có thứ **tra chỉ mục asset** thay vì quét. ⇒ Chọn Settlement thì beacon là thứ giữ cho đường **ĐỌC** còn dùng được ở quy mô, không phải tuỳ chọn cho vui. Và nó nối thẳng vào vướng mắc `policyId = f(pkh)` ở §9.8.
+
+**CHỐT phạm vi (Thịnh, 2026-08-14): làm theo đường găng — đội cây → Settlement. NFT/CIP-68 hoãn sang hoàn cảnh thích hợp hơn.**
+
+Đây là **hoãn**, không phải **bỏ** — và khác biệt đó phải giữ nguyên trong mọi lần đọc lại:
+
+- ✅ **Giữ nguyên**, không xoá: `strata_anchor.ak`, `strataAnchorPlan.ts`, `strataAnchorDatum.ts`, `MosaicAnchorSink`, `trait MosaicBackend`. Chúng đã chạy Preprod thật; xoá đi là vứt một thứ đã nghiệm thu để rồi viết lại.
+- ⛔ **Không đầu tư thêm** vào nhánh này trong lúc đường găng đang chạy — cụ thể là **không** hiện thực `MosaicBackend` production (đúng chốt §9.6), và **không** dựng thread-NFT one-shot chỉ vì nó đang thiếu.
+- 🔓 **Điều kiện mở lại:** khi có ca dùng thật đòi **INV-E7 độc lập khoá** cho một hồ sơ lẻ mà giá ~0,9 tADA/lineage chấp nhận được. Lúc đó việc **đầu tiên** phải làm là mục (2) thread-NFT one-shot — không phải nối `MosaicBackend`. Nối trước (2) là dựng đường sống lên trên một bất biến còn hở ở cửa vào.
+
+⚠️ **Câu dễ đọc nhầm nhất, ghi ra để chặn:** *"chọn Settlement rồi thì bỏ hết NFT"* — **sai**. Bỏ được (1) và (2); **(3) beacon thì không**, vì nó phục vụ đường Settlement chứ không phục vụ CIP-68.
+
