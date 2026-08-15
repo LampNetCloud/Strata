@@ -5,19 +5,35 @@
 //! - [`BlockfrostQuery`] — đọc on-chain Preview qua Blockfrost, impl
 //!   [`ChainQuery`](lampnet_strata::settlement::ChainQuery). `resolve` lọc theo địa chỉ
 //!   INPUT của tx (chỉ tin tx do publisher CHI — chống đầu độc indexer).
-//! - [`TsSubmitter`] — build+sign+submit tx metadata label 1234 qua child-process
-//!   `submitter/submit.ts` (Lucid Evolution). impl
+//! - [`MosaicDoorSubmitter`] — **đường hiện hành**: đẩy lô sang cửa Mosaic
+//!   (`POST /mosaic/v1/strata-anchor-batch`), Mosaic dựng tx + ký + submit. impl
 //!   [`Submitter`](lampnet_strata::settlement::Submitter).
 //!
-//! **Bí mật (mnemonic/token) chỉ đi qua ENV của process cha**, KHÔNG qua argv, KHÔNG in
-//! ra log/error — mọi type cầm secret redact trong `Debug`; submit.ts tự lọc trước khi in.
+//! # `TsSubmitter` + `submitter/submit.ts` — ĐÃ XOÁ 2026-08-15
+//!
+//! Chúng từng dựng tx **ngay trong kho này** (Lucid Evolution qua child-process),
+//! tức một chỗ **đã vượt** luật `#1`: *"Strata giữ logic chain; Mosaic giữ tx;
+//! KHÔNG dựng tx neo trong Strata"*. Luật chuyển giao đặt hai điều kiện, cả hai
+//! nay đã đạt:
+//!
+//! - **(a)** bản Mosaic qua đúng bộ fixture chung `apis/settlement-metadata.json`
+//!   — 8 ca dương + 6 ca âm + 1 ca bỏ-qua (`Core: mosaic/l1/tests/settlement_fixture.rs`);
+//! - **(b)** submit được tx **thật**: Preprod `d9975f60…` (3 anchor),
+//!   `7e78cfaa…` (10 anchor), và `resolve()` đọc lại được **3/3**.
+//!
+//! Đủ cả hai ⇒ **XOÁ, không giữ song song**: hai đường submit là hai chỗ cầm khoá
+//! ví, tức nhân đôi đúng thứ đang muốn gom về một nhà (`VeDataIO/Core#87`).
+//!
+//! **Bí mật (token cửa, project-id) chỉ đi qua ENV**, KHÔNG qua argv, KHÔNG in ra
+//! log/error — mọi type cầm secret đều redact trong `Debug`.
 
-use std::io::{Read, Write};
-use std::path::PathBuf;
+pub mod mosaic_door;
+pub use mosaic_door::MosaicDoorSubmitter;
+
 use std::time::Duration;
 
 use lampnet_strata::anchor_sink::AnchorError;
-use lampnet_strata::settlement::{ChainQuery, SettlementRecord, SubmitOutcome, Submitter};
+use lampnet_strata::settlement::ChainQuery;
 
 // ───────────────────────────────────────────────────────────────────────────
 // BlockfrostQuery (Preview) — reqwest blocking
@@ -222,166 +238,6 @@ impl ChainQuery for BlockfrostQuery {
     }
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// TsSubmitter — child process Node/tsx (Lucid Evolution + Blockfrost)
-// ───────────────────────────────────────────────────────────────────────────
-
-/// Submitter gọi `submitter/submit.ts` qua stdin/stdout JSON. Secret (mnemonic/token)
-/// đi bằng ENV của process cha — KHÔNG qua argv, KHÔNG log.
-pub struct TsSubmitter {
-    /// Thư mục chứa `submit.ts` + `node_modules`.
-    pub submitter_dir: PathBuf,
-    /// Nhãn metadata.
-    pub label: u64,
-    /// Timeout chờ child (giây).
-    pub timeout_secs: u64,
-    /// BẬT beacon-walk (issue #14): mỗi anchor mint/di chuyển beacon NFT
-    /// `unit = policyId ‖ ref_id` (native policy `sig(publisher)`). Phải khớp
-    /// `SinkConfig::beacon_policy` mà `resolve` dùng. `false` = tx metadata-only (legacy).
-    pub beacon: bool,
-}
-
-impl std::fmt::Debug for TsSubmitter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TsSubmitter")
-            .field("submitter_dir", &self.submitter_dir)
-            .field("label", &self.label)
-            .finish()
-    }
-}
-
-impl Submitter for TsSubmitter {
-    fn submit(&self, records: &[SettlementRecord]) -> Result<SubmitOutcome, AnchorError> {
-        // JS Number an toàn tới 2^53-1; seq vượt → từ chối trước khi sang TS.
-        const JS_MAX_SAFE: u64 = (1u64 << 53) - 1;
-        let mut recs = Vec::with_capacity(records.len());
-        for r in records {
-            match r {
-                SettlementRecord::Anchor(a) => {
-                    if a.seq > JS_MAX_SAFE {
-                        return Err(AnchorError::Rejected(format!(
-                            "seq {} vượt Number.MAX_SAFE_INTEGER của submitter JS",
-                            a.seq
-                        )));
-                    }
-                    recs.push(serde_json::json!({
-                        "t": 1,
-                        "ref_id": hex::encode(a.ref_id),
-                        "head_version_hash": hex::encode(a.head_version_hash),
-                        "mmr_root": hex::encode(a.mmr_root),
-                        "seq": a.seq,
-                    }));
-                }
-                SettlementRecord::KeyRotation(p) => {
-                    recs.push(serde_json::json!({ "t": 2, "payload": hex::encode(p) }));
-                }
-            }
-        }
-        let req =
-            serde_json::json!({ "label": self.label, "records": recs, "beacon": self.beacon });
-
-        let mut child = std::process::Command::new("npx")
-            .args(["tsx", "submit.ts"])
-            .current_dir(&self.submitter_dir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(spawn_err)?;
-
-        child
-            .stdin
-            .take()
-            .expect("stdin piped")
-            .write_all(req.to_string().as_bytes())
-            .map_err(|e| AnchorError::Network(format!("ghi stdin submitter: {e}")))?;
-        // stdin drop → EOF.
-
-        // Chờ có timeout (poll try_wait).
-        let deadline = std::time::Instant::now() + Duration::from_secs(self.timeout_secs);
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
-                        let _ = child.kill();
-                        return Err(AnchorError::Network("submitter timeout".into()));
-                    }
-                    std::thread::sleep(Duration::from_millis(300));
-                }
-                Err(e) => return Err(AnchorError::Network(format!("wait submitter: {e}"))),
-            }
-        }
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        if let Some(mut o) = child.stdout.take() {
-            let _ = o.read_to_string(&mut stdout);
-        }
-        if let Some(mut e) = child.stderr.take() {
-            let _ = e.read_to_string(&mut stderr);
-        }
-
-        // stdout: dòng JSON cuối cùng là kết quả.
-        let last_json = stdout
-            .lines()
-            .rev()
-            .find(|l| l.trim_start().starts_with('{'))
-            .ok_or_else(|| {
-                AnchorError::Rejected(format!(
-                    "submitter không trả JSON; stderr: {}",
-                    truncate(&stderr, 800)
-                ))
-            })?;
-        let v: serde_json::Value = serde_json::from_str(last_json)
-            .map_err(|e| AnchorError::Rejected(format!("submitter JSON hỏng: {e}")))?;
-
-        if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
-            let txid = v
-                .get("txid")
-                .and_then(|t| t.as_str())
-                .ok_or_else(|| AnchorError::Rejected("submitter thiếu txid".into()))?
-                .to_string();
-            let address = v
-                .get("address")
-                .and_then(|a| a.as_str())
-                .unwrap_or_default()
-                .to_string();
-            Ok(SubmitOutcome { txid, address })
-        } else {
-            let kind = v
-                .get("error_kind")
-                .and_then(|k| k.as_str())
-                .unwrap_or("Rejected");
-            let msg = v
-                .get("error")
-                .and_then(|m| m.as_str())
-                .unwrap_or("submitter lỗi không rõ")
-                .to_string();
-            Err(match kind {
-                "NotConfigured" => AnchorError::NotConfigured,
-                "Network" => AnchorError::Network(msg),
-                "InsufficientAda" => AnchorError::InsufficientAda {
-                    need: v.get("need").and_then(|n| n.as_u64()).unwrap_or(0),
-                    have: v.get("have").and_then(|n| n.as_u64()).unwrap_or(0),
-                },
-                "DatumTooLarge" => AnchorError::DatumTooLarge {
-                    bytes: v.get("bytes").and_then(|n| n.as_u64()).unwrap_or(0) as usize,
-                },
-                _ => AnchorError::Rejected(msg),
-            })
-        }
-    }
-}
-
-/// spawn fail: binary thiếu (npx không có) → NotConfigured; khác → Network.
-fn spawn_err(e: std::io::Error) -> AnchorError {
-    if e.kind() == std::io::ErrorKind::NotFound {
-        AnchorError::NotConfigured
-    } else {
-        AnchorError::Network(format!("spawn submitter: {e}"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,56 +248,5 @@ mod tests {
         let dbg = format!("{q:?}");
         assert!(dbg.contains("<REDACTED>"));
         assert!(!dbg.contains("secret_token_abc123"));
-    }
-
-    #[test]
-    fn ts_submitter_debug_hides_nothing_secret() {
-        let s = TsSubmitter {
-            submitter_dir: PathBuf::from("/x/submitter"),
-            label: 1234,
-            timeout_secs: 60,
-            beacon: false,
-        };
-        let dbg = format!("{s:?}");
-        assert!(dbg.contains("1234"));
-    }
-
-    #[test]
-    fn ts_submitter_missing_npx_is_not_configured() {
-        // Thư mục trống + PATH giữ nguyên: nếu npx KHÔNG có → NotConfigured; nếu CÓ npx
-        // nhưng submit.ts thiếu → child chạy fail → Rejected/Network. Test chỉ khẳng định
-        // KHÔNG panic và trả Err (không phụ thuộc máy CI có npx hay không).
-        let s = TsSubmitter {
-            submitter_dir: PathBuf::from("/nonexistent-dir-xyz"),
-            label: 1234,
-            timeout_secs: 5,
-            beacon: false,
-        };
-        let a = lampnet_strata::chain::StrataAnchor {
-            ref_id: [1; 32],
-            head_version_hash: [2; 32],
-            mmr_root: [3; 32],
-            seq: 0,
-        };
-        let r = s.submit(&[SettlementRecord::Anchor(a)]);
-        assert!(r.is_err());
-    }
-
-    #[test]
-    fn seq_over_js_safe_rejected() {
-        let s = TsSubmitter {
-            submitter_dir: PathBuf::from("/x"),
-            label: 1234,
-            timeout_secs: 5,
-            beacon: false,
-        };
-        let a = lampnet_strata::chain::StrataAnchor {
-            ref_id: [1; 32],
-            head_version_hash: [2; 32],
-            mmr_root: [3; 32],
-            seq: (1u64 << 53) + 1, // vượt Number.MAX_SAFE_INTEGER
-        };
-        let r = s.submit(&[SettlementRecord::Anchor(a)]);
-        assert!(matches!(r, Err(AnchorError::Rejected(_))));
     }
 }

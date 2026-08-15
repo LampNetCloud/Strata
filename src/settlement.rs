@@ -5,7 +5,8 @@
 //!
 //! Module này là **lớp THUẦN** (no I/O): codec + logic sink generic theo hai seam
 //! [`ChainQuery`] (đọc on-chain) và [`Submitter`] (build+submit tx). Cài đặt I/O thật
-//! (Blockfrost + submitter TS Lucid) sống ở crate riêng `lampnet-anchor-io` — giữ crate
+//! (Blockfrost + submitter đẩy lô sang cửa Mosaic) sống ở crate riêng
+//! `lampnet-anchor-io` — giữ crate
 //! lõi không kéo `reqwest`/process.
 //!
 //! **Hợp nhất `AnchoredTable` (anh Đức chốt PR #6 vòng 2 mục 1):** đường Settlement
@@ -327,7 +328,7 @@ pub struct SubmitOutcome {
 }
 
 /// Build + sign + submit tx metadata — trừu tượng hoá submitter để mock được. Cài đặt
-/// thật (`TsSubmitter`, child-process Lucid Evolution) ở crate `lampnet-anchor-io`.
+/// thật (`MosaicDoorSubmitter` — đẩy lô sang cửa Mosaic) ở crate `lampnet-anchor-io`.
 pub trait Submitter {
     /// Submit tx với metadatum label 1234 = các record đã cho. Trả txid + địa chỉ ví ký.
     fn submit(&self, records: &[SettlementRecord]) -> Result<SubmitOutcome, AnchorError>;
@@ -407,16 +408,18 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
         anchors: &[StrataAnchor],
     ) -> Result<Option<AnchorReceipt>, AnchorError> {
         self.ensure_configured()?;
+        let ref_ids: Vec<Hash32> = anchors.iter().map(|a| a.ref_id).collect();
+        let on_chain = self.resolve_many(&ref_ids)?;
         let mut fresh: Vec<SettlementRecord> = Vec::new();
         for a in anchors {
-            match self.resolve(&a.ref_id)? {
-                Some(on_chain) if on_chain.seq > a.seq => {
+            match on_chain.iter().find(|c| c.ref_id == a.ref_id) {
+                Some(c) if c.seq > a.seq => {
                     return Err(AnchorError::RollbackAttempt {
-                        on_chain_seq: on_chain.seq,
+                        on_chain_seq: c.seq,
                         attempted: a.seq,
                     });
                 }
-                Some(on_chain) if on_chain.seq == a.seq => {
+                Some(c) if c.seq == a.seq => {
                     // idempotent no-op cho anchor này.
                 }
                 _ => fresh.push(SettlementRecord::Anchor(a.clone())),
@@ -443,6 +446,77 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
             backend: AnchorBackend::Settlement,
             slot: None,
         }))
+    }
+
+    /// `resolve` cho **nhiều** `ref_id` trong MỘT lượt quét.
+    ///
+    /// Vì sao không lặp `resolve()`: ở chế độ legacy, mỗi `resolve()` quét **cùng một**
+    /// cửa sổ tx của **cùng một** ví publisher và đọc **cùng những** metadatum ấy — chỉ
+    /// khác mỗi cái `ref_id` đem so. Lặp N lần là làm lại N lần đúng một việc, tức
+    /// `N × resolve_scan_limit` lượt gọi mạng.
+    ///
+    /// Đo thật trên Preprod (2026-08-15, `scan_limit = 500`): lô **3** ref chạy xong
+    /// trong vài phút; lô **10** ref **vượt 180 giây** timeout của client — daemon vẫn
+    /// hoàn tất và tx vẫn lên chuỗi (`6cc6ab6e…`), nhưng bên gọi đã bỏ cuộc và **không
+    /// còn biết txid của lô mình vừa bắn**. Đó là hỏng đúng chỗ đau: lô lên chuỗi mà
+    /// bên quyết lô coi như thất bại, rồi bắn lại.
+    ///
+    /// Quét một lượt, gộp cho cả tập ⇒ chi phí mạng thành **hàm của cửa sổ quét**, không
+    /// còn là hàm của kích thước lô. Đúng tính chất mà đường lô sinh ra để có.
+    ///
+    /// Chế độ beacon vốn đã O(1) theo từng ref (tra asset-index, không quét), nên ở đó
+    /// lặp là đúng — và đó cũng là lý do beacon **không phải đồ trang trí**.
+    pub fn resolve_many(&self, ref_ids: &[Hash32]) -> Result<Vec<StrataAnchor>, AnchorError> {
+        self.ensure_configured()?;
+        if ref_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match &self.cfg.beacon_policy {
+            Some(policy) => {
+                let mut out = Vec::new();
+                for r in ref_ids {
+                    if let Some(a) = self.resolve_via_beacon(r, policy)? {
+                        out.push(a);
+                    }
+                }
+                Ok(out)
+            }
+            None => self.resolve_many_via_address_scan(ref_ids),
+        }
+    }
+
+    /// Một lượt quét cửa sổ, gộp `best` cho MỌI `ref_id` được hỏi.
+    fn resolve_many_via_address_scan(
+        &self,
+        ref_ids: &[Hash32],
+    ) -> Result<Vec<StrataAnchor>, AnchorError> {
+        let txs = self
+            .query
+            .address_txs(&self.cfg.publisher_address, self.cfg.resolve_scan_limit)?;
+        let mut best: Vec<Option<StrataAnchor>> = vec![None; ref_ids.len()];
+        for txid in txs {
+            let Some(cbor) = self.query.tx_metadata_cbor(&txid, self.cfg.label)? else {
+                continue;
+            };
+            // TRUST: chỉ tin tx do publisher CHI. Kiểm SAU khi biết tx có metadata —
+            // tx không mang label 1234 thì không cần tốn thêm một lượt gọi nào.
+            let inputs = self.query.tx_input_addresses(&txid)?;
+            if !inputs.iter().any(|a| a == &self.cfg.publisher_address) {
+                continue;
+            }
+            // Decode MỘT lần cho cả tập ref_id, thay vì decode lại theo từng ref.
+            for rec in decode_records_lenient(&cbor) {
+                let SettlementRecord::Anchor(a) = rec else {
+                    continue;
+                };
+                if let Some(i) = ref_ids.iter().position(|r| *r == a.ref_id)
+                    && best[i].as_ref().is_none_or(|b| a.seq > b.seq)
+                {
+                    best[i] = Some(a);
+                }
+            }
+        }
+        Ok(best.into_iter().flatten().collect())
     }
 
     /// LEGACY (`beacon_policy = None`): quét cửa sổ hữu hạn tx của ví publisher (MỚI→CŨ)
@@ -538,6 +612,19 @@ impl<Q: ChainQuery, S: Submitter> AnchorSink for SettlementSink<Q, S> {
             Some(policy) => self.resolve_via_beacon(ref_id, policy),
             None => self.resolve_via_address_scan(ref_id),
         }
+    }
+
+    /// Settlement **là** backend gộp lô: `encode_records` gói N anchor vào một
+    /// mảng CBOR, một tx. Đây là chỗ nối của `BatchCoordinator` phía Mosaic.
+    fn publish_many(
+        &self,
+        anchors: &[StrataAnchor],
+        priority: AnchorPriority,
+    ) -> Result<Option<AnchorReceipt>, AnchorError> {
+        if priority == AnchorPriority::NoAnchor {
+            return Ok(None);
+        }
+        SettlementSink::publish_batch(self, anchors)
     }
 }
 
@@ -777,9 +864,14 @@ mod tests {
         txs: Vec<String>,
         inputs: HashMap<String, Vec<String>>,
         meta: HashMap<String, Vec<u8>>,
+        /// Số lượt QUÉT cửa sổ địa chỉ. Đếm được thì mới khoá được tính chất
+        /// "một lô = một lượt quét" — không đếm thì ai đó đổi `resolve_many` về
+        /// vòng lặp `resolve()` và cả bộ kiểm vẫn xanh.
+        scans: std::cell::Cell<usize>,
     }
     impl ChainQuery for MockQuery {
         fn address_txs(&self, addr: &str, limit: usize) -> Result<Vec<String>, AnchorError> {
+            self.scans.set(self.scans.get() + 1);
             if addr != self.publisher {
                 return Ok(Vec::new());
             }
@@ -969,6 +1061,56 @@ mod tests {
             .publish(&anchor(0), AnchorPriority::Immediate)
             .unwrap_err();
         assert!(matches!(err, AnchorError::DatumTooLarge { .. }));
+    }
+
+    /// **Một lô = MỘT lượt quét**, dù lô có bao nhiêu ref.
+    ///
+    /// Đây không phải tối ưu cho vui: đo thật trên Preprod, bản lặp `resolve()` khiến
+    /// lô 10 ref vượt 180 giây và client bỏ cuộc **sau khi** tx đã lên chuỗi — bên
+    /// quyết lô mất txid của chính lô mình bắn. Bài kiểm này khoá lại tính chất đó.
+    #[test]
+    fn mot_lo_chi_quet_mot_luot_du_lo_bao_nhieu_ref() {
+        let sink = sink_with("addr_pub", 0);
+        let mut a2 = anchor(1);
+        a2.ref_id = [0x22; 32];
+        let mut a3 = anchor(1);
+        a3.ref_id = [0x33; 32];
+        let batch = [anchor(1), a2, a3];
+
+        sink.query.borrow().scans.set(0);
+        assert!(sink.publish_batch(&batch).unwrap().is_some());
+        assert_eq!(
+            sink.query.borrow().scans.get(),
+            1,
+            "3 ref phải dùng ĐÚNG 1 lượt quét — lặp resolve() cho từng ref là 3 lượt"
+        );
+
+        // Neo lại y nguyên: vẫn một lượt quét, và lần này ra no-op idempotent.
+        sink.query.borrow().scans.set(0);
+        assert_eq!(sink.publish_batch(&batch).unwrap(), None);
+        assert_eq!(sink.query.borrow().scans.get(), 1);
+    }
+
+    /// Gộp quét KHÔNG được làm mất gác rollback: một anchor tụt-lùi-seq trong lô vẫn
+    /// phải giết cả lô. (Bài khẳng định đứng cạnh bài đếm ở trên — nếu không, một bản
+    /// "gộp" trả về rỗng cũng qua được bài đếm.)
+    #[test]
+    fn gop_quet_van_giu_gac_rollback_ca_lo() {
+        let sink = sink_with("addr_pub", 0);
+        let mut a2 = anchor(5);
+        a2.ref_id = [0x22; 32];
+        assert!(sink.publish_batch(&[anchor(5), a2]).unwrap().is_some());
+
+        // Lô sau: ref thứ nhất tụt về seq 3 ⇒ cả lô bị từ chối, kể cả ref hợp lệ.
+        let mut b2 = anchor(9);
+        b2.ref_id = [0x22; 32];
+        assert_eq!(
+            sink.publish_batch(&[anchor(3), b2]).unwrap_err(),
+            AnchorError::RollbackAttempt {
+                on_chain_seq: 5,
+                attempted: 3
+            }
+        );
     }
 
     #[test]

@@ -24,10 +24,12 @@ pub mod error;
 pub mod hexs;
 pub mod registry;
 pub mod routes;
+pub mod sink_config;
 pub mod store;
 
 pub use anchor::{DisabledSink, FailingSink, MemorySink};
 pub use error::{ApiError, ApiResult};
 pub use registry::{InMemoryRegistry, KeyRegistry};
 pub use routes::{AppState, router};
+pub use sink_config::{SinkChoice, build_sink};
 pub use store::{ChainEntry, ChainStore, StoreError};

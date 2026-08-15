@@ -454,3 +454,88 @@ Mục (2) không phải suy luận — **chính header validator tự khai** (`V
 
 ⚠️ **Câu dễ đọc nhầm nhất, ghi ra để chặn:** *"chọn Settlement rồi thì bỏ hết NFT"* — **sai**. Bỏ được (1) và (2); **(3) beacon thì không**, vì nó phục vụ đường Settlement chứ không phục vụ CIP-68.
 
+
+---
+
+## 10. Đợt 2026-08-15 — mối nối B1′ ĐÃ CHẠY THẬT, và `submit.ts` đã rời khỏi kho này
+
+Phần việc phía Mosaic ghi ở `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` §8–§10. Mục này chỉ ghi **những gì đổi trong kho Strata** và **vì sao**.
+
+### 10.1 Đã thêm
+
+| Thứ | Ở đâu | Vai |
+|---|---|---|
+| `MosaicDoorSubmitter` | `anchor-io/src/mosaic_door.rs` | impl `Submitter` — đẩy lô sang cửa Mosaic; **không** dựng tx |
+| `AnchorSink::publish_many` | `src/anchor_sink.rs` | đường LÔ, mặc định **fail-closed** |
+| `SettlementSink::resolve_many` | `src/settlement.rs` | một lượt quét cho **cả** lô (xem §10.3) |
+| Route `POST /v1/strata/_anchor_batch` | `node/src/routes.rs` | cửa vào của `BatchCoordinator` phía Mosaic |
+| `sink_config` | `node/src/sink_config.rs` | cắm sink **thật** cho daemon từ ENV |
+| `orilife_e2e` · `resolve_settlement` | `anchor-io/examples/` | lượt chạy đầu-cuối + nghiệm thu đường ĐỌC |
+
+**Daemon trước đợt này cắm cứng `DisabledSink`** — tức mọi neo thật trả **501**, và câu *"cắm sink thật là việc của bản triển khai"* nghĩa là **không có** bản triển khai nào. Nay có, và mọi cấu hình thiếu là **lỗi khởi động**, không phải cảnh báo: một daemon lên xanh với sink nửa-cấu-hình chỉ lộ ra ở lượt neo đầu tiên, tức **sau khi** dữ liệu đã đi vào.
+
+Một gác đáng nêu riêng: bật `STRATA_BEACON_POLICY` (đọc theo beacon) mà tắt `STRATA_ANCHOR_BEACON` (ghi không mint beacon) ⇒ `resolve` trả `None` cho **mọi** ref ⇒ gác idempotency/rollback của `publish_batch` **im lặng ngừng hoạt động**. Cấu hình đó nay bị chặn ngay lúc khởi động.
+
+### 10.2 `submit.ts` — XOÁ, đúng luật chuyển giao §9.7
+
+Hai điều kiện đã đủ:
+
+- **(a)** bản Mosaic qua đúng bộ fixture chung `apis/settlement-metadata.json` — **8 dương + 6 âm + 1 bỏ-qua** (`Core: mosaic/l1/tests/settlement_fixture.rs`);
+- **(b)** submit tx **thật** trên Preprod: `d9975f60…` (3 anchor), `7e78cfaa…` (10 anchor); và `resolve()` của chính kho này đọc lại **3/3**, khớp từng byte.
+
+⇒ Đã xoá `anchor-io/submitter/` trọn thư mục, `TsSubmitter` + 3 test của nó, và job CI `submitter (tsc)`. **Không giữ song song** — hai đường submit là hai chỗ cầm khoá ví.
+
+Điều kiện + bằng chứng (kèm txid) ghi thẳng vào doc-header `anchor-io/src/lib.rs`, không chỉ ở báo cáo: người đọc mã sau này cần biết **vì sao một đường đã chạy thật lại bị xoá**, mà họ đọc mã chứ không đọc báo cáo.
+
+### 10.3 🪤 Đường lô suýt vô dụng — và nó chỉ lộ khi CHẠY, không lộ khi đọc mã
+
+`publish_batch` gọi `resolve()` **cho từng** anchor. Ở chế độ legacy, mỗi `resolve()` quét **cùng một** cửa sổ tx của **cùng một** ví publisher và đọc **cùng những** metadatum ấy — chỉ khác mỗi `ref_id` đem so. Lặp N lần = `N × resolve_scan_limit` lượt gọi mạng.
+
+Đo thật (`scan_limit = 500`): lô **3** ref chạy được; lô **10** ref **vượt 180 giây** timeout client — daemon vẫn hoàn tất và **tx vẫn lên chuỗi** (`6cc6ab6e…`), nhưng bên gọi đã bỏ cuộc và **không còn biết txid của lô mình vừa bắn**. Hỏng đúng chỗ đau: lô đã neo mà bên quyết lô coi là thất bại, rồi bắn lại.
+
+Vá: `resolve_many` — quét một lượt, gộp cho cả tập. Lô-10 nay xong trong **31 giây** cả lượt. Khoá bằng bài kiểm **đếm số lượt quét**, đã **cố ý phá** để xác nhận nó cắn (trả về vòng lặp ⇒ đỏ, 3 ≠ 1), kèm một bài **khẳng định** đứng cạnh: gộp quét không được làm mất gác — một anchor tụt-lùi-seq vẫn phải giết cả lô.
+
+> Đây cũng là **số đo** cho luận điểm beacon ở §9.9: chế độ beacon tra asset-index nên đã O(1) theo từng ref. Cửa sổ quét legacy vừa là điểm yếu chống flood (`#14`) vừa là **trần thông lượng** của chính đường lô.
+
+### 10.4 `publish_many` fail-closed — vì sao không lặp `publish()` hộ
+
+Backend nào không batch được thì **nói ra**. Một vòng lặp mặc định trông vô hại nhưng biến *1 tx / N anchor* thành *N tx* — đo thật là `~0,896` so với `~89,6` tADA cho 100 cây. Chênh 100× **mà không lỗi nào bật ra** là đúng loại hỏng phải chặn ở tầng trait, không phải ở tài liệu.
+
+### 10.5 Trạng thái bộ kiểm
+
+`cargo test --workspace` → **221 pass** (nền 208 − 3 test `TsSubmitter` + 16 mới), `cargo clippy --workspace --all-targets -D warnings` sạch.
+
+### 10.6 Beacon đã chạy thật — cả nhánh mint lẫn nhánh di-chuyển
+
+Beacon walk được **viết lại** bằng pallas ở phía Mosaic (bản cũ là `submit.ts` +
+Lucid, đã xoá). `policyId` suy ra **trùng** bản cũ (`f84ac406…e8ede3`) ⇒ di trú
+submitter **không làm mồ côi** beacon đã mint trước đây.
+
+Ba vòng neo liên tiếp trên cùng 2 lineage (Preprod): vòng 1 `b1a87172…` **mint 2**
+beacon; vòng 2 `4e159a44…` và vòng 3 `88f32654…` **mint 0** — tức **di chuyển**, tx
+nhỏ hơn (834 vs 937 B). `resolve()` chạy chế độ beacon (tra asset-index, **không
+quét**) trả đúng đỉnh mới nhất `seq=3` cho **2/2** ref.
+
+Vòng 2–3 mới là phần nghiệm thu thật: nhánh *di chuyển* khác hẳn nhánh *mint* ở
+bookkeeping value, và nó **không bao giờ chạy ở lượt đầu tiên**. Chạy một vòng nhiều
+lần không thay được việc chạy nhiều vòng.
+
+### 10.7 🪤 Bẫy thứ ba — và một bản vá SAI trước khi có bản vá đúng
+
+Bắn hai lô liền nhau: lô sau chọn UTxO mà lô trước **đã tiêu** ⇒ ledger trả
+`ConwayMempoolFailure "All inputs are spent"`. Blockfrost trả **trạng thái đã
+index**, không phải mempool.
+
+Với beacon thì hậu quả **tệ hơn và im lặng**: chưa thấy beacon vừa mint ⇒ cửa kết
+luận *"chưa tồn tại"* ⇒ **mint lần hai** cùng `policyId ‖ ref_id`. Một `unit` nằm ở
+hai UTxO thì beacon thôi là **con trỏ duy nhất** — đúng tính chất `resolve_via_beacon`
+của kho này dựa vào.
+
+Vá ở phía Mosaic bằng sổ **UTxO-đang-bay**. Đáng ghi lại là **bản vá đầu tiên
+KHÔNG chạy**: nó dọn sổ theo `/txs/{hash}` (*"tx đã index chưa"*) trong khi sổ phục
+vụ `/addresses/{addr}/utxos`. Preprod rớt y nguyên lỗi cũ — Blockfrost thấy tx
+**trước khi** cập nhật danh sách UTxO.
+
+> **Luật rút ra:** *điều kiện dọn một bộ nhớ đệm phải đọc **đúng cái nguồn** mà nó
+> phục vụ.* Hai chỉ mục là hai tốc độ; hỏi cái này để quyết định cho cái kia là một
+> giả định không ai bảo đảm.

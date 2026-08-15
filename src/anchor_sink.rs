@@ -92,6 +92,34 @@ pub trait AnchorSink {
 
     /// Đọc anchor mới nhất on-chain cho `ref_id`. `None` nếu chưa neo bao giờ.
     fn resolve(&self, ref_id: &Hash32) -> Result<Option<StrataAnchor>, AnchorError>;
+
+    /// Đẩy **một lô** anchor trong **một** tx. Trả một biên nhận cho cả lô, hoặc
+    /// `Ok(None)` khi mọi anchor trong lô đã neo idempotent.
+    ///
+    /// Đây là đường mà bên quyết lô (Mosaic `BatchCoordinator`) đi vào: nó chọn
+    /// **thành phần** lô, còn Strata giữ nguyên gác INV-E7 — mỗi anchor vẫn qua
+    /// `resolve()` trước khi được đưa vào payload.
+    ///
+    /// **Mặc định fail-closed, KHÔNG lặp `publish()`.** Một vòng lặp trông vô hại
+    /// nhưng biến "một tx cho N anchor" thành "N tx" — đo thật là `~0,896` so với
+    /// `~89,6` tADA cho 100 cây (`VEDATA-MOSAIC-LOAD-FEE-REPORT.md`). Chênh 100×
+    /// mà không lỗi nào bật ra là đúng loại hỏng im lặng phải chặn ở đây: backend
+    /// nào không batch được thì **nói ra**, để người gọi tự chọn đường khác.
+    fn publish_many(
+        &self,
+        anchors: &[StrataAnchor],
+        priority: AnchorPriority,
+    ) -> Result<Option<AnchorReceipt>, AnchorError> {
+        if priority == AnchorPriority::NoAnchor {
+            return Ok(None);
+        }
+        Err(AnchorError::Rejected(format!(
+            "backend này không nhận lô ({} anchor): nó neo 1 tx / 1 anchor. Lặp publish() hộ ở \
+             đây sẽ đội phí 100× trong im lặng — hãy gọi publish() từng anchor một cách tường \
+             minh nếu đó thật sự là điều muốn.",
+            anchors.len()
+        )))
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
