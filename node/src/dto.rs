@@ -362,6 +362,29 @@ pub struct AnchorReq {
     pub priority: PriorityDto,
 }
 
+/// Neo **một lô** nhiều ref trong MỘT tx — mối nối B1′: Mosaic quyết lô, Strata
+/// kiểm INV-E7 + encode, Mosaic dựng tx.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnchorBatchReq {
+    /// Các ref cần neo — bech32m `lnref1…` hoặc hex32. **Không được trùng**: hai
+    /// entry cùng một lineage trong một tx thì entry sau là rollback của entry
+    /// trước, và không thứ tự nào cứu được điều đó.
+    pub refs: Vec<String>,
+    pub priority: PriorityDto,
+}
+
+/// Kết quả neo lô. MỘT `anchor_txid` cho **cả lô** — đó chính là tính chất đường
+/// này giữ (1 tx / N anchor, `~0,896` tADA thay vì `~89,6`).
+#[derive(Debug, Clone, Serialize)]
+pub struct AnchorBatchResp {
+    pub anchor_txid: Option<String>,
+    pub backend: Option<String>,
+    /// Số anchor thật sự nằm trong lô.
+    pub batch_size: usize,
+    /// Từng anchor trong lô, đúng thứ tự đã gửi lên chuỗi.
+    pub anchors: Vec<AnchorResp>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AnchorResp {
     /// §3 ghi `<hex32>` ở route này (khác `create`/`head` trả bech32) — giữ đúng spec.

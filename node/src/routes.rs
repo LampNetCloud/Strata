@@ -62,6 +62,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/strata/:ref/proof/version/:seq", get(proof_version))
         .route("/v1/strata/:ref/proof/field/:key", get(proof_field))
         .route("/v1/strata/:ref/anchor", post(anchor))
+        // Route LÔ (B1′). Tiền tố `_` giống `_canonical`: nó KHÔNG phải một `:ref`,
+        // và đặt tên vậy thì không ref_id hợp lệ nào đụng vào được.
+        .route("/v1/strata/_anchor_batch", post(anchor_batch))
         .with_state(state)
 }
 
@@ -612,6 +615,137 @@ fn anchor_blocking(
         backend: backend.clone(),
     });
     Ok(AnchorResp::new(&committed, txid, backend))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Neo LÔ — mối nối B1′ (Mosaic quyết lô)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// `POST /v1/strata/_anchor_batch` — neo N ref trong MỘT tx.
+///
+/// Đây là cửa mà `BatchCoordinator` phía Mosaic đi vào. Phân vai (đã chốt ở
+/// `docs/STRATA-ANCHOR-INTEGRATION-REPORT.md` §9.6):
+///
+/// - **Mosaic** quyết *khi nào* bắn lô và lô gồm *ref nào* — nó có hàng đợi ưu
+///   tiên + ngưỡng depth/age, và neo là việc của nó.
+/// - **Strata** (route này) kiểm INV-E7 từng ref rồi encode label 1234 — `resolve`
+///   là chain logic, và encoder giữ **một** bản.
+/// - **Mosaic** dựng tx + ký + submit.
+///
+/// ⚠️ Đi vòng qua route này (Mosaic tự gom lô rồi submit thẳng) là **mất gác chống
+/// rollback**: lô vẫn lên chuỗi, tx vẫn confirmed, và không còn ai chặn một anchor
+/// tụt-lùi-seq. Không lỗi nào bật ra.
+async fn anchor_batch(
+    State(st): State<AppState>,
+    req: Result<Json<AnchorBatchReq>, JsonRejection>,
+) -> ApiResult<Json<AnchorBatchResp>> {
+    let req = body(req)?;
+    tokio::task::spawn_blocking(move || anchor_batch_blocking(&st, &req.refs, req.priority.into()))
+        .await
+        .map_err(|e| ApiError::Malformed(format!("tác vụ neo lô hỏng: {e}")))?
+        .map(Json)
+}
+
+/// Cùng trình tự **kiểm → đẩy → chốt** như neo lẻ, nhưng giữ khoá của **mọi** ref
+/// trong lô suốt cả ba bước.
+///
+/// Hai chỗ khác biệt so với neo lẻ, cả hai đều là chuyện đúng-sai chứ không phải
+/// tối ưu:
+///
+/// 1. **Khoá theo thứ tự ref_id đã sắp.** Hai lô giao nhau mà khoá theo thứ tự
+///    người gọi gửi lên thì hai luồng có thể giữ chéo khoá của nhau — deadlock,
+///    và nó chỉ xuất hiện dưới tải.
+/// 2. **Trùng ref trong một lô bị TỪ CHỐI.** Hai entry cùng lineage trong một tx:
+///    entry sau mang cùng `seq` với entry trước, nên khi đọc lại chỉ một cái sống,
+///    còn lõi thì đã chốt `publish_anchor()` hai lần. Không có thứ tự nào cứu được,
+///    nên chặn ở cửa.
+fn anchor_batch_blocking(
+    st: &AppState,
+    refs: &[String],
+    priority: AnchorPriority,
+) -> ApiResult<AnchorBatchResp> {
+    if refs.is_empty() {
+        return Err(ApiError::Malformed("lô rỗng: cần ít nhất một ref".into()));
+    }
+    let mut ids: Vec<Hash32> = refs
+        .iter()
+        .map(|r| parse_ref(r))
+        .collect::<Result<_, _>>()?;
+    ids.sort_unstable();
+    let before = ids.len();
+    ids.dedup();
+    if ids.len() != before {
+        return Err(ApiError::Malformed(
+            "lô có ref trùng: hai anchor cùng một lineage trong MỘT tx thì cái sau là rollback \
+             của cái trước"
+                .into(),
+        ));
+    }
+
+    let entries: Vec<_> = ids
+        .iter()
+        .map(|id| st.store.get(id).ok_or(ApiError::NotFound("ref")))
+        .collect::<Result<_, _>>()?;
+    let mut guards: Vec<_> = entries.iter().map(|e| lock(e)).collect();
+
+    // 1. Kiểm rollback bằng gương của daemon, TOÀN LÔ trước khi đẩy bất cứ gì.
+    let mut anchors = Vec::with_capacity(guards.len());
+    for g in &guards {
+        let a = g.chain.anchor();
+        if let Some(prev) = &g.anchored
+            && a.seq <= prev.seq
+        {
+            return Err(StrataError::AnchorRollback {
+                current: prev.seq,
+                attempted: a.seq,
+            }
+            .into());
+        }
+        anchors.push(a);
+    }
+
+    // `no_anchor` = không đẩy và KHÔNG chốt seq (§4.2) — trả về đúng những gì SẼ
+    // neo, để bên gọi xem trước được lô mà không tiêu một tx nào.
+    if matches!(priority, AnchorPriority::NoAnchor) {
+        return Ok(AnchorBatchResp {
+            anchor_txid: None,
+            backend: None,
+            batch_size: anchors.len(),
+            anchors: anchors
+                .iter()
+                .map(|a| AnchorResp::new(a, None, None))
+                .collect(),
+        });
+    }
+
+    // 2. Đẩy on-chain — MỘT lượt cho cả lô.
+    let receipt = st.sink.publish_many(&anchors, priority)?;
+    let (txid, backend) = match &receipt {
+        Some(rc) => (
+            Some(rc.txid.clone()),
+            Some(backend_name(rc.backend).to_string()),
+        ),
+        None => (None, None),
+    };
+
+    // 3. On-chain đã nhận ⇒ mới chốt `last_anchor_seq` ở lõi, cho từng ref.
+    let mut out = Vec::with_capacity(guards.len());
+    for g in &mut guards {
+        let committed = g.chain.publish_anchor()?;
+        g.anchored = Some(AnchorState {
+            seq: committed.seq,
+            txid: txid.clone(),
+            backend: backend.clone(),
+        });
+        out.push(AnchorResp::new(&committed, txid.clone(), backend.clone()));
+    }
+
+    Ok(AnchorBatchResp {
+        anchor_txid: txid,
+        backend,
+        batch_size: out.len(),
+        anchors: out,
+    })
 }
 
 #[cfg(test)]

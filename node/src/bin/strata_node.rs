@@ -6,11 +6,14 @@
 //!   Chỉ nạp **khoá công khai** — daemon không bao giờ cầm khoá bí mật (nó không ký).
 //!   Bản thật thay bằng PhoenixKey resolver qua trait [`KeyRegistry`].
 //!
-//! Backend neo mặc định là `DisabledSink` (mọi neo thật → 501): cắm `MosaicAnchorSink`
-//! hoặc `SettlementSink` là việc của bản triển khai thật, cần khoá + endpoint chuỗi.
+//! - Backend neo: chọn qua `STRATA_ANCHOR_BACKEND` (`disabled` mặc định | `memory` |
+//!   `settlement`) — xem [`sink_config`](lampnet_strata_node::sink_config) để biết
+//!   danh sách biến của từng backend. Cấu hình **thiếu là lỗi khởi động**, không
+//!   phải cảnh báo: một daemon lên xanh với sink nửa-cấu-hình chỉ lộ ra ở lượt neo
+//!   đầu tiên, tức sau khi dữ liệu đã đi vào.
 
 use ed25519_dalek::VerifyingKey;
-use lampnet_strata_node::{AppState, ChainStore, DisabledSink, InMemoryRegistry, router};
+use lampnet_strata_node::{AppState, ChainStore, InMemoryRegistry, build_sink, router};
 use std::sync::Arc;
 
 /// `did_hex:pk_hex,did_hex:pk_hex…` → registry. Sai định dạng ⇒ dừng hẳn (fail-closed:
@@ -37,22 +40,35 @@ fn load_registry(spec: &str) -> Result<InMemoryRegistry, String> {
     Ok(reg)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// ⚠️ **KHÔNG dùng `#[tokio::main]` ở đây.** Sink Settlement cầm client
+/// `reqwest::blocking` (Blockfrost + cửa Mosaic), mà một client blocking **dựng bên
+/// trong ngữ cảnh async sẽ panic** khi runtime nội bộ của nó bị drop: *"Cannot drop a
+/// runtime in a context where blocking is not allowed"*. Nên trình tự là: dựng sink ở
+/// ngữ cảnh **đồng bộ** trước, rồi mới mở runtime.
+///
+/// Thứ tự này cũng đúng về mặt vận hành: cấu hình neo hỏng thì daemon **không được
+/// lên**, chứ không phải lên xanh rồi hỏng ở lượt neo đầu tiên.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = std::env::var("STRATA_NODE_ADDR").unwrap_or_else(|_| "127.0.0.1:6690".to_string());
     let registry = load_registry(&std::env::var("STRATA_NODE_KEYS").unwrap_or_default())?;
     let n_keys = registry.len();
 
-    let state = AppState::new(
-        Arc::new(ChainStore::new()),
-        Arc::new(registry),
-        Arc::new(DisabledSink),
-    );
+    let choice =
+        build_sink(&|k| std::env::var(k).ok()).map_err(|e| format!("cấu hình neo: {e}"))?;
+    println!("neo: {}", choice.description);
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    println!(
-        "strata-node nghe tại http://{addr} — route §3 dưới /v1/strata, {n_keys} khoá trong registry"
-    );
-    axum::serve(listener, router(state)).await?;
-    Ok(())
+    let state = AppState::new(Arc::new(ChainStore::new()), Arc::new(registry), choice.sink);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            println!(
+                "strata-node nghe tại http://{addr} — route §3 dưới /v1/strata, {n_keys} khoá \
+                 trong registry"
+            );
+            axum::serve(listener, router(state)).await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
 }
