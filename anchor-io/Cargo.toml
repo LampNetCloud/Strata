@@ -2,11 +2,15 @@
 name = "lampnet-anchor-io"
 version = "0.1.0"
 edition = "2024"
-description = "I/O cho S1 AnchorSink backend Settlement — Blockfrost (đọc on-chain) + submitter TS Lucid Evolution (build+submit tx metadata label 1234). Tách khỏi crate lõi `lampnet-strata` (giữ lõi no-I/O)."
+description = "I/O cho S1 AnchorSink backend Settlement — Blockfrost (đọc on-chain) + MosaicDoorSubmitter (đẩy lô label 1234 sang cửa Mosaic; Mosaic dựng tx). Tách khỏi crate lõi `lampnet-strata` (giữ lõi no-I/O)."
 license = "Apache-2.0"
 
 [dependencies]
 lampnet-strata = { path = ".." }
 hex = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde_json = "1"
+
+[dev-dependencies]
+# Ví dụ `orilife_e2e` ký Ed25519 THẬT như một client OriLife.
+ed25519-dalek = "2.0"
