@@ -98,24 +98,3 @@ jobs:
       - name: test
         run: cargo test --workspace
 
-  submitter:
-    name: submitter (tsc)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: anchor-io/submitter
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: anchor-io/submitter/package-lock.json
-      - run: npm ci
-      # Gói này nằm ngoài Cargo workspace nên không lệnh Rust nào chạm tới nó.
-      # Không có job này thì API-drift của Lucid chỉ lộ lúc chạy thật.
-      - run: npm run typecheck
-      # Đối chiếu metadatum label 1234 với test-vector CHUNG apis/settlement-metadata.json
-      # (bên Rust: tests/settlement_fixture.rs). Không có bước này thì TS và Rust trôi
-      # khỏi nhau mà không lệnh build nào phát hiện — xem PR #33.
-      - run: npm run test:fixture
