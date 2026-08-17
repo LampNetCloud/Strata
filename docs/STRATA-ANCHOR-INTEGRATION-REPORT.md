@@ -170,7 +170,7 @@ Enforce ở `src/chain.rs:201` và `:362` (`if v.ts < head.ts` → `TimestampReg
 | 9 | CI repo — còn đúng một nút: khoá đọc `LampNetCloud/Anchor` + `gh secret set` | anh Đức (cần admin repo) — **chặn PR #31**, xem §9.4 |
 | 10 | Spec `#40` phải gộp 3 mục mới trước khi land | 2/3 đã xác định (từ #48 đã land), mục thứ 3 chờ #42 — xem §9.4 |
 | 11 | 🆕 **Route `GET /v1/strata/_dirty`** — cửa vào của coordinator gom lô theo hộ | **P0, việc của kho này**; không cần state mới — xem §11.3 |
-| 12 | 🆕 `SinkConfig.publisher_address` là **MỘT publisher toàn cục** — ví-mỗi-hộ làm vỡ | **nợ P1**, không chặn P0; chỗ cắm đã có ở `node/src/registry.rs` — xem §11.1 |
+| 12 | ~~`SinkConfig.publisher_address` là MỘT publisher toàn cục — ví-mỗi-hộ làm vỡ~~ | ⛔ **KHÔNG còn là nợ** (2026-08-17): nền tảng ký ⇒ publisher = nền tảng ⇒ `SinkConfig` giữ nguyên. Lỗ vẫn còn trong mã, chỉ là thiết kế không đụng — xem §11.1 |
 | 13 | 🆕 `AnchorPriority` — `Immediate`/`Milestone`/`BatchDaily` **không phân biệt được ở đâu** trên đường Settlement | doc-comment hoặc gộp khi `#40` chốt danh sách đóng — xem §11.2 |
 
 ---
@@ -559,6 +559,23 @@ trong **kho Strata**, để người mở kho này không phải đi tìm báo c
 ví thực hiện tx neo sẽ là **ví của chính hộ** (mọi thứ do người dùng tự ký). ⇒ Lô neo **không trộn hộ**.
 
 ### 11.1 🔺 `SinkConfig` chỉ biết **MỘT publisher toàn cục** — ví-mỗi-hộ làm vỡ
+
+> ⛔ **CẬP NHẬT CÙNG NGÀY 2026-08-17 — mục này KHÔNG còn là nợ đang mở.** Thiết kế chốt lại: **nền tảng
+> trả phí VÀ nền tảng ký**, bằng **ví của nền tảng** ⇒ publisher = nền tảng ⇒ `SinkConfig` **giữ nguyên**,
+> không phải sửa gì. Chi tiết: `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` **§12.13**.
+>
+> ⚠️ **Và một câu trong mục này phải đính chính vì NÓI QUÁ:** *"nền tảng **không giả được** anchor cho cây
+> của hộ, dù có toàn quyền server"* — sai mức độ. Nền tảng chạy **chính daemon Strata giữ `ChainStore`**,
+> nên nó vốn đã quyết `head_version_hash`/`mmr_root` báo ra. Ví-mỗi-hộ chỉ chặn được **một ca hẹp**: nền
+> tảng **bịa** một anchor on-chain mang tên hộ. Nó **chưa bao giờ** chặn *không neo* hay *neo seq cũ*.
+>
+> ✅ **Thứ không đổi dù ai ký tx:** hộ **vẫn ký từng `version`** bằng khoá Ed25519 của họ, daemon
+> `verify_strict` từ chối nếu sai (INV-E4 + `policy_hash`). *Hộ ký **NỘI DUNG** · nền tảng ký **VIỆC
+> NEO*** — hai chữ ký, hai tính chất; chốt mới chỉ bỏ cái thứ hai.
+>
+> **Lỗ mô tả dưới đây VẪN TỒN TẠI trong mã** (`publisher_address` vẫn là hằng toàn cục) — chỉ là thiết kế
+> hiện tại không đụng vào nó. Ngày nào quay lại ví-mỗi-hộ thì nó bật lại nguyên vẹn, nên giữ nguyên phần
+> phân tích bên dưới làm vết.
 
 `src/settlement.rs:339-342`:
 
