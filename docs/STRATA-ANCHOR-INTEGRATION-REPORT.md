@@ -3,6 +3,8 @@
 > **Repo:** `LampNetCloud/Strata` · **Mở:** 2026-08-13
 > **Phạm vi:** đường neo đầu-cuối từ tầng ứng dụng xuống L1 Cardano — ranh giới module, hợp đồng byte đã ghim, và các mảnh còn thiếu.
 > **Vì sao gộp một file:** ba việc dưới đây (review PR #42, trả YC-6 cho OriLife, đo khoảng trống `MosaicBackend`) đều nằm trên **cùng một mối nối**; tách file theo từng PR/issue sẽ làm mất chính bức tranh đó.
+>
+> 🆕 **§11 (2026-08-17) — chốt GOM LÔ THEO HỘ; ba điều thuộc về kho NÀY.** Việc P0 phía Strata là route đọc `_dirty` (§11.3 — **không cần state mới**, `store.rs` đã đủ dữ liệu). Kèm hai nợ vừa lộ: `SinkConfig` chỉ biết **một publisher toàn cục** nên ví-mỗi-hộ làm vỡ (§11.1), và `AnchorPriority` có ba nhánh **không phân biệt được ở đâu** trên đường Settlement (§11.2). Phần Mosaic + số đo chi phí: `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` §12 (`VeDataIO/Core#99`).
 
 ---
 
@@ -167,6 +169,9 @@ Enforce ở `src/chain.rs:201` và `:362` (`if v.ts < head.ts` → `TimestampReg
 | 8 | ~~Vector `state_root` + chốt encoding `field_value_bytes` cho OriLife~~ | ✅ **XONG** — PR #47 (S1–S6); phía OriLife `#324` **MERGED 2026-08-14 04:07** |
 | 9 | CI repo — còn đúng một nút: khoá đọc `LampNetCloud/Anchor` + `gh secret set` | anh Đức (cần admin repo) — **chặn PR #31**, xem §9.4 |
 | 10 | Spec `#40` phải gộp 3 mục mới trước khi land | 2/3 đã xác định (từ #48 đã land), mục thứ 3 chờ #42 — xem §9.4 |
+| 11 | 🆕 **Route `GET /v1/strata/_dirty`** — cửa vào của coordinator gom lô theo hộ | **P0, việc của kho này**; không cần state mới — xem §11.3 |
+| 12 | 🆕 `SinkConfig.publisher_address` là **MỘT publisher toàn cục** — ví-mỗi-hộ làm vỡ | **nợ P1**, không chặn P0; chỗ cắm đã có ở `node/src/registry.rs` — xem §11.1 |
+| 13 | 🆕 `AnchorPriority` — `Immediate`/`Milestone`/`BatchDaily` **không phân biệt được ở đâu** trên đường Settlement | doc-comment hoặc gộp khi `#40` chốt danh sách đóng — xem §11.2 |
 
 ---
 
@@ -539,3 +544,158 @@ vụ `/addresses/{addr}/utxos`. Preprod rớt y nguyên lỗi cũ — Blockfrost
 > **Luật rút ra:** *điều kiện dọn một bộ nhớ đệm phải đọc **đúng cái nguồn** mà nó
 > phục vụ.* Hai chỉ mục là hai tốc độ; hỏi cái này để quyết định cho cái kia là một
 > giả định không ai bảo đảm.
+
+---
+
+## 11. Đợt 2026-08-17 — chốt **gom lô theo hộ**: ba điều thuộc về kho NÀY
+
+Phiên thảo luận (không code) trên critical path đã chốt hình dạng của mảnh còn thiếu lớn nhất — **ai
+quyết lô**. Phần việc phía Mosaic + toàn bộ số đo chi phí ghi ở
+`VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` **§12** (PR `VeDataIO/Core#99`); phần Hydra ở
+`VEDATA-MOSAIC-HYDRA-DECISION.md` **§15**. Mục này **không lặp lại** hai file đó — nó ghi đúng ba thứ nằm
+trong **kho Strata**, để người mở kho này không phải đi tìm báo cáo bên kho khác mới hiểu.
+
+**Bối cảnh một dòng, vì nó đổi mọi con số:** *"100k cây"* là **tổng toàn hệ**, mỗi hộ chỉ vài chục cây; và
+ví thực hiện tx neo sẽ là **ví của chính hộ** (mọi thứ do người dùng tự ký). ⇒ Lô neo **không trộn hộ**.
+
+### 11.1 🔺 `SinkConfig` chỉ biết **MỘT publisher toàn cục** — ví-mỗi-hộ làm vỡ
+
+`src/settlement.rs:339-342`:
+
+```rust
+pub struct SinkConfig {
+    /// TRUST PIN v1: anchor chỉ hợp lệ nếu tx phát (input) từ ví này.
+    pub publisher_address: String,       // MỘT, toàn cục
+    …
+    pub beacon_policy: Option<String>,   // cũng MỘT, cũng toàn cục
+}
+```
+
+Dùng ở **cả hai chiều**:
+
+| Chiều | Dòng | Làm gì |
+|---|---|---|
+| GHI | `:436` | tx vừa submit phải có `outcome.address == cfg.publisher_address`, lệch ⇒ từ chối |
+| ĐỌC legacy | `:495`, `:504`, `:532`, `:541` | quét tx **của địa chỉ đó**, rồi lọc `input == địa chỉ đó` |
+| ĐỌC beacon | `:567` | tx mới nhất chạm beacon phải do **địa chỉ đó** chi |
+
+⇒ Một daemon hôm nay phục vụ được **đúng một** publisher. Ví-mỗi-hộ ⇒ hoặc mỗi hộ một daemon (không đời
+nào), hoặc **`publisher` phải chuyển từ cấu hình toàn cục sang thuộc tính THEO LINEAGE**.
+
+**"Publisher" không phải một vai trò do ai bổ nhiệm — nó rơi ra từ chính luật lọc trên.** Ví nào ký và
+**chi** tx neo, ví đó *là* publisher theo định nghĩa. Nên "mỗi hộ một publisher" là **hệ quả** của quyết
+định ví, không phải một quyết định thứ hai.
+
+**Lấy publisher của một lineage ở đâu ra — không suy được, phải KHAI TRƯỚC:**
+
+- `ref_id = H_dom("LN/STRATA/ref/v1", author_did ‖ nonce)` (`src/refid.rs:20`) — hàm **một chiều**;
+- `author_did` là **DID đã băm** (CHỐT-5), không phải pubkey;
+- khoá ký **version** (Ed25519 thuần) **≠** khoá ví Cardano (CIP-1852).
+
+⇒ Đúng cùng hình dạng bài toán `threadPin` / thread-NFT one-shot của **`Core#50` MB-5**: *một định danh
+phải được khai trước, không được đoán từ dữ liệu on-chain*. Khác biệt: trước đây nó ở mục "chuyện sau
+này"; với ví-mỗi-hộ thì nó **bước lên đường găng**.
+
+🎁 **Nhưng chỗ cắm đã có sẵn trong kho này** — `node/src/registry.rs:1-6` tự khai:
+
+> *"Key-registry — phân giải `Did → VerifyingKey` (**CHỐT-5**: `Did` là **băm DID PhoenixKey**)… Bản trong
+> repo là in-memory để chạy được đầu-cuối; bản thật cắm **PhoenixKey resolver qua chính trait này**."*
+
+⇒ Việc không phải dựng registry mới, mà **nới trait**: `resolve(did) → VerifyingKey` thành trả thêm địa
+chỉ thanh toán; rồi `SinkConfig.publisher_address` toàn cục đổi thành tra theo `author_did` của lineage.
+
+⚠️ **Đây là nợ P1, KHÔNG chặn P0** — P0 tạm giữ ví nền tảng hiện có. Nhưng ghi ra vì đổi lại nó là một
+**nâng cấp bảo mật thật**: hôm nay trụ tin cậy của **mọi** cây là **một** ví — ai cầm khoá đó ký được
+anchor hợp lệ cho **bất kỳ** `ref_id` nào, kể cả cây của người lạ, và `resolve()` sẽ tin. Sau khi ráp, trụ
+tin cậy của cây hộ A là **ví hộ A**; nền tảng **không giả được**, dù có toàn quyền server.
+
+⚠️ **Giá phải trả:** hộ **mất ví ⇒ luồng neo của họ đứt** — neo bằng ví mới sẽ không được `resolve()` tin
+(khác địa chỉ), và cây đó có một quá khứ nằm dưới ví cũ vĩnh viễn. Cần câu chuyện **xoay khoá publisher**;
+chưa có nhà, phải có đáp án **trước khi có hộ thật**.
+
+### 11.2 `AnchorPriority` — ba nhánh không phân biệt được ở đâu trên đường Settlement
+
+`src/anchor_sink.rs:24-33` khai bốn cadence: `Immediate` / `Milestone` / `BatchDaily` / `NoAnchor`. Nhưng
+trên đường Settlement, giá trị đó chỉ được kiểm **một** chỗ duy nhất — `== NoAnchor` thì bỏ qua
+(`:113` trong `publish_many` mặc định, `:594` trong `MosaicAnchorSink::publish`).
+
+⇒ **`Immediate`, `Milestone`, `BatchDaily` là ba giá trị cho ra hành vi y hệt nhau.** Không phải lỗi —
+cadence vốn là việc của tầng **quyết lô**, mà tầng đó nằm bên Mosaic (B1′). Nhưng nó có hai hệ quả đáng
+ghi:
+
+1. **Một enum công khai hứa một sự phân biệt không tồn tại** ở backend mặc định. Người tích hợp đọc
+   `Strata-API.md` sẽ tưởng đặt `BatchDaily` là có gom ngày; thực tế nó chỉ đổi một nhãn.
+2. Bảng ánh xạ `anchor_priority` ↔ Strategy A/B/C/D (Mosaic-Math §7.4) là taxonomy của **đường Mosaic-A /
+   CIP-68**, không phải của Settlement. Mà `§9.3` đã chốt đội cây đi Settlement. ⇒ **Trên đường găng hôm
+   nay, A/B/C/D không đóng vai trò nào.**
+
+Việc cần làm: hoặc doc-comment nói rõ ba nhánh đó không phân biệt ở backend Settlement, hoặc gộp lại khi
+`#40` chốt danh sách đóng. **Chưa làm** — ghi vào §5 mục 11.
+
+### 11.3 🎁 Route `_dirty` — kho này **đã có sẵn** dữ liệu, không cần state mới
+
+Việc P0 phía Strata: một route đọc để coordinator bên Mosaic biết **cây nào của hộ nào đang chờ đóng dấu**.
+
+Soi `node/src/store.rs:28-38` thì dữ liệu đã đủ:
+
+```rust
+pub struct AnchorState { pub seq: u64, pub txid: Option<String>, pub backend: Option<String> }
+pub struct ChainEntry  { pub chain: StrataChain, …, pub anchored: Option<AnchorState> }
+```
+
+`chain` cho `head_seq`, `anchored.seq` cho seq đã neo ⇒ chỉ cần duyệt `ChainStore.refs` và so hai số:
+
+```
+GET /v1/strata/_dirty
+→ [{ ref_id, author_did, head_seq, anchored_seq, oldest_unanchored_ts }, …]
+```
+
+Từ **một** lượt gọi đó, coordinator **tính** ra cả ba đại lượng nó cần — không cần bộ đếm ở đâu cả:
+
+```
+dirty_refs       = { ref : head_seq > anchored_seq }     ← thành phần của lô
+pending_versions = Σ (head_seq − anchored_seq)           ← cò "100 lượt cập nhật/hộ"
+oldest_pending   = min(oldest_unanchored_ts)             ← van thời gian
+```
+
+> **Luật rút ra: đừng ĐẾM, hãy TÍNH.** Một bộ đếm tăng dần là *trạng thái* — lệch được, đếm trùng được,
+> mất khi restart được, và không có gì để đối chiếu. Một tổng suy ra từ nguồn sự thật thì **không lệch
+> được**. Cùng họ bài học §10.7 (*điều kiện dọn cache phải đọc đúng nguồn nó phục vụ*).
+
+**Hai chi tiết phải đúng ngay từ bản đầu:**
+
+- **Đếm `version`, KHÔNG đếm `event`.** Kho này có hai cửa ghi (`node/src/routes.rs:59-60`):
+  `POST /:ref/version` tiến `seq` + đổi `head_version_hash` + đẩy MMR; `POST /:ref/event` là tầng (b),
+  **không đụng chuỗi version**. Anchor cam kết đúng ba thứ (`head_version_hash`/`mmr_root`/`seq`) mà **chỉ
+  `version` mới làm lệch với on-chain**. Đưa `event` vào phép đếm là bắn lô sớm hơn cần ⇒ đắt hơn mà không
+  neo thêm được gì.
+- **`author_did` phải nằm trong response.** Nó là khoá nhóm "hộ" — `ref_id = H(author_did ‖ nonce)` là một
+  chiều nên coordinator **không suy ngược được**. *(Hạn chế đã biết: một hộ có thể có nhiều `author_did` —
+  vợ/chồng, người làm; ánh xạ tường minh là việc sau, chưa chặn P0.)*
+
+⚠️ **Phụ thuộc phải nói ra:** `ChainStore` là `RwLock<HashMap<…>>` — **in-memory**, đúng một trong hai lỗ
+hở còn mở của kho này. Daemon restart là mất sạch chain, không riêng trạng thái neo. Không phải việc P0 đẻ
+ra, nhưng nó **chặn trần độ bền** của cả vòng gom lô, và phải vá trước khi có hộ thật. *(Điểm nhẹ nhõm:
+nếu mất `anchored` mà còn chain thì `publish_batch` chạy `resolve()` đọc on-chain sẽ trả idempotent — neo
+lại **không tốn tiền**.)*
+
+### 11.4 Hydra — đã rà lại ở một hình dạng mới và BÁC, không ảnh hưởng kho này
+
+Ghi một dòng để khỏi ai mở lại: đề xuất **một Hydra head cho mỗi hộ** (contract gom lô trong head, head
+ngủ phần lớn thời gian) đã được rà bằng tài liệu upstream và **bác**. Lý do gọn: *cập nhật hồ sơ cây hôm
+nay **không phải tx Cardano** — nó là ký Ed25519 → POST daemon → append MMR, tốn 0 ADA — còn tx neo thì vẫn
+phải đi L1 dù có head hay không*, nên không có tx L1 nào để amortise. Đầy đủ: `VeDataIO/Core:
+docs/VEDATA-MOSAIC-HYDRA-DECISION.md` §15. **Kho Strata không đổi gì vì việc này.**
+
+### 11.5 Lưu vết phương pháp — bổ sung cho §9.5
+
+- **Một ngưỡng đúng ở miền này có thể không bao giờ chạm tới ở miền khác.** Ngưỡng gom lô `depth ≥ 100`
+  đúng cho hàng đợi trộn-toàn-hệ; chuyển sang gom-theo-hộ mà vẫn đếm **cây** thì hộ 30 cây **không bao giờ
+  chạm 100** ⇒ không bao giờ nhắc ⇒ cây không bao giờ được đóng dấu. **Không lỗi nào bật ra.** Đổi miền
+  thì phải kiểm lại **trần của đại lượng**, không chỉ đổi con số.
+- **Một enum công khai có thể hứa một sự phân biệt mà backend không hiện thực** (§11.2). Trước khi để một
+  giá trị cấu hình vào API public, phải hỏi: *có đầu vào nào phân biệt được nhánh này với nhánh kia không?*
+  — cùng câu hỏi đã dùng cho hai lớp gác trùng miền ở §9.5.
+- **Cấu hình toàn cục là một giả định về số lượng chưa từng được viết ra.** `publisher_address` là `String`
+  chứ không phải hàm theo lineage — đó là câu *"hệ này chỉ có một người ghi"* nói bằng kiểu dữ liệu, và nó
+  im lặng cho tới ngày giả định đổi.
