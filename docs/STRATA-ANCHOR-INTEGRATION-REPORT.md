@@ -833,6 +833,35 @@ buộc vận hành (`N-1`, `K-1`, luật thứ tự F-2/beacon, trần lô thậ
 Vì sao vế thứ hai của điều kiện thu hồi tồn tại: một đường thay thế chưa từng chạy thật
 thì chỉ **trông như** tồn tại — đúng bài học fallback L1 của M16.
 
+### 12.8 🪤 Chỉ lộ khi CHẠY THẬT — `no_anchor` xem trước mà **bỏ qua gác đắt nhất**
+
+Phát hiện ở lượt chạy Preprod 2026-08-20, không phát hiện được khi đọc mã.
+
+Đường neo có **hai** gác chống tụt-lùi-seq nằm ở hai chỗ:
+
+| Gác | Ở đâu | Đọc gì |
+|---|---|---|
+| gương daemon | `routes.rs` — `g.anchored` | trạng thái **trong tiến trình** |
+| gác thật | `settlement.rs:406-427` `publish_batch` | **on-chain**, qua `resolve_many` |
+
+Nhánh `no_anchor` chỉ đi qua gác thứ nhất rồi trả sớm. Hai gác lệch nhau ở đúng ca nguy
+hiểm: **daemon vừa khởi động (gương rỗng) trong khi trên chuỗi ref đã ở `seq` cao hơn**.
+Khi ấy `no_anchor` trả *"lô ổn"*, còn lượt neo thật trả `RollbackAttempt`.
+
+Hậu quả không dừng ở một câu trả lời sai: bên gọi dùng `no_anchor` để **tìm ref hỏng**
+(coordinator `quarantine_probe` của Mosaic) sẽ kết luận *"không ref nào hỏng khi đứng
+riêng"* rồi thử lại **y nguyên lô đó**, mãi mãi. Đúng lúc cần một câu trả lời thì nó nói
+điều dễ chịu nhất.
+
+**Vá:** nhánh `no_anchor` nay chạy `sink.resolve_many()` và áp cùng phép so `seq` như
+`publish_batch`. Kèm `AnchorSink::resolve_many` lên **trait** (mặc định lặp `resolve`;
+`SettlementSink` ghi đè bằng một lượt quét cho cả lô) — nếu để mặc định lặp thì một lô 74
+ref là 74 lượt quét.
+
+> **Luật rút ra:** một cửa *"xem trước"* phải chạy **đúng tập gác** mà cửa thật chạy. Chạy
+> ít hơn thì nó không phải bản xem trước, nó là **một câu trả lời khác** — và nó sẽ được
+> tin ở đúng lúc người ta cần sự thật nhất.
+
 ### 12.6 Lưu vết phương pháp — bổ sung cho §11.5
 
 - **Một trần đặt "cho khớp bậc với bên kia" sẽ âm thầm trở thành trần THẬT của cả hệ.** `8 KiB` ở

@@ -24,7 +24,8 @@
 //!   cargo run -p lampnet-anchor-io --example orilife_e2e
 //! ```
 //!
-//! ENV: `STRATA_URL` (mặc định `http://127.0.0.1:6690`) · `SIM_TREES` (mặc định 3) ·
+//! ENV: `STRATA_URL` (mặc định `http://127.0.0.1:6690`) · `SIM_NO_ANCHOR=1` (chỉ tạo
+//! lineage, KHÔNG neo — nhường vai quyết-lô cho coordinator thật) · `SIM_TREES` (mặc định 3) ·
 //! `SIM_VERSIONS` số version nối thêm mỗi cây (mặc định 1) · `SIM_SEED_BASE` (mặc định
 //! 200) · `SIM_ROUNDS` số vòng neo (mặc định 1; >1 để chạm nhánh **di chuyển** beacon).
 
@@ -195,6 +196,24 @@ fn main() -> Result<(), String> {
         println!("cây {i}: ref={ref_id} head_seq={prev_seq}");
         refs.push(ref_id);
         heads.push((seed, ph, prev_seq, prev_hash));
+    }
+
+    // `SIM_NO_ANCHOR=1`: **không** neo ở đây — nhường vai quyết-lô cho coordinator
+    // thật (`VeDataIO/Core: mosaic-anchor-coordinator`). Ví dụ này khi đó chỉ còn
+    // đóng vai OriLife: tạo lineage + ký version.
+    //
+    // Vì sao cần cờ này thay vì sửa ví dụ: chừng nào ví dụ **tự** bắn lô thì mọi lượt
+    // chạy đầu-cuối vẫn đang nghiệm thu một coordinator giả. Cờ này là chỗ tháo vai
+    // đó ra để coordinator thật đứng vào.
+    if std::env::var("SIM_NO_ANCHOR").is_ok_and(|v| v == "1") {
+        println!(
+            "\nSIM_NO_ANCHOR=1 — KHÔNG neo ở đây. {} ref đang chờ, để coordinator quyết lô.",
+            refs.len()
+        );
+        for r in &refs {
+            println!("  ref = {r}");
+        }
+        return Ok(());
     }
 
     // ── neo LÔ: vai `BatchCoordinator` — quyết lô gồm những ref nào ────────────

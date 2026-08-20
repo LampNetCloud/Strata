@@ -1287,3 +1287,39 @@ async fn dirty_limit_0_bi_tu_choi() {
         "limit=0 im lặng trả rỗng là cách hàng đợi tự tắt mà không ai biết"
     );
 }
+
+/// Xem trước (`no_anchor`) phải chạy **đủ** gác on-chain, không chỉ gương của daemon.
+///
+/// Ca sinh ra bài này (chạy thật Preprod 2026-08-20): daemon vừa khởi động nên gương
+/// `anchored` rỗng, còn trên chuỗi ref đã ở `seq` cao hơn. Bản đầu của `no_anchor` trả
+/// "lô ổn", lượt neo thật thì `RollbackAttempt` — và bên gọi dùng `no_anchor` để **tìm
+/// ref hỏng** kết luận *"không ref nào hỏng"* rồi thử lại y nguyên, mãi mãi.
+#[tokio::test]
+async fn no_anchor_phat_hien_rollback_on_chain_du_guong_daemon_rong() {
+    let sink = Arc::new(MemorySink::new());
+    let (app, policy) = app_with(sink.clone());
+    let (r, _) = create_ok(&app, &policy).await;
+
+    // Trên chuỗi đã có anchor seq CAO HƠN head hiện tại — dựng thẳng vào sink, KHÔNG
+    // đi qua daemon, đúng hình dạng "daemon vừa restart, gương rỗng".
+    let raw = lampnet_strata::refid::decode_ref_id(&r).unwrap();
+    sink.seed(lampnet_strata::StrataAnchor {
+        ref_id: raw,
+        head_version_hash: [0xAA; 32],
+        mmr_root: [0xBB; 32],
+        seq: 9,
+    });
+
+    let (st, body) = call(
+        &app,
+        "POST",
+        "/v1/strata/_anchor_batch",
+        Some(json!({ "refs": [r], "priority": "no_anchor" })),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::CONFLICT,
+        "xem trước phải báo rollback chứ không được nói lô ổn: {body}"
+    );
+}

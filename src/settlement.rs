@@ -606,6 +606,11 @@ impl<Q: ChainQuery, S: Submitter> AnchorSink for SettlementSink<Q, S> {
         self.publish_batch(std::slice::from_ref(anchor))
     }
 
+    /// Ghi đè mặc định của trait: một lượt quét cho **cả lô** thay vì N lượt.
+    fn resolve_many(&self, ref_ids: &[Hash32]) -> Result<Vec<StrataAnchor>, AnchorError> {
+        SettlementSink::resolve_many(self, ref_ids)
+    }
+
     fn resolve(&self, ref_id: &Hash32) -> Result<Option<StrataAnchor>, AnchorError> {
         self.ensure_configured()?;
         match &self.cfg.beacon_policy {

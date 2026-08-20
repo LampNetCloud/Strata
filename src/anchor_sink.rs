@@ -93,6 +93,23 @@ pub trait AnchorSink {
     /// Đọc anchor mới nhất on-chain cho `ref_id`. `None` nếu chưa neo bao giờ.
     fn resolve(&self, ref_id: &Hash32) -> Result<Option<StrataAnchor>, AnchorError>;
 
+    /// [`resolve`](AnchorSink::resolve) cho **nhiều** `ref_id`. Chỉ trả những ref
+    /// **đã** có anchor on-chain (ref chưa neo bao giờ thì vắng mặt, không phải
+    /// `None` trong danh sách).
+    ///
+    /// Có mặt trên trait vì đường **xem trước** cần hỏi cả lô: mặc định ở đây lặp
+    /// `resolve` (đúng nhưng tốn N lượt quét), còn backend nào quét được một lượt
+    /// cho cả lô thì **phải** ghi đè — `SettlementSink` làm vậy.
+    fn resolve_many(&self, ref_ids: &[Hash32]) -> Result<Vec<StrataAnchor>, AnchorError> {
+        let mut out = Vec::new();
+        for id in ref_ids {
+            if let Some(a) = self.resolve(id)? {
+                out.push(a);
+            }
+        }
+        Ok(out)
+    }
+
     /// Đẩy **một lô** anchor trong **một** tx. Trả một biên nhận cho cả lô, hoặc
     /// `Ok(None)` khi mọi anchor trong lô đã neo idempotent.
     ///
