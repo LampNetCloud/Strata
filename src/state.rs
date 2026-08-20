@@ -14,6 +14,39 @@
 //! KHÔNG copy lá cuối — carry lên tầng trên (đối xứng với MMR carry, INV-E8).
 //! Proof một trường chỉ lộ `value_cid + fvh + sibling-hash`; KHÔNG lộ key/value
 //! trường khác (sibling đã băm).
+//!
+//! # Làm mù (blinding) — `Strata-Math.md` §6.3
+//!
+//! `Strata-Math.md:292` **không đòi** salt: nó xếp blinding vào *"giải pháp khi cần
+//! giấu cả số trường và chống so-khớp"*, và đóng bằng *"đánh đổi có chủ đích… khi cần
+//! kín hơn thì bật padding + blinding"*. Tức đây là **tuỳ chọn có điều kiện**.
+//!
+//! **Nhưng hồ sơ cây là đúng điều kiện kích hoạt.** Các trường *"đã phun thuốc:
+//! có/không"*, *"giai đoạn: ra hoa"* có **miền nhỏ**: `fvh` của chúng dò cạn được bằng
+//! vét cạn tiền ảnh, và §6.3 còn nêu thêm chuyện so-khớp *"có đổi / không đổi"* giữa
+//! hai proof cùng vị trí. Trước đợt này [`fval_hash`] **không nhận salt**, nên lối
+//! thoát mà spec chừa sẵn **không có cách nào bật lên**. Vấn đề không phải *"code lệch
+//! spec"*; vấn đề là một tuỳ chọn không xây được thì trên thực tế là **không tồn tại**.
+//!
+//! ## Một chỗ đi khác câu chữ spec — và vì sao
+//!
+//! §6.3 viết `fvh_i = H_dom(TAG, salt_i ‖ field_value_bytes)`. Nối trần như vậy là
+//! **nhập nhằng biên**: `(salt="ab", value="c")` và `(salt="a", value="bc")` cho **cùng
+//! một `fvh`**. Mà cả hai đều do **người ghi** chọn, còn `FieldProof` thì công khai
+//! `salt` + `value` để verifier băm lại ⇒ người ghi có thể **đổi lời khai về giá trị**
+//! sau khi đã ký, chỉ bằng cách dịch biên. Đúng miền dữ liệu đang cần blinding (chuỗi
+//! ngắn, ít entropy) thì việc dựng hai cặp cùng có nghĩa là dễ.
+//!
+//! ⇒ Ở đây salt được **length-prefix**: `u32_be(len(salt)) ‖ salt ‖ value`. Salt RỖNG
+//! giữ **nguyên xi** dạng cũ (`H_dom(TAG, value)`) nên mọi `state_root` đã ký từ trước
+//! **không đổi một bit**. Đây là điểm cần anh Đức xác nhận vào spec — ghi ra ở đây
+//! thay vì sửa lặng lẽ.
+//!
+//! ## Cái đợt này CHƯA làm, nói thẳng
+//!
+//! Lõi đã **bật được** blinding. Chưa có: daemon lưu salt theo từng version, schema
+//! HTTP mang salt, và chỗ chọn-tham-gia theo chính sách trường. Chừng nào chưa có ba
+//! thứ đó thì blinding **chưa chạy trong sản xuất** — chỉ là đã có đường để bật.
 
 use crate::u32_be;
 use lampnet_merkle_anchor::hash::{Hash32, h_dom};
@@ -25,9 +58,33 @@ pub const TAG_STATE_LEAF: &str = "LN/STRATA/state/leaf/v1";
 /// Tag state internal node.
 pub const TAG_STATE_NODE: &str = "LN/STRATA/state/node/v1";
 
-/// `fvh = H_dom(TAG_STATE_FVAL, field_value_bytes)`.
+/// `fvh = H_dom(TAG_STATE_FVAL, field_value_bytes)` — dạng **không làm mù**.
+///
+/// Giữ nguyên byte-for-byte hành vi cũ: đây là dạng mà mọi `state_root` đã ký từ
+/// trước dựa vào.
 pub fn fval_hash(field_value_bytes: &[u8]) -> Hash32 {
     h_dom(TAG_STATE_FVAL, field_value_bytes)
+}
+
+/// `fvh` có **làm mù** (§6.3): `H_dom(TAG_STATE_FVAL, u32_be(len(salt)) ‖ salt ‖ value)`.
+///
+/// - `salt` **rỗng** ⇒ trả về đúng [`fval_hash`] — không có nhánh nào đổi lịch sử.
+/// - `salt` khác rỗng ⇒ length-prefix, **không** nối trần như câu chữ §6.3: nối trần
+///   cho `(salt="ab", value="c")` và `(salt="a", value="bc")` **cùng một `fvh`**, mà
+///   cả hai đều do người ghi chọn ⇒ người ghi đổi được lời khai về giá trị sau khi đã
+///   ký. Xem doc đầu module.
+///
+/// Salt phải **ngẫu nhiên mỗi version** mới chặn được so-khớp liên-proof; một salt cố
+/// định chỉ đổi bảng từ điển chứ không phá được nó.
+pub fn fval_hash_salted(salt: &[u8], field_value_bytes: &[u8]) -> Hash32 {
+    if salt.is_empty() {
+        return fval_hash(field_value_bytes);
+    }
+    let mut buf = Vec::with_capacity(4 + salt.len() + field_value_bytes.len());
+    buf.extend_from_slice(&u32_be(salt.len()));
+    buf.extend_from_slice(salt);
+    buf.extend_from_slice(field_value_bytes);
+    h_dom(TAG_STATE_FVAL, &buf)
 }
 
 /// `leaf = H_dom(TAG_STATE_LEAF, u32_be(len(key)) ‖ key ‖ fvh)`.
@@ -73,11 +130,49 @@ pub fn find_duplicate_key(fields: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<u8>> {
         .map(|w| w[0].to_vec())
 }
 
+/// Một trường kèm salt làm mù. `salt` rỗng = không làm mù (dạng cũ).
+///
+/// Kiểu riêng thay vì `(Vec<u8>, Vec<u8>, Vec<u8>)` vì ba `Vec<u8>` cạnh nhau thì
+/// hoán vị nhầm hai cái là **đổi `state_root` mà vẫn biên dịch**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaltedField {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+    pub salt: Vec<u8>,
+}
+
+impl SaltedField {
+    /// Trường KHÔNG làm mù — dạng mọi đường ghi hôm nay đang dùng.
+    pub fn plain(key: Vec<u8>, value: Vec<u8>) -> Self {
+        Self {
+            key,
+            value,
+            salt: Vec::new(),
+        }
+    }
+
+    pub fn new(key: Vec<u8>, value: Vec<u8>, salt: Vec<u8>) -> Self {
+        Self { key, value, salt }
+    }
+
+    fn fvh(&self) -> Hash32 {
+        fval_hash_salted(&self.salt, &self.value)
+    }
+}
+
+/// Nâng danh sách `(key, value)` thành [`SaltedField`] với salt rỗng.
+pub fn plain_fields(fields: &[(Vec<u8>, Vec<u8>)]) -> Vec<SaltedField> {
+    fields
+        .iter()
+        .map(|(k, v)| SaltedField::plain(k.clone(), v.clone()))
+        .collect()
+}
+
 /// Sắp các field theo key tăng dần và trả về leaf-hash tương ứng (tất định).
-fn sorted_leaves(fields: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Hash32)> {
+fn sorted_leaves(fields: &[SaltedField]) -> Vec<(Vec<u8>, Hash32)> {
     let mut v: Vec<(Vec<u8>, Hash32)> = fields
         .iter()
-        .map(|(k, val)| (k.clone(), leaf_hash(k, &fval_hash(val))))
+        .map(|f| (f.key.clone(), leaf_hash(&f.key, &f.fvh())))
         .collect();
     v.sort_by(|a, b| a.0.cmp(&b.0));
     v
@@ -97,8 +192,15 @@ fn fold_level(level: &[Hash32]) -> Vec<Hash32> {
     next
 }
 
-/// `build_state_root(fields)` — state_root field-level (§3.6). `fields` rỗng → 0^32.
+/// `build_state_root(fields)` — state_root field-level (§3.6), **không làm mù**.
+/// `fields` rỗng → 0^32.
 pub fn build_state_root(fields: &[(Vec<u8>, Vec<u8>)]) -> Hash32 {
+    build_state_root_salted(&plain_fields(fields))
+}
+
+/// [`build_state_root`] với salt theo từng trường (§6.3). Salt rỗng ở **mọi** trường
+/// ⇒ kết quả **trùng từng bit** với `build_state_root`.
+pub fn build_state_root_salted(fields: &[SaltedField]) -> Hash32 {
     let leaves: Vec<Hash32> = sorted_leaves(fields).into_iter().map(|(_, h)| h).collect();
     if leaves.is_empty() {
         return [0u8; 32];
@@ -119,8 +221,16 @@ pub struct FieldProof {
     /// `field_value_bytes` công khai (content_cid THUẦN hoặc giá trị inline — CHỐT-4).
     /// Verifier băm lại để so `fvh`.
     pub value: Vec<u8>,
-    /// `fvh` của trường (tiện cho verifier; cũng tính lại được từ `value`).
+    /// `fvh` của trường (tiện cho verifier; cũng tính lại được từ `value` + `salt`).
     pub fvh: Hash32,
+    /// Salt làm mù (§6.3). **Rỗng = không làm mù** — dạng của mọi proof hôm nay.
+    ///
+    /// Phải công khai trong proof: verifier băm lại `value` để so `fvh`, nên không có
+    /// salt thì không verify được. Điều đó **không** phá tính chất blinding: cái
+    /// blinding chặn là bên **thứ ba** đọc `fvh` của trường **khác** (sibling) rồi dò
+    /// cạn miền nhỏ hoặc so khớp giữa hai proof. Người đã được đưa proof thì vốn được
+    /// biết chính trường đó.
+    pub salt: Vec<u8>,
     /// Đường anh em từ lá lên root: `(sibling_hash, sibling_is_right)`.
     /// `sibling_is_right == true` ⇒ nút hiện tại là con TRÁI.
     pub siblings: Vec<(Hash32, bool)>,
@@ -128,10 +238,17 @@ pub struct FieldProof {
     pub state_root: Hash32,
 }
 
-/// Sinh field-proof cho `key`. Trả `None` nếu key không có trong `fields`.
+/// Sinh field-proof cho `key` (không làm mù). Trả `None` nếu key không có.
 pub fn prove_field(fields: &[(Vec<u8>, Vec<u8>)], key: &[u8]) -> Option<FieldProof> {
-    let value = fields.iter().find(|(k, _)| k == key)?.1.clone();
-    let fvh = fval_hash(&value);
+    prove_field_salted(&plain_fields(fields), key)
+}
+
+/// [`prove_field`] trên tập trường có salt (§6.3).
+pub fn prove_field_salted(fields: &[SaltedField], key: &[u8]) -> Option<FieldProof> {
+    let target = fields.iter().find(|f| f.key == key)?;
+    let value = target.value.clone();
+    let salt = target.salt.clone();
+    let fvh = target.fvh();
 
     let leaves: Vec<Hash32> = sorted_leaves(fields).into_iter().map(|(_, h)| h).collect();
     // Vị trí của leaf đang chứng minh (key duy nhất sau khi caller bảo đảm; nếu trùng
@@ -160,16 +277,18 @@ pub fn prove_field(fields: &[(Vec<u8>, Vec<u8>)], key: &[u8]) -> Option<FieldPro
         key: key.to_vec(),
         value,
         fvh,
+        salt,
         siblings,
-        state_root: build_state_root(fields),
+        state_root: build_state_root_salted(fields),
     })
 }
 
 /// Verify field-proof: tính lại root từ `value` + đường anh em, so `state_root`.
 /// INV-E6: không cần biết trường khác — chỉ dùng sibling-hash.
 pub fn verify_field_proof(proof: &FieldProof) -> bool {
-    // 1. fvh phải khớp băm của value công khai (chống khai man fvh).
-    if fval_hash(&proof.value) != proof.fvh {
+    // 1. fvh phải khớp băm của value công khai (chống khai man fvh). Có salt thì băm
+    //    theo dạng làm mù — salt rỗng rơi về đúng dạng cũ.
+    if fval_hash_salted(&proof.salt, &proof.value) != proof.fvh {
         return false;
     }
     // 2. Tính lại từ leaf lên root.
@@ -333,5 +452,104 @@ mod tests {
         // Và cả hai đều bị gác bắt, nên không đường nào trong hai đường trên tới được chuỗi.
         assert!(find_duplicate_key(&a).is_some());
         assert!(find_duplicate_key(&b).is_some());
+    }
+}
+
+#[cfg(test)]
+mod blinding_tests {
+    use super::*;
+
+    fn plain() -> Vec<(Vec<u8>, Vec<u8>)> {
+        vec![
+            (b"sprayed".to_vec(), b"yes".to_vec()),
+            (b"stage".to_vec(), b"flowering".to_vec()),
+        ]
+    }
+
+    /// Salt rỗng ⇒ **không đổi một bit** so với đường cũ. Đây là bài quan trọng nhất
+    /// của cả tính năng: `state_root` nằm trong `version_hash` **đã được ký**, nên
+    /// một thay đổi làm lệch root là làm hỏng chữ ký của toàn bộ lịch sử.
+    #[test]
+    fn salt_rong_khong_doi_root_cu() {
+        let f = plain();
+        assert_eq!(
+            build_state_root(&f),
+            build_state_root_salted(&plain_fields(&f))
+        );
+        assert_eq!(fval_hash_salted(&[], b"yes"), fval_hash(b"yes"));
+    }
+
+    /// Làm mù phải **thật sự** đổi commitment — nếu không thì cờ salt chỉ là trang trí.
+    #[test]
+    fn salt_doi_fvh_va_doi_root() {
+        assert_ne!(fval_hash_salted(b"s1", b"yes"), fval_hash(b"yes"));
+        assert_ne!(
+            fval_hash_salted(b"s1", b"yes"),
+            fval_hash_salted(b"s2", b"yes"),
+            "cùng giá trị, khác salt ⇒ khác fvh — đây chính là thứ chặn so-khớp \
+             liên-proof và tấn công từ điển trên trường boolean"
+        );
+
+        let salted = vec![
+            SaltedField::new(b"sprayed".to_vec(), b"yes".to_vec(), b"s1".to_vec()),
+            SaltedField::new(b"stage".to_vec(), b"flowering".to_vec(), b"s2".to_vec()),
+        ];
+        assert_ne!(build_state_root(&plain()), build_state_root_salted(&salted));
+    }
+
+    /// 🔺 Chỗ đi khác câu chữ `Strata-Math §6.3`: nối trần `salt ‖ value` cho phép
+    /// **dịch biên**, tức người ghi đổi được lời khai về giá trị sau khi đã ký.
+    ///
+    /// Length-prefix chặn đúng chỗ đó. Bài này sẽ **đỏ** nếu có ai "sửa cho khớp
+    /// spec" bằng cách bỏ prefix đi.
+    #[test]
+    fn nhap_nhang_bien_salt_value_bi_chan() {
+        assert_ne!(
+            fval_hash_salted(b"ab", b"c"),
+            fval_hash_salted(b"a", b"bc"),
+            "nối trần sẽ cho hai cặp này CÙNG một fvh — và cả hai đều do người ghi chọn"
+        );
+    }
+
+    /// Proof mang salt thì verify được; khai sai salt thì **đỏ**.
+    ///
+    /// Vế thứ hai mới là vế đáng giá: thiếu nó thì một verifier bỏ qua salt hoàn toàn
+    /// vẫn xanh, và blinding trở thành thứ chỉ tồn tại ở phía người ghi.
+    #[test]
+    fn proof_co_salt_verify_duoc_va_sai_salt_thi_do() {
+        let salted = vec![
+            SaltedField::new(b"sprayed".to_vec(), b"yes".to_vec(), b"s1".to_vec()),
+            SaltedField::new(b"stage".to_vec(), b"flowering".to_vec(), b"s2".to_vec()),
+            SaltedField::new(b"lot".to_vec(), b"A17".to_vec(), b"s3".to_vec()),
+        ];
+        let p = prove_field_salted(&salted, b"sprayed").expect("có trường");
+        assert_eq!(p.salt, b"s1".to_vec());
+        assert!(verify_field_proof(&p));
+
+        let mut sai = p.clone();
+        sai.salt = b"s9".to_vec();
+        assert!(!verify_field_proof(&sai), "sai salt phải đỏ");
+
+        // Và đổi giá trị mà giữ nguyên fvh/salt cũng phải đỏ (gác cũ, không được mất).
+        let mut doi_gia_tri = p.clone();
+        doi_gia_tri.value = b"no".to_vec();
+        assert!(!verify_field_proof(&doi_gia_tri));
+    }
+
+    /// Trường miền nhỏ là ca dùng sinh ra tính năng này: không salt thì bên thứ ba
+    /// **tự dựng lại được** `fvh` từ một danh sách đoán ngắn.
+    #[test]
+    fn khong_salt_thi_mien_nho_do_can_duoc() {
+        let doan = [b"yes".to_vec(), b"no".to_vec()];
+        let that = fval_hash(b"yes");
+        assert!(
+            doan.iter().any(|g| fval_hash(g) == that),
+            "không salt: hai lần đoán là ra"
+        );
+        let that_mu = fval_hash_salted(b"salt-ngau-nhien", b"yes");
+        assert!(
+            !doan.iter().any(|g| fval_hash(g) == that_mu),
+            "có salt: cùng danh sách đoán đó không ra"
+        );
     }
 }
