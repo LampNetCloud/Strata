@@ -61,6 +61,17 @@ impl MemorySink {
     pub fn pushes(&self) -> u64 {
         *self.pushes.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// Đặt sẵn một anchor "đã có on-chain" **không** qua đường đẩy.
+    ///
+    /// Dựng đúng ca *daemon vừa restart nên gương rỗng, còn trên chuỗi ref đã ở seq
+    /// cao hơn* — ca mà mọi gác dựa vào trạng thái trong tiến trình đều không thấy.
+    pub fn seed(&self, anchor: StrataAnchor) {
+        self.anchored
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(anchor.ref_id, anchor);
+    }
 }
 
 impl AnchorSink for MemorySink {

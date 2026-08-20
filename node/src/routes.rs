@@ -23,7 +23,7 @@ use lampnet_strata::chain::{Policy, StrataChain, StrataError};
 use lampnet_strata::refid::{decode_ref_id, encode_ref_id, gen_ref_id_raw};
 use lampnet_strata::state::{build_state_root, prove_field};
 use lampnet_strata::version::{Did, Hash32, StrataVersion};
-use lampnet_strata::{AnchorPriority, AnchorSink, AuditAction, AuditEntry};
+use lampnet_strata::{AnchorError, AnchorPriority, AnchorSink, AuditAction, AuditEntry};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -822,7 +822,29 @@ fn anchor_batch_blocking(
 
     // `no_anchor` = không đẩy và KHÔNG chốt seq (§4.2) — trả về đúng những gì SẼ
     // neo, để bên gọi xem trước được lô mà không tiêu một tx nào.
+    //
+    // ⚠️ **Xem trước phải chạy ĐỦ gác, nếu không nó nói dối.** Bản đầu chỉ đi qua
+    // gương `anchored` của daemon rồi trả sớm — mà gác đắt nhất nằm ở chỗ khác:
+    // `publish_batch` đọc **on-chain** rồi so `seq`. Hai chỗ đó lệch nhau ở đúng ca
+    // nguy hiểm: daemon vừa restart (gương rỗng) trong khi trên chuỗi ref đã ở `seq`
+    // cao hơn. Khi ấy `no_anchor` trả "lô ổn", còn lượt neo thật thì `RollbackAttempt`
+    // — và bên gọi dùng `no_anchor` để **tìm ref hỏng** sẽ kết luận *"không ref nào
+    // hỏng"* rồi thử lại y nguyên, mãi mãi. (Phát hiện khi chạy thật Preprod
+    // 2026-08-20, không phát hiện được khi đọc mã.)
     if matches!(priority, AnchorPriority::NoAnchor) {
+        let ref_ids: Vec<Hash32> = anchors.iter().map(|a| a.ref_id).collect();
+        let on_chain = st.sink.resolve_many(&ref_ids)?;
+        for a in &anchors {
+            if let Some(c) = on_chain.iter().find(|c| c.ref_id == a.ref_id)
+                && c.seq > a.seq
+            {
+                return Err(AnchorError::RollbackAttempt {
+                    on_chain_seq: c.seq,
+                    attempted: a.seq,
+                }
+                .into());
+            }
+        }
         return Ok(AnchorBatchResp {
             anchor_txid: None,
             backend: None,
