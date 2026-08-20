@@ -397,6 +397,57 @@ pub struct AnchorResp {
     pub backend: Option<String>,
 }
 
+/// Một lineage **đang chờ neo** — phần tử của `GET /v1/strata/_dirty`.
+///
+/// Không có trường nào là bộ đếm: mọi số dưới đây **tính ra** từ trạng thái đã có
+/// (`chain` cho `head_seq`, gương `anchored` cho seq đã neo). Một bộ đếm tăng dần
+/// là *trạng thái* — lệch được, đếm trùng được, mất khi restart được; một tổng suy
+/// từ nguồn sự thật thì không.
+#[derive(Debug, Clone, Serialize)]
+pub struct DirtyRefResp {
+    /// hex32 — **cùng dạng** `AnchorResp.ref_id`, vì người đọc route này nạp thẳng
+    /// danh sách đó vào `_anchor_batch`. (Route `create`/`head` trả bech32m; trộn
+    /// hai dạng trong một đường ống là cách tự tạo lỗi phân giải.)
+    pub ref_id: String,
+    /// `author_did` của **genesis** — nhóm tự nhiên của lineage.
+    ///
+    /// ⚠️ Từ chốt 2026-08-19, đây **KHÔNG còn là ranh giới lô**: lô gom **liên hộ**,
+    /// chia theo **kích cỡ**. Trường này còn lại để báo cáo / hạn mức, và để bên
+    /// tiêu thụ ráp `lineage → địa chỉ` khi tới lúc — `ref_id` là hàm một chiều nên
+    /// không suy ngược được.
+    pub author_did: String,
+    /// `seq` của head hiện tại.
+    pub head_seq: u64,
+    /// `seq` đã neo (null = **chưa neo lần nào**).
+    pub anchored_seq: Option<u64>,
+    /// Số version chưa được neo. Chưa neo lần nào ⇒ `head_seq + 1` (tính cả genesis),
+    /// không phải `head_seq` — một chain mới chỉ có genesis vẫn là một lineage đang chờ.
+    pub pending_versions: u64,
+    /// `ts` của version **cũ nhất chưa neo** — mốc để cò tuổi (`N-1`: cận trên ≤ 24 h)
+    /// đo độ tươi của con dấu.
+    pub oldest_unanchored_ts: u64,
+}
+
+/// Kết quả `GET /v1/strata/_dirty`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DirtyResp {
+    /// Số lineage đang chờ neo (sau khi áp `limit`, nếu có).
+    pub count: usize,
+    /// Tổng version chưa neo trên toàn bộ danh sách trả về — số liệu **bậc SLA**
+    /// (độ sâu hàng đợi), KHÔNG phải cò neo.
+    pub total_pending_versions: u64,
+    /// `min(oldest_unanchored_ts)` — null khi không có gì chờ.
+    pub oldest_unanchored_ts: Option<u64>,
+    /// `true` khi `limit` đã cắt bớt danh sách. Người gọi thấy cờ này thì biết mình
+    /// **không** đang nhìn toàn cảnh — im lặng cắt là cách một hàng đợi tưởng mình
+    /// rỗng trong khi vẫn còn việc.
+    pub truncated: bool,
+    /// Cũ trước, mới sau (`oldest_unanchored_ts` tăng dần; hoà thì theo `ref_id`).
+    /// Thứ tự này là **cam kết**, không phải tình cờ: nó làm cho phép cắt `limit` lấy
+    /// đúng phần chờ lâu nhất, và làm lô tất định giữa hai lượt chạy.
+    pub refs: Vec<DirtyRefResp>,
+}
+
 impl AnchorResp {
     pub fn new(a: &StrataAnchor, txid: Option<String>, backend: Option<String>) -> Self {
         Self {
