@@ -4,6 +4,8 @@
 > **Phạm vi:** đường neo đầu-cuối từ tầng ứng dụng xuống L1 Cardano — ranh giới module, hợp đồng byte đã ghim, và các mảnh còn thiếu.
 > **Vì sao gộp một file:** ba việc dưới đây (review PR #42, trả YC-6 cho OriLife, đo khoảng trống `MosaicBackend`) đều nằm trên **cùng một mối nối**; tách file theo từng PR/issue sẽ làm mất chính bức tranh đó.
 >
+> 🔴 **§12 (2026-08-20) — BẢN CÓ HIỆU LỰC: gom lô LIÊN HỘ.** Phán quyết `VeDataIO/Specs#32` (2026-08-19) **lật ba chốt** của §11/§12 bên Core: gom **liên hộ** thay gom theo hộ · **bỏ** cò 100 lượt · **bỏ** van đáy 90 ngày (nhịp tham số hoá, cận trên ≤ 24 h). Bốn việc rơi vào kho NÀY: `fval_hash` nhận **salt** (§12.3) · route `_dirty` đổi hình dạng (§12.2) · label **674** (§12.4) · điều kiện thu hồi cửa lên **spec** (§12.5). §11 giữ nguyên làm vết; chỗ nào chỏi nhau thì **§12 thắng**.
+>
 > 🆕 **§11 (2026-08-17) — chốt GOM LÔ THEO HỘ; ba điều thuộc về kho NÀY.** Việc P0 phía Strata là route đọc `_dirty` (§11.3 — **không cần state mới**, `store.rs` đã đủ dữ liệu). Kèm hai nợ vừa lộ: `SinkConfig` chỉ biết **một publisher toàn cục** nên ví-mỗi-hộ làm vỡ (§11.1), và `AnchorPriority` có ba nhánh **không phân biệt được ở đâu** trên đường Settlement (§11.2). Phần Mosaic + số đo chi phí: `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` §12 (`VeDataIO/Core#99`).
 
 ---
@@ -549,6 +551,10 @@ vụ `/addresses/{addr}/utxos`. Preprod rớt y nguyên lỗi cũ — Blockfrost
 
 ## 11. Đợt 2026-08-17 — chốt **gom lô theo hộ**: ba điều thuộc về kho NÀY
 
+> ⛔ **CHỐT "GOM THEO HỘ" ĐÃ BỊ LẬT (2026-08-19, `VeDataIO/Specs#32`) — đọc §12 trước.** Giữ mục này
+> làm vết. Hai phần **vẫn đúng và vẫn dùng**: §11.2 (`AnchorPriority` ba nhánh không phân biệt được) và
+> §11.3 (route `_dirty` — kho này đã có sẵn dữ liệu, không cần state mới).
+
 Phiên thảo luận (không code) trên critical path đã chốt hình dạng của mảnh còn thiếu lớn nhất — **ai
 quyết lô**. Phần việc phía Mosaic + toàn bộ số đo chi phí ghi ở
 `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` **§12** (PR `VeDataIO/Core#99`); phần Hydra ở
@@ -716,3 +722,83 @@ docs/VEDATA-MOSAIC-HYDRA-DECISION.md` §15. **Kho Strata không đổi gì vì v
 - **Cấu hình toàn cục là một giả định về số lượng chưa từng được viết ra.** `publisher_address` là `String`
   chứ không phải hàm theo lineage — đó là câu *"hệ này chỉ có một người ghi"* nói bằng kiểu dữ liệu, và nó
   im lặng cho tới ngày giả định đổi.
+
+---
+
+## 12. Đợt 2026-08-19/20 — **gom lô LIÊN HỘ**: bốn việc thuộc về kho NÀY
+
+**Nguồn:** `VeDataIO/Specs#32`, comment `@GreenSun-Tech` 2026-08-19. Phần Mosaic + toàn bộ số học chi
+phí: `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` **§13**. Mục này ghi đúng phần nằm trong
+kho Strata.
+
+### 12.1 Cái gì đổi, và vì sao nó chạm tới kho này
+
+| | §11 (08-17) | **Chốt 08-19** |
+|---|---|---|
+| Ranh giới lô | `author_did` (một hộ một tx) | **kích cỡ lô** — nhiều tác giả trong một tx |
+| Cò neo | 100 lượt cập nhật/hộ | bỏ; cò là **một hồ sơ của `BatchPolicy`** (§5.3 spec kho này) |
+| Van đáy | 90 ngày | bỏ; **cận trên ≤ 24 h**, tham số hoá tại điểm cấu hình |
+
+Bằng chứng gom liên hộ **đã chạy trên kho này**: tx `b35ec3a5…` mang **30 lineage của 30 `author_did`
+khác nhau, 30 khoá Ed25519 khác nhau** — `_anchor_batch` vốn **chưa bao giờ** đòi các ref cùng tác giả
+(`node/src/routes.rs:662-747` chỉ đòi: không rỗng, không trùng ref, khoá theo thứ tự `ref_id` đã sắp).
+⇒ Phía kho này **không phải gỡ ràng buộc nào** để gom liên hộ; cái phải đổi là *ai quyết lô* ở bên Mosaic.
+
+⚠️ **Cái phải đổi ở kho này là trần lô, và nó đang chặn thấp hơn số đo của `Specs#32`.**
+`Specs#32` suy `(16384 − 272)/110 ≈ 146 anchor/tx` từ `maxTxSize`; nhưng `src/settlement.rs:366`
+`SinkConfig::max_metadatum_bytes = 8 KiB` từ chối **trước khi** cửa Mosaic kịp thấy lô, và cửa Mosaic có
+một trần cùng bậc (`door.rs:56`, cố ý trùng để hai bên từ chối cùng chỗ). ⇒ trần thật ~**74**. Muốn chạm
+146 phải nới **cả hai kho** — bảng giá chênh ~20,6 % (~22 200 → ~26 800 tADA/năm ở nhịp ngày). Hôm nay
+**giữ 8 KiB**; đã báo lại ở `Specs#32`.
+
+### 12.2 Route `_dirty` — hình dạng §11.3 **giữ nguyên**, chỉ đổi cách đọc
+
+Ba đại lượng §11.3 nêu vẫn tính từ cùng một lượt gọi, nhưng hai trong ba đổi nghĩa:
+
+| Đại lượng | §11.3 (theo hộ) | **Nay (liên hộ)** |
+|---|---|---|
+| `dirty_refs` | thành phần lô **của một hộ** | thành phần **hàng đợi toàn hệ**; lô là một lát cắt theo kích cỡ |
+| `pending_versions` | cò 100 lượt/hộ | **không còn là cò**; là số liệu bậc SLA (độ sâu hàng đợi) |
+| `oldest_unanchored_ts` | van 90 ngày | **cò tuổi** — cận trên ≤ 24 h (`N-1`) |
+
+`author_did` **vẫn phải nằm trong response**, nhưng đổi vai: hết là khoá nhóm của lô, còn là nhãn báo
+cáo / hạn mức Lamp và là chỗ P1 ráp `lineage → địa chỉ`. Lý do §11.3 nêu vẫn nguyên: `ref_id` là hàm một
+chiều, coordinator **không suy ngược được**.
+
+### 12.3 🔴 `fval_hash` không nhận salt — **lối thoát spec chừa sẵn chưa ai xây**
+
+Đây là mục `Specs#32` xếp ưu tiên cao nhất trong ba mục "nhẹ hơn", và nó phải nói lại cho đúng bản chất:
+`Strata-Math.md:292` **KHÔNG đòi** salt — nguyên văn xếp blinding vào *"Giải pháp khi cần giấu cả số
+trường và chống so-khớp"*, đóng bằng *"Đây là sự đánh đổi có chủ đích… khi cần kín hơn thì bật padding +
+blinding."* Tức đó là **tuỳ chọn có điều kiện**, không phải luật.
+
+**Nhưng hồ sơ cây đúng là điều kiện kích hoạt cái tuỳ chọn đó.** Các trường *"đã phun thuốc: có/không"*,
+*"giai đoạn: ra hoa"* đều **miền nhỏ**, dò cạn được bằng vét cạn tiền ảnh. Mà `src/state.rs:29` —
+`fval_hash(field_value_bytes)` — **không nhận salt**, nên hôm nay **không có cách nào bật nó lên**.
+
+⇒ Việc không phải *"code lệch spec"*, việc là **xây lối thoát spec đã chừa**. Ràng buộc kèm theo: bật
+salt làm đổi `state_root` ⇒ đổi `version_hash` ⇒ **không tương thích ngược** với chain đã ghi ⇒ phải là
+**chọn-tham-gia theo `Policy`**, không phải đổi hành vi mặc định.
+
+### 12.4 Label **674** — thiếu thật, rẻ, làm
+
+`spec/Strata-API.md:294` đã ghi kênh message người-đọc **674 CIP-20** cạnh label 1234; đường neo hôm nay
+**chưa phát**. Ràng buộc: 674 là *message cho người đọc*, **không** được mang dữ liệu mà đường đọc máy
+dựa vào — `resolve()` phải tiếp tục chỉ đọc 1234, nếu không ta vừa tạo một nguồn sự thật thứ hai.
+
+### 12.5 Điều kiện thu hồi cửa `strata-anchor-batch` — đưa lên spec
+
+Hôm nay điều kiện thu hồi chỉ nằm ở khối doc đầu `mosaic/l1/src/door.rs` (kho Core). Docstring là chỗ
+**người viết cửa** đọc, không phải chỗ **người dùng cửa** đọc; và cửa này là bản **chuyển tiếp** — thứ
+được trình bày như bản cuối sẽ sống rất lâu. ⇒ Điều kiện thu hồi phải nằm trong `spec/Strata-API.md`
+cạnh chỗ đã chốt *"giữ cửa riêng thay vì intake"* (`:421`).
+
+### 12.6 Lưu vết phương pháp — bổ sung cho §11.5
+
+- **Một trần đặt "cho khớp bậc với bên kia" sẽ âm thầm trở thành trần THẬT của cả hệ.** `8 KiB` ở
+  `SinkConfig` và `8 KiB` ở cửa Mosaic được đặt để *hai bên từ chối cùng chỗ* — đúng ý định, nhưng hệ quả
+  là mọi phép tính dung lượng lô ở tầng trên phải lấy nó làm trần, không lấy `maxTxSize`. Ai tính bằng
+  `maxTxSize` sẽ ra một con số **không sai công thức nhưng không với tới được**.
+- **"Spec không đòi" ≠ "không cần làm".** `fval_hash` không salt là *hợp lệ theo câu chữ*; cái sai là hệ
+  không có **đường nào** để bật blinding khi dữ liệu thật rơi vào đúng ca spec cảnh báo. Một tuỳ chọn
+  không xây được thì trên thực tế là một tuỳ chọn không tồn tại.
