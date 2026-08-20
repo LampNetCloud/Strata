@@ -221,7 +221,11 @@ fn main() -> Result<(), String> {
                     "ts": ts,
                     "sig": sign_version(seed, prev_seq + 1, prev_hash, b"\xbe\xef", &f2, ph, ts),
                 });
-                let r = post(&client, &format!("{base}/v1/strata/{ref_id}/version"), &body)?;
+                let r = post(
+                    &client,
+                    &format!("{base}/v1/strata/{ref_id}/version"),
+                    &body,
+                )?;
                 heads[i].2 = r["seq"].as_u64().ok_or("append: thiếu seq")?;
                 heads[i].3 = hex::decode(r["version_hash"].as_str().unwrap())
                     .map_err(|e| e.to_string())?

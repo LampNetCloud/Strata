@@ -65,6 +65,8 @@ pub fn router(state: AppState) -> Router {
         // Route LÔ (B1′). Tiền tố `_` giống `_canonical`: nó KHÔNG phải một `:ref`,
         // và đặt tên vậy thì không ref_id hợp lệ nào đụng vào được.
         .route("/v1/strata/_anchor_batch", post(anchor_batch))
+        // Nguồn đọc của hàng đợi neo phía Mosaic (§13.1 lớp (1)).
+        .route("/v1/strata/_dirty", get(dirty))
         .with_state(state)
 }
 
@@ -89,6 +91,12 @@ fn parse_ref(s: &str) -> ApiResult<Hash32> {
 fn body<T>(r: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
     r.map(|Json(v)| v)
         .map_err(|e| ApiError::Malformed(e.body_text()))
+}
+
+/// Query của [`dirty`]. `limit` vắng ⇒ trả tất cả.
+#[derive(Debug, Deserialize)]
+pub struct DirtyQuery {
+    pub limit: Option<usize>,
 }
 
 /// Biên lệch đồng hồ cho phép giữa `ts` client khai và đồng hồ daemon (giây).
@@ -620,6 +628,114 @@ fn anchor_blocking(
 // ────────────────────────────────────────────────────────────────────────────
 // Neo LÔ — mối nối B1′ (Mosaic quyết lô)
 // ────────────────────────────────────────────────────────────────────────────
+
+/// `GET /v1/strata/_dirty` — những lineage **đang chờ neo**, cũ trước mới sau.
+///
+/// Đây là nguồn đọc của hàng đợi neo phía Mosaic (`Mosaic-Math §13.1` lớp (1)).
+/// Kho này **không** quyết lô và **không** giữ hàng đợi — nó chỉ trả lời một câu
+/// hỏi thuần về trạng thái: *cái gì đã ghi mà chưa lên chuỗi.*
+///
+/// # Không có bộ đếm nào ở đây, và đó là chủ ý
+///
+/// `head_seq` đọc từ `chain`, `anchored_seq` đọc từ gương `anchored` mà daemon vốn
+/// đã giữ để tự kiểm rollback. Ba đại lượng bên tiêu thụ cần đều **tính ra** từ đó:
+///
+/// ```text
+/// dirty_refs           = { ref : chưa neo, hoặc head_seq > anchored_seq }
+/// total_pending        = Σ pending_versions        ← số liệu bậc SLA
+/// oldest_unanchored_ts = min(oldest_unanchored_ts) ← cò tuổi (N-1: ≤ 24 h)
+/// ```
+///
+/// Một bộ đếm tăng dần thì lệch được, đếm trùng được và mất khi restart; một tổng
+/// suy từ nguồn sự thật thì không có chỗ để lệch.
+///
+/// # `?limit=` cắt bớt, nhưng **không im lặng**
+///
+/// Cắt xong thì `truncated = true`. Một hàng đợi bị cắt âm thầm sẽ tưởng mình đã
+/// nhìn hết việc — đúng loại hỏng không có thông báo lỗi nào.
+///
+/// ⚠️ **Trả `author_did` nhưng nó KHÔNG còn là ranh giới lô** (chốt 2026-08-19):
+/// lô gom **liên hộ**, chia theo **kích cỡ**. Ai nhóm lô theo trường này là đang
+/// dựng lại một ràng buộc đã bỏ, và trả giá bằng phần cố định `0,190209 tADA` nhân
+/// với *số hộ* thay vì *số tx*.
+async fn dirty(
+    State(st): State<AppState>,
+    Query(q): Query<DirtyQuery>,
+) -> ApiResult<Json<DirtyResp>> {
+    if let Some(0) = q.limit {
+        return Err(ApiError::Malformed(
+            "limit=0 vô nghĩa: bỏ hẳn tham số nếu muốn lấy tất cả".into(),
+        ));
+    }
+    tokio::task::spawn_blocking(move || dirty_blocking(&st, q.limit))
+        .await
+        .map_err(|e| ApiError::Malformed(format!("tác vụ đọc _dirty hỏng: {e}")))
+        .map(Json)
+}
+
+/// Phần THUẦN của [`dirty`] — không async, không I/O ngoài việc khoá từng ref.
+fn dirty_blocking(st: &AppState, limit: Option<usize>) -> DirtyResp {
+    let mut out: Vec<DirtyRefResp> = Vec::new();
+
+    for (ref_id, entry) in st.store.all() {
+        let g = lock(&entry);
+        let head_seq = g.chain.head().seq;
+        let anchored_seq = g.anchored.as_ref().map(|a| a.seq);
+
+        // Chưa neo lần nào ⇒ CẢ genesis cũng đang chờ. Lấy `head_seq` làm số version
+        // chờ ở ca này là bỏ sót đúng một version, và bỏ sót ở ca **duy nhất** mà
+        // lineage chưa có gì trên chuỗi để đối chiếu.
+        let (pending_versions, first_unanchored) = match anchored_seq {
+            Some(a) if head_seq > a => (head_seq - a, a + 1),
+            Some(_) => continue, // đã neo tới head: sạch, không thuộc `_dirty`.
+            None => (head_seq + 1, 0),
+        };
+
+        // `ts` của version cũ nhất chưa neo. Version luôn tồn tại trong phạm vi này
+        // (`first_unanchored <= head_seq`), nhưng vẫn fallback về head thay vì panic:
+        // một route CHỈ ĐỌC không được là chỗ giết daemon.
+        let oldest_unanchored_ts = g
+            .chain
+            .version(first_unanchored)
+            .unwrap_or_else(|| g.chain.head())
+            .ts;
+        let author_did = g
+            .chain
+            .version(0)
+            .unwrap_or_else(|| g.chain.head())
+            .author_did;
+
+        out.push(DirtyRefResp {
+            ref_id: hex::encode(ref_id),
+            author_did: hex::encode(author_did),
+            head_seq,
+            anchored_seq,
+            pending_versions,
+            oldest_unanchored_ts,
+        });
+    }
+
+    // Cũ trước, mới sau — cam kết ở DTO. `ref_id` là khoá phá hoà để hai lượt gọi
+    // trên cùng trạng thái cho **cùng một thứ tự** (`HashMap` không có thứ tự).
+    out.sort_by(|a, b| {
+        a.oldest_unanchored_ts
+            .cmp(&b.oldest_unanchored_ts)
+            .then_with(|| a.ref_id.cmp(&b.ref_id))
+    });
+
+    let truncated = matches!(limit, Some(n) if out.len() > n);
+    if let Some(n) = limit {
+        out.truncate(n);
+    }
+
+    DirtyResp {
+        count: out.len(),
+        total_pending_versions: out.iter().map(|r| r.pending_versions).sum(),
+        oldest_unanchored_ts: out.iter().map(|r| r.oldest_unanchored_ts).min(),
+        truncated,
+        refs: out,
+    }
+}
 
 /// `POST /v1/strata/_anchor_batch` — neo N ref trong MỘT tx.
 ///

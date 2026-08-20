@@ -761,6 +761,17 @@ Ba đại lượng §11.3 nêu vẫn tính từ cùng một lượt gọi, nhưn
 | `pending_versions` | cò 100 lượt/hộ | **không còn là cò**; là số liệu bậc SLA (độ sâu hàng đợi) |
 | `oldest_unanchored_ts` | van 90 ngày | **cò tuổi** — cận trên ≤ 24 h (`N-1`) |
 
+**✅ Đã land 2026-08-20** — `GET /v1/strata/_dirty` (`node/src/routes.rs`, `dirty`/`dirty_blocking`):
+`ChainStore::all()` liệt kê ref (không giữ khoá đọc suốt lượt duyệt — route CHỈ ĐỌC không được làm
+đường ghi đứng lại), mỗi ref trả `{ref_id hex32, author_did, head_seq, anchored_seq, pending_versions,
+oldest_unanchored_ts}`, sắp **cũ trước** (`ref_id` phá hoà ⇒ tất định). `?limit=` cắt bớt nhưng đặt
+`truncated = true`; `limit=0` bị **từ chối** thay vì trả rỗng.
+
+Hai chỗ dễ sai đã canh bằng test: (a) **chưa neo lần nào ⇒ genesis cũng đang chờ**, `pending_versions =
+head_seq + 1` chứ không phải `head_seq`; (b) **mốc tuổi là version chưa neo cũ nhất, không phải
+genesis** — lấy nhầm genesis thì mọi lineage đã neo một lần sẽ luôn trông như quá hạn ⇒ cò tuổi bắn
+liên tục ⇒ mỗi lượt một tx, đúng hành vi đắt nhất.
+
 `author_did` **vẫn phải nằm trong response**, nhưng đổi vai: hết là khoá nhóm của lô, còn là nhãn báo
 cáo / hạn mức Lamp và là chỗ P1 ráp `lineage → địa chỉ`. Lý do §11.3 nêu vẫn nguyên: `ref_id` là hàm một
 chiều, coordinator **không suy ngược được**.

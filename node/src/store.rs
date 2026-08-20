@@ -94,6 +94,24 @@ impl ChainStore {
         Ok(())
     }
 
+    /// Liệt kê **mọi** ref đang giữ, kèm handle khoá riêng của từng ref.
+    ///
+    /// Trả bản sao của `Vec` chứ không giữ khoá đọc: người gọi sẽ lần lượt khoá
+    /// từng `ChainEntry` để đọc, và giữ khoá `refs` suốt quãng đó thì mọi `create`
+    /// mới bị chặn theo — một route CHỈ ĐỌC không được làm đường ghi đứng lại.
+    ///
+    /// Ảnh chụp vì thế là **nhất quán theo từng ref, không nhất quán toàn cục**:
+    /// ref mới tạo giữa chừng có thể vắng mặt. Đúng thứ người đọc cần — hàng đợi
+    /// neo lấy lại ảnh mới ở lượt poll sau, và một ref đến muộn chỉ chậm một nhịp.
+    pub fn all(&self) -> Vec<(Hash32, Arc<Mutex<ChainEntry>>)> {
+        self.refs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
+    }
+
     /// Lấy handle có khoá riêng của ref.
     pub fn get(&self, ref_id: &Hash32) -> Option<Arc<Mutex<ChainEntry>>> {
         self.refs

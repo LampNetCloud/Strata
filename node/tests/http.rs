@@ -1111,3 +1111,178 @@ async fn head_carries_everything_needed_to_append_next() {
     );
     assert_eq!(body["author_did"], hex::encode(DID));
 }
+
+// ── `_dirty` — nguồn đọc của hàng đợi neo (MB-6, chốt gom lô LIÊN HỘ) ────────
+
+/// `create` với `author_did` + nonce + ts tuỳ chọn. Chính sách một-thành-viên =
+/// người tạo, đúng mặc định của route (`policy_authors` vắng).
+async fn create_as(
+    app: &Router,
+    seed: u8,
+    did: [u8; 32],
+    nonce: u8,
+    ts: u64,
+) -> (String, Hash32, Policy) {
+    let mut policy = Policy::new();
+    policy.allow(did, sk(seed).verifying_key());
+    let fields = vec![f("diagnosis", V_A)];
+    let sig = sign_version(
+        seed,
+        0,
+        [0u8; 32],
+        b"\xca\xfe",
+        &fields,
+        did,
+        policy.policy_hash(),
+        ts,
+    );
+    let (st, body) = call(
+        app,
+        "POST",
+        "/v1/strata/create",
+        Some(json!({
+            "author_did": hex::encode(did),
+            "genesis_nonce": hex::encode([nonce; 32]),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "diagnosis", "value": V_A }],
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": ts,
+            "sig": sig
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "create: {body}");
+    let r = body["ref_id"].as_str().unwrap().to_string();
+    let vh = hex::decode(body["head_version_hash"].as_str().unwrap()).unwrap();
+    (r, vh.try_into().unwrap(), policy)
+}
+
+async fn get_dirty(app: &Router, query: &str) -> Value {
+    let (st, v) = call(app, "GET", &format!("/v1/strata/_dirty{query}"), None).await;
+    assert_eq!(st, StatusCode::OK, "_dirty: {v}");
+    v
+}
+
+/// Ca chính: hai lineage của **hai tác giả khác nhau** cùng nằm trong MỘT ảnh chụp,
+/// cũ trước mới sau.
+///
+/// Đây là hình dạng mà chốt 2026-08-19 đòi: hàng đợi **liên hộ**. Nếu route này nhóm
+/// hay lọc theo `author_did` thì bên tiêu thụ không bao giờ gom được lô liên hộ, và
+/// nó sẽ trả phần cố định `0,190209 tADA` một lần cho **mỗi hộ** thay vì mỗi tx.
+#[tokio::test]
+async fn dirty_gom_lineage_cua_nhieu_tac_gia_trong_mot_anh_chup_cu_truoc() {
+    let (app, _) = app();
+    let (r_moi, _, _) = create_as(&app, 1, DID, 0x33, 2_000).await;
+    let (r_cu, _, _) = create_as(&app, 2, DID2, 0x44, 1_000).await;
+
+    let v = get_dirty(&app, "").await;
+    assert_eq!(v["count"], 2);
+    assert_eq!(v["truncated"], false);
+    // Chưa neo lần nào ⇒ genesis cũng đang chờ ⇒ 1 version/lineage.
+    assert_eq!(v["total_pending_versions"], 2);
+    assert_eq!(v["oldest_unanchored_ts"], 1_000);
+
+    let refs = v["refs"].as_array().unwrap();
+    assert_eq!(refs[0]["oldest_unanchored_ts"], 1_000, "cũ phải đứng trước");
+    assert_eq!(refs[1]["oldest_unanchored_ts"], 2_000);
+    assert!(refs[0]["anchored_seq"].is_null(), "chưa neo ⇒ null");
+    assert_eq!(refs[0]["pending_versions"], 1);
+
+    // Hai tác giả khác nhau, cùng một ảnh chụp — điều kiện cần của lô liên hộ.
+    let authors: Vec<&str> = refs
+        .iter()
+        .map(|r| r["author_did"].as_str().unwrap())
+        .collect();
+    assert!(authors.contains(&hex::encode(DID).as_str()));
+    assert!(authors.contains(&hex::encode(DID2).as_str()));
+
+    // `ref_id` trả hex32 để nạp thẳng vào `_anchor_batch`.
+    let ids: Vec<&str> = refs.iter().map(|r| r["ref_id"].as_str().unwrap()).collect();
+    assert!(ids.iter().all(|s| s.len() == 64 && hex::decode(s).is_ok()));
+    // Và bech32 mà `create` trả về phải giải ra đúng những ref đó (không phải hai tập khác nhau).
+    for bech in [&r_cu, &r_moi] {
+        let raw = hex::encode(lampnet_strata::refid::decode_ref_id(bech).unwrap());
+        assert!(ids.contains(&raw.as_str()), "thiếu {bech} trong _dirty");
+    }
+}
+
+/// Neo tới head ⇒ **rời** `_dirty`; ghi thêm một version ⇒ **quay lại**, và mốc tuổi
+/// là `ts` của version chưa neo cũ nhất, không phải `ts` của genesis.
+///
+/// Bài này canh đúng chỗ dễ sai nhất của một hàng đợi suy-ra-từ-trạng-thái: nếu mốc
+/// tuổi lấy nhầm genesis thì mọi lineage đã neo một lần sẽ **luôn** trông như quá hạn
+/// ⇒ cò tuổi bắn liên tục ⇒ mỗi lượt một tx, đúng hành vi đắt nhất.
+#[tokio::test]
+async fn dirty_bo_ref_da_neo_va_nhan_lai_khi_co_version_moi() {
+    let (app, policy) = app();
+    let (r, vh0) = create_ok(&app, &policy).await;
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/anchor"),
+        Some(json!({ "priority": "immediate" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let v = get_dirty(&app, "").await;
+    assert_eq!(v["count"], 0, "đã neo tới head thì không còn chờ: {v}");
+    assert!(v["oldest_unanchored_ts"].is_null());
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/version"),
+        Some(append_body(1, DID, 0, vh0, 5_000, &policy, V_B)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let v = get_dirty(&app, "").await;
+    assert_eq!(v["count"], 1);
+    let d = &v["refs"][0];
+    assert_eq!(d["head_seq"], 1);
+    assert_eq!(d["anchored_seq"], 0);
+    assert_eq!(d["pending_versions"], 1);
+    assert_eq!(
+        d["oldest_unanchored_ts"], 5_000,
+        "mốc tuổi phải là version chưa neo cũ nhất (seq 1), KHÔNG phải genesis (ts 1000)"
+    );
+}
+
+/// `limit` cắt bớt nhưng **nói ra**. Cắt im lặng là cách một hàng đợi tưởng mình
+/// đã nhìn hết việc trong khi vẫn còn.
+#[tokio::test]
+async fn dirty_limit_cat_bot_va_bao_truncated() {
+    let (app, _) = app();
+    create_as(&app, 1, DID, 0x33, 3_000).await;
+    create_as(&app, 2, DID2, 0x44, 1_000).await;
+
+    let v = get_dirty(&app, "?limit=1").await;
+    assert_eq!(v["count"], 1);
+    assert_eq!(v["truncated"], true, "cắt thì phải khai: {v}");
+    assert_eq!(
+        v["refs"][0]["oldest_unanchored_ts"], 1_000,
+        "cắt phải giữ phần CHỜ LÂU NHẤT, không phải phần đầu ngẫu nhiên"
+    );
+    // Tổng cũng chỉ tính trên phần trả về — nếu không thì `count` và tổng nói hai chuyện.
+    assert_eq!(v["total_pending_versions"], 1);
+
+    let v = get_dirty(&app, "?limit=9").await;
+    assert_eq!(
+        v["truncated"], false,
+        "limit lớn hơn số ref thì không phải cắt"
+    );
+}
+
+#[tokio::test]
+async fn dirty_limit_0_bi_tu_choi() {
+    let (app, _) = app();
+    let (st, _) = call(&app, "GET", "/v1/strata/_dirty?limit=0", None).await;
+    assert_eq!(
+        st,
+        StatusCode::BAD_REQUEST,
+        "limit=0 im lặng trả rỗng là cách hàng đợi tự tắt mà không ai biết"
+    );
+}
