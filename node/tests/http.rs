@@ -269,6 +269,7 @@ async fn create_append_head_and_proofs_round_trip() {
             .unwrap()
             .try_into()
             .unwrap(),
+        salt: hex::decode(fp["salt"].as_str().unwrap()).unwrap(),
         siblings: fp["siblings"]
             .as_array()
             .unwrap()
