@@ -310,6 +310,12 @@ pub struct FieldProofResp {
     pub key: String,
     pub value: String,
     pub fvh: String,
+    /// Salt làm mù (§6.3), hex. **Rỗng = không làm mù.**
+    ///
+    /// Có mặt kể cả khi rỗng: verifier phải băm `salt ‖ value` để so `fvh`, nên một
+    /// trường vắng mặt lúc blinding được bật sẽ làm **mọi** proof đỏ ở phía client mà
+    /// nhìn từ server thì không có gì sai.
+    pub salt: String,
     pub siblings: Vec<(String, bool)>,
     pub state_root: String,
     pub version_seq: u64,
@@ -321,6 +327,7 @@ impl FieldProofResp {
             key: String::from_utf8_lossy(&p.key).into_owned(),
             value: hex::encode(&p.value),
             fvh: hex::encode(p.fvh),
+            salt: hex::encode(&p.salt),
             siblings: p
                 .siblings
                 .iter()

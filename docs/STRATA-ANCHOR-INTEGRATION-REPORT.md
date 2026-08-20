@@ -804,6 +804,34 @@ Hôm nay điều kiện thu hồi chỉ nằm ở khối doc đầu `mosaic/l1/s
 được trình bày như bản cuối sẽ sống rất lâu. ⇒ Điều kiện thu hồi phải nằm trong `spec/Strata-API.md`
 cạnh chỗ đã chốt *"giữ cửa riêng thay vì intake"* (`:421`).
 
+### 12.7 Đã dựng — salt cho `fval_hash` (mục 9) và §4.4 spec cửa (mục 7)
+
+**Mục 9 — lối thoát đã xây xong ở LÕI.** `fval_hash_salted(salt, value)`, `SaltedField`,
+`build_state_root_salted`, `prove_field_salted`, và `FieldProof.salt` (rỗng = không làm
+mù). Salt rỗng cho kết quả **trùng từng bit** với đường cũ — bài kiểm đầu tiên của tính
+năng canh đúng chỗ đó, vì `state_root` nằm trong `version_hash` **đã được ký**: một thay
+đổi làm lệch root là làm hỏng chữ ký của toàn bộ lịch sử.
+
+🔺 **Một chỗ đi khác câu chữ spec, ghi ra thay vì sửa lặng lẽ.** `Strata-Math.md:292`
+viết `fvh = H_dom(TAG, salt ‖ value)`. Nối trần như vậy **nhập nhằng biên**:
+`(salt="ab", value="c")` và `(salt="a", value="bc")` cho **cùng một `fvh`**. Cả hai đều do
+**người ghi** chọn, còn proof thì công khai `salt` + `value` để verifier băm lại ⇒ người
+ghi **đổi được lời khai về giá trị sau khi đã ký**, chỉ bằng cách dịch biên — và đúng ở
+miền dữ liệu cần blinding (chuỗi ngắn) thì dựng hai cặp cùng có nghĩa là dễ. Bản này
+**length-prefix** salt. Đây là điểm cần anh Đức xác nhận vào `Strata-Math` §6.3.
+
+⚠️ **Chưa chạy trong sản xuất, nói thẳng:** còn thiếu daemon lưu salt theo từng version,
+schema HTTP mang salt trên đường **ghi** (đường **đọc** đã có: `FieldProofResp.salt`), và
+chỗ chọn-tham-gia theo chính sách trường. Lõi **bật được** blinding; hệ thì chưa bật.
+
+**Mục 7 — `spec/Strata-API.md` §4.4 mới**: hợp đồng cửa `strata-anchor-batch` (phân vai,
+`ref_ids` không đục, vì sao có cửa riêng) + **điều kiện thu hồi normative** (hai vế: chữ
+ký owner PhoenixKey có hiệu lực **và** đường intake đã chạy thật đầu-cuối) + bảng ràng
+buộc vận hành (`N-1`, `K-1`, luật thứ tự F-2/beacon, trần lô thật ~74).
+
+Vì sao vế thứ hai của điều kiện thu hồi tồn tại: một đường thay thế chưa từng chạy thật
+thì chỉ **trông như** tồn tại — đúng bài học fallback L1 của M16.
+
 ### 12.6 Lưu vết phương pháp — bổ sung cho §11.5
 
 - **Một trần đặt "cho khớp bậc với bên kia" sẽ âm thầm trở thành trần THẬT của cả hệ.** `8 KiB` ở

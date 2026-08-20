@@ -303,6 +303,40 @@ Cadence đẩy theo `AnchorPriority` (Stamp-Strata-Mapping §4): `immediate` →
 - `MIN_LOVELACE_PER_OUTPUT = 1_500_000n` (`settle.ts:374`) áp cho backend UTxO (Mosaic A); metadata (settlement B) không khóa min-ADA.
 - **Quyết định liên-nền-tảng còn treo** (cần anh + GreenSun chốt): chọn Settlement hay Mosaic làm đường mặc định, và OriLife 1454/1455 có hội tụ về đây không. Spec này chuẩn bị interface để cả hai cắm vào; KHÔNG tự chốt backend.
 
+### §4.4 Cửa `strata-anchor-batch` — hợp đồng và **điều kiện thu hồi**
+
+> Thêm 2026-08-20 theo `VeDataIO/Specs#32` (mục *"đưa điều kiện thu hồi cửa lên spec"*). Trước đó điều kiện này chỉ nằm trong docstring `VeDataIO/Core: mosaic/l1/src/door.rs` — tức nằm ở chỗ **người viết cửa** đọc, không phải chỗ **người dùng cửa** đọc.
+
+Đường lô production đi qua một cửa HTTP riêng của Mosaic, **không** qua cửa intake chính:
+
+```
+publish_batch (kho này)  ──resolve() từng anchor (INV-E7) + encode_records──▶
+   POST /mosaic/v1/strata-anchor-batch { label, payload_cbor, ref_ids[], beacon }
+                                        ──▶ Mosaic dựng tx + ký + submit ──▶ { txid, address, policy_id }
+```
+
+**Phân vai (không được trộn):** kho này **kiểm INV-E7 và encode** — `resolve` là chain-logic và encoder giữ **một** bản; Mosaic **quyết lô** và **dựng/ký/submit tx**. Đi vòng qua route lô (Mosaic tự gom rồi submit thẳng) là **mất gác chống rollback**: lô vẫn lên chuỗi, tx vẫn confirmed, và không còn ai chặn một anchor tụt-lùi-seq — **không lỗi nào bật ra**.
+
+**`payload_cbor` không đục hoàn toàn:** `ref_ids[]` phải đi kèm ở mức cấu trúc vì beacon dựng `unit = policyId ‖ ref_id`. Cửa đối chiếu danh sách này với chính payload và **từ chối** nếu lệch.
+
+**Vì sao có cửa riêng thay vì dùng intake:** cửa intake chính đòi chữ ký owner CIP-30, mà Strata-với-tư-cách-dịch-vụ **không cầm khoá owner**. Đây là bản **CHUYỂN TIẾP**, không phải bản cuối.
+
+**Điều kiện thu hồi (normative):** cửa này **PHẢI** được gộp về cửa intake chính và biến mất khi **cả hai** điều sau đúng:
+
+1. Chữ ký owner qua **PhoenixKey** có hiệu lực trên đường ghi của Strata — tức tồn tại một `owner_signature` mà cửa intake xác minh được cho mỗi lineage;
+2. Đường lô đi qua intake đã chạy **thật đầu-cuối** trên testnet (một txid thật, `resolve()` đọc lại khớp từng byte) — điều kiện này để đường thay thế **không** ở trạng thái "chỉ trông như tồn tại".
+
+Chừng nào một trong hai chưa đạt, cửa riêng vẫn là đường chính thức; và tài liệu **không** được mô tả nó như hình dạng dài hạn. Lý do ghi điều kiện ngay tại chỗ: **một bản trung gian được trình bày như bản cuối sẽ sống rất lâu**.
+
+**Ràng buộc vận hành đi kèm cửa** (áp cho mọi bản triển khai, `VeDataIO/Specs#32`, 2026-08-19):
+
+| Mã | Ràng buộc |
+|---|---|
+| `N-1` | Nhịp bắn lô **phải tham số hoá** tại điểm cấu hình; **cận trên ≤ 24 giờ**; **CẤM** hằng nhịp bậc-tháng nằm trong mã |
+| `K-1` | Khoá vận hành chưa phân vùng theo vai (F-2) ⇒ đường neo **KHÔNG mở cho mạng thật**, chỉ testnet |
+| Thứ tự | **Phân vùng khoá xong TRƯỚC ngày bật beacon** — `policyId` là hàm của khoá ví, nên đảo thứ tự làm `resolve()` **im lặng** ngừng thấy beacon cũ |
+| Trần lô | Trần thật = `min(max_metadatum_bytes` kho này`, MAX_PAYLOAD_BYTES` cửa Mosaic`)`, hôm nay **8 KiB ⇒ ~74 anchor/tx** — **không** phải trần suy từ `maxTxSize` |
+
 ---
 
 ## §5. Composite Strata + 4 tầng lưu trữ — chi tiết build (bổ sung)
