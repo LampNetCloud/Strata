@@ -70,6 +70,15 @@ impl From<AnchorError> for ApiError {
                 current: on_chain_seq,
                 attempted,
             }),
+            // Nhảy bậc seq: client ĐANG gọi sai thứ tự, không phải backend hỏng. Nói thẳng
+            // seq nào phải neo trước để client sửa được, thay vì để nó retry mù.
+            AnchorError::SeqGap {
+                expected,
+                attempted,
+                ..
+            } => ApiError::AnchorRejected(format!(
+                "nhảy bậc seq: on-chain đòi neo seq={expected} trước, đã thử seq={attempted}"
+            )),
             // Hai lỗi fail-cứng của backend UTxO — retry vô ích, trả 502 kèm lý do.
             AnchorError::DatumTooLarge { bytes } => {
                 ApiError::AnchorRejected(format!("datum {bytes} byte vượt giới hạn tx"))

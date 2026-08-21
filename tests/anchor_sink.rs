@@ -254,6 +254,58 @@ fn s1_criteria_4_idempotent_no_double_tx() {
     assert_eq!(sink.backend().tx_count(), 1);
 }
 
+// ── #4b Mosaic-A: nhảy bậc seq bị chặn TẠI SINK, không đẩy lên chuỗi ─────────
+//
+// Validator Plutus đang chạy ép `datum_out.seq == datum_in.seq + 1`
+// (`VeDataIO/Code: mosaic/aiken/lib/strata/anchor.ak:55-57`). Trước bản vá này, sink đẩy
+// thẳng một seq nhảy bậc lên chuỗi: tx bị từ chối, nhưng head local đã tiến ⇒ mọi lần neo
+// sau đều nhảy bậc y hệt ⇒ lineage kẹt vĩnh viễn. Anh Đức chốt hướng B (2026-08-07): giữ
+// luật on-chain, sửa tầng đẩy — nên sink phải fail cứng TRƯỚC khi dựng tx.
+#[test]
+fn seq_gap_rejected_before_building_tx() {
+    let sink = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::new());
+
+    // Neo bậc đầu (lineage chưa có gì on-chain) — hợp lệ, validator không guard CREATE.
+    sink.publish(&sample_anchor(1), AnchorPriority::Immediate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sink.backend().tx_count(), 1);
+
+    // Nhảy từ 1 sang 3 → SeqGap, KHÔNG đẻ tx.
+    let err = sink
+        .publish(&sample_anchor(3), AnchorPriority::Immediate)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        AnchorError::SeqGap {
+            on_chain_seq: Some(1),
+            expected: 2,
+            attempted: 3,
+        }
+    );
+    // Fail CỨNG: retry cùng seq vẫn hỏng y hệt, không được xếp vào diện retryable.
+    assert!(!err.is_retryable());
+    assert_eq!(sink.backend().tx_count(), 1);
+
+    // Neo đúng bậc kế tiếp thì đi tiếp bình thường — bản vá không chặn đường hợp lệ.
+    sink.publish(&sample_anchor(2), AnchorPriority::Immediate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sink.backend().tx_count(), 2);
+    sink.publish(&sample_anchor(3), AnchorPriority::Immediate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sink.backend().tx_count(), 3);
+
+    // NoAnchor vẫn thoát sớm, không đụng backend dù seq nhảy bậc.
+    assert!(
+        sink.publish(&sample_anchor(99), AnchorPriority::NoAnchor)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(sink.backend().tx_count(), 3);
+}
+
 // ── #5 resolve sau append: verify version cũ dưới root ĐÃ NEO ─────────────────
 #[test]
 fn s1_criteria_5_resolve_after_append_verifies_old_root() {
