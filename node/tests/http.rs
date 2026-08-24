@@ -1323,3 +1323,150 @@ async fn no_anchor_phat_hien_rollback_on_chain_du_guong_daemon_rong() {
         "xem trước phải báo rollback chứ không được nói lô ổn: {body}"
     );
 }
+
+// ── `_settlement_window` — nguồn LÁ của luồng checkpoint toàn cục ────────────
+
+/// Sink giả có **quét được** cửa sổ: trả một tập cố định, và ghi lại cửa sổ đã hỏi.
+/// Không đụng mạng — thứ cần khoá ở tầng route là *ánh xạ sang JSON* và *mã lỗi*,
+/// còn luật quét đã có bộ kiểm riêng ở `settlement.rs`.
+struct WindowSink {
+    anchors: Vec<lampnet_strata::anchor_sink::WindowAnchor>,
+    tip: u64,
+    /// Khi bật, sink từ chối như một lượt quét không phủ hết cửa sổ.
+    reject: bool,
+}
+
+impl lampnet_strata::AnchorSink for WindowSink {
+    fn publish(
+        &self,
+        _a: &lampnet_strata::chain::StrataAnchor,
+        _p: lampnet_strata::AnchorPriority,
+    ) -> Result<Option<lampnet_strata::anchor_sink::AnchorReceipt>, lampnet_strata::AnchorError>
+    {
+        Ok(None)
+    }
+    fn resolve(
+        &self,
+        _r: &Hash32,
+    ) -> Result<Option<lampnet_strata::chain::StrataAnchor>, lampnet_strata::AnchorError> {
+        Ok(None)
+    }
+    fn scan_window(
+        &self,
+        from_slot: u64,
+        to_slot: u64,
+    ) -> Result<lampnet_strata::anchor_sink::WindowScan, lampnet_strata::AnchorError> {
+        if self.reject {
+            return Err(lampnet_strata::AnchorError::Rejected(
+                "cửa sổ CHƯA quét hết".into(),
+            ));
+        }
+        Ok(lampnet_strata::anchor_sink::WindowScan {
+            from_slot,
+            to_slot,
+            tip_slot: self.tip,
+            scanned_txs: 7,
+            anchors: self.anchors.clone(),
+        })
+    }
+}
+
+fn window_anchor(r: u8, seq: u64, slot: u64) -> lampnet_strata::anchor_sink::WindowAnchor {
+    lampnet_strata::anchor_sink::WindowAnchor {
+        anchor: lampnet_strata::chain::StrataAnchor {
+            ref_id: [r; 32],
+            head_version_hash: [r ^ 0xff; 32],
+            mmr_root: [r.wrapping_add(1); 32],
+            seq,
+        },
+        slot,
+        txid: format!("tx{r:02x}"),
+    }
+}
+
+/// Bốn trường anchor phải ra JSON **đúng thứ tự canonical** và **đúng dạng hex32** —
+/// bên tiêu thụ băm lại 104 byte `ref_id ‖ head_version_hash ‖ mmr_root ‖ seq` để
+/// dựng lá. Đây là hợp đồng byte, không phải cách trình bày.
+#[tokio::test]
+async fn settlement_window_tra_dung_hinh_dang_la() {
+    let (app, _) = app_with(Arc::new(WindowSink {
+        anchors: vec![window_anchor(0xaa, 3, 150), window_anchor(0xbb, 1, 160)],
+        tip: 900,
+        reject: false,
+    }));
+    let (st, v) = call(
+        &app,
+        "GET",
+        "/v1/strata/_settlement_window?from_slot=100&to_slot=200",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["from_slot"], 100);
+    assert_eq!(v["to_slot"], 200);
+    assert_eq!(v["tip_slot"], 900, "bên gọi cần tip để tự quyết độ sâu");
+    assert_eq!(v["scanned_txs"], 7, "giá thật của một chu kỳ, đo được");
+    assert_eq!(v["count"], 2);
+    let a = &v["anchors"][0];
+    assert_eq!(a["ref_id"], hex::encode([0xaau8; 32]));
+    assert_eq!(a["head_version_hash"], hex::encode([0x55u8; 32]));
+    assert_eq!(a["mmr_root"], hex::encode([0xabu8; 32]));
+    assert_eq!(a["seq"], 3);
+    assert_eq!(a["slot"], 150);
+    assert_eq!(a["txid"], "txaa");
+}
+
+/// Quét không phủ hết ⇒ **lỗi**, không phải danh sách ngắn. Một `root` tính trên tập
+/// thiếu vẫn hợp lệ về hình thức và vẫn chốt lên chuỗi được — không gì bật ra.
+#[tokio::test]
+async fn settlement_window_quet_thieu_thi_bao_loi_chu_khong_tra_it_hon() {
+    let (app, _) = app_with(Arc::new(WindowSink {
+        anchors: vec![],
+        tip: 900,
+        reject: true,
+    }));
+    let (st, v) = call(
+        &app,
+        "GET",
+        "/v1/strata/_settlement_window?from_slot=100&to_slot=200",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{v}");
+    assert!(v.to_string().contains("CHƯA quét hết"), "{v}");
+}
+
+/// Cửa sổ rỗng/lùi bị chặn ở **cửa**, trước khi tốn một lượt quét nào.
+#[tokio::test]
+async fn settlement_window_cua_so_rong_bi_tu_choi_400() {
+    let (app, _) = app_with(Arc::new(WindowSink {
+        anchors: vec![],
+        tip: 900,
+        reject: false,
+    }));
+    for q in ["from_slot=200&to_slot=200", "from_slot=200&to_slot=100"] {
+        let (st, v) = call(
+            &app,
+            "GET",
+            &format!("/v1/strata/_settlement_window?{q}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{q}: {v}");
+    }
+}
+
+/// Backend mặc định (`MemorySink`) **không** quét được slot ⇒ phải nói ra, không trả
+/// một chu kỳ rỗng. Rỗng là một cam kết hợp lệ; "không đọc được" thì không.
+#[tokio::test]
+async fn backend_khong_quet_duoc_slot_thi_khong_gia_vo_chu_ky_rong() {
+    let (app, _) = app();
+    let (st, v) = call(
+        &app,
+        "GET",
+        "/v1/strata/_settlement_window?from_slot=100&to_slot=200",
+        None,
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "{v}");
+}

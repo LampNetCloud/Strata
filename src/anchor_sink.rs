@@ -80,6 +80,42 @@ impl std::fmt::Display for AnchorError {
 }
 impl std::error::Error for AnchorError {}
 
+/// Một anchor **đọc lại từ chuỗi**, kèm chỗ nó nằm — đơn vị lá của luồng
+/// checkpoint toàn cục (`Specs#32` mục 10).
+///
+/// Có `slot` + `txid` vì tập lá được định nghĩa **thuần theo dữ liệu on-chain**
+/// (*"mọi record anchor `t = 1` dưới label 1234, trong tx do publisher đã pin chi, có
+/// slot ∈ `[from, to)`"*). Bên thứ ba phải **quét lại được** đúng tập đó; một cam kết
+/// mà chỉ bên ghi dựng lại được thì chỉ là chữ ký của ta lên lời khai của ta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowAnchor {
+    pub anchor: StrataAnchor,
+    /// Slot của block chứa tx.
+    pub slot: u64,
+    /// Tx đã chở record này.
+    pub txid: String,
+}
+
+/// Kết quả quét một cửa sổ slot.
+///
+/// **Không có trường `truncated`, có chủ ý.** Một lượt quét không phủ hết cửa sổ phải
+/// là **lỗi**, không phải một danh sách ngắn hơn: bên gọi sẽ tính `root` trên tập
+/// thiếu, chốt nó lên chuỗi, và không có gì bật ra — chuỗi `epoch` vẫn liên tục, cửa
+/// sổ vẫn khít, chỉ có nội dung cam kết là ít hơn sự thật.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowScan {
+    pub from_slot: u64,
+    pub to_slot: u64,
+    /// Slot của block mới nhất lúc quét — bên gọi cần nó để tự quyết cửa sổ đã đủ
+    /// **sâu** để đóng chưa (rollback). Quyết định đó KHÔNG thuộc về lượt quét.
+    pub tip_slot: u64,
+    /// Số tx đã đọc trong lượt quét (để đo giá của một chu kỳ).
+    pub scanned_txs: usize,
+    /// Anchor tìm được, **chưa khử trùng** — luật khử trùng `(ref_id, seq)` thuộc về
+    /// bên tính `root`, không thuộc về bên đọc.
+    pub anchors: Vec<WindowAnchor>,
+}
+
 /// Adapter một-đường: nhận `StrataAnchor` (đã enforce INV-E7 ở core), đẩy on-chain.
 /// Core KHÔNG biết Cardano; adapter sống ở daemon. Một trait, nhiều backend.
 pub trait AnchorSink {
@@ -108,6 +144,27 @@ pub trait AnchorSink {
             }
         }
         Ok(out)
+    }
+
+    /// Quét **mọi** anchor đã phát trong cửa sổ slot `[from_slot, to_slot)` — nguồn
+    /// lá của luồng checkpoint toàn cục.
+    ///
+    /// Vì sao nó nằm ở kho NÀY chứ không phải bên Mosaic: decoder label 1234 và luật
+    /// tin cậy (*"chỉ tin tx do publisher CHI"*) là **chain logic**, và đã có đúng
+    /// một bản ở `settlement.rs`. Dựng bản thứ hai bên Mosaic để đọc cùng byte đó là
+    /// đúng lớp lỗi `stamp_id` 32-vs-36 byte: hai encoder cho một sự thật, lệch nhau
+    /// vào ngày không ai đang nhìn.
+    ///
+    /// **Mặc định fail-closed.** Backend nào không quét được theo slot thì **nói
+    /// ra**, không trả danh sách rỗng: rỗng và "không đọc được" là hai câu trả lời
+    /// khác nhau, mà bên tính `root` thì coi rỗng là một chu kỳ hợp lệ.
+    fn scan_window(&self, from_slot: u64, to_slot: u64) -> Result<WindowScan, AnchorError> {
+        let _ = (from_slot, to_slot);
+        Err(AnchorError::Rejected(
+            "backend này không quét được cửa sổ slot (luồng checkpoint cần đường đọc \
+             on-chain có slot)"
+                .into(),
+        ))
     }
 
     /// Đẩy **một lô** anchor trong **một** tx. Trả một biên nhận cho cả lô, hoặc
