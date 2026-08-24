@@ -455,6 +455,50 @@ pub struct DirtyResp {
     pub refs: Vec<DirtyRefResp>,
 }
 
+/// Một anchor **đọc lại từ chuỗi** trong cửa sổ slot — phần tử của
+/// `GET /v1/strata/_settlement_window`.
+///
+/// Bốn trường anchor giữ **đúng thứ tự canonical** của `StrataAnchor`
+/// (`ref_id ‖ head_version_hash ‖ mmr_root ‖ seq`): bên tiêu thụ băm lại đúng 104
+/// byte đó để dựng lá checkpoint, nên thứ tự ở đây là **hợp đồng byte**, không phải
+/// một lựa chọn trình bày.
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowAnchorResp {
+    /// hex32 — cùng dạng `AnchorResp.ref_id`.
+    pub ref_id: String,
+    pub head_version_hash: String,
+    pub mmr_root: String,
+    pub seq: u64,
+    /// Slot của block chứa tx — bên đọc kiểm lại được nó thuộc cửa sổ nào.
+    pub slot: u64,
+    /// Tx đã chở record. Có nó thì lời khai *"anchor này nằm trong chu kỳ"* **tra
+    /// ngược được** tới một tx thật, thay vì phải tin daemon.
+    pub txid: String,
+}
+
+/// Kết quả `GET /v1/strata/_settlement_window`.
+///
+/// ⚠️ **Không có cờ `truncated`, có chủ ý.** Lượt quét không phủ hết cửa sổ là
+/// **lỗi** (409), không phải một danh sách ngắn hơn: bên gọi sẽ tính `root` trên tập
+/// thiếu, chốt nó lên chuỗi, và không có gì bật ra — chuỗi `epoch` vẫn liên tục, cửa
+/// sổ vẫn khít, chỉ nội dung cam kết là ít hơn sự thật. Đó đúng là loại hỏng mà
+/// luồng checkpoint sinh ra để chặn, nên nó không được xuất hiện trong chính luồng.
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowResp {
+    pub from_slot: u64,
+    pub to_slot: u64,
+    /// Slot của block mới nhất lúc quét. Bên gọi tự quyết cửa sổ đã đủ **sâu** để
+    /// đóng chưa (rủi ro rollback) — route này **không** quyết thay: độ sâu an toàn
+    /// là tham số của mạng và của khẩu vị rủi ro, không phải của phép đọc.
+    pub tip_slot: u64,
+    /// Số tx đã đọc — giá thật của một chu kỳ, đo được thay vì ước.
+    pub scanned_txs: usize,
+    pub count: usize,
+    /// **Chưa khử trùng**: hai tx cùng chở một anchor (thử lại) thì cả hai xuất
+    /// hiện. Luật khử trùng `(ref_id, seq)` thuộc bên tính `root`.
+    pub anchors: Vec<WindowAnchorResp>,
+}
+
 impl AnchorResp {
     pub fn new(a: &StrataAnchor, txid: Option<String>, backend: Option<String>) -> Self {
         Self {

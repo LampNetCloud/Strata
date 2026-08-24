@@ -19,7 +19,9 @@
 //! (chống đầu độc indexer). Idempotency §8.1b: đọc on-chain seq TRƯỚC khi build;
 //! `on_chain_seq == seq` → `Ok(None)`; `>` → [`AnchorError::RollbackAttempt`].
 
-use crate::anchor_sink::{AnchorBackend, AnchorError, AnchorPriority, AnchorReceipt, AnchorSink};
+use crate::anchor_sink::{
+    AnchorBackend, AnchorError, AnchorPriority, AnchorReceipt, AnchorSink, WindowAnchor, WindowScan,
+};
 use crate::chain::StrataAnchor;
 use crate::version::Hash32;
 use ciborium::value::{Integer, Value};
@@ -306,6 +308,26 @@ pub trait ChainQuery {
     fn tx_input_addresses(&self, txid: &str) -> Result<Vec<String>, AnchorError>;
     /// CBOR metadatum (raw bytes) của `label` trong tx; `None` nếu tx không có label.
     fn tx_metadata_cbor(&self, txid: &str, label: u64) -> Result<Option<Vec<u8>>, AnchorError>;
+    /// Slot của block chứa `txid`; `None` nếu chưa thấy tx (chưa confirm).
+    ///
+    /// Mặc định **báo không hỗ trợ** thay vì trả `None`: `None` nghĩa là *"tx chưa
+    /// lên chuỗi"*, còn *"query này không biết slot"* là một câu hoàn toàn khác — mà
+    /// bên gọi (quét cửa sổ) sẽ đọc cả hai thành "bỏ qua tx này".
+    fn tx_slot(&self, txid: &str) -> Result<Option<u64>, AnchorError> {
+        let _ = txid;
+        Err(AnchorError::Rejected(
+            "tx_slot: ChainQuery này không hỗ trợ quét theo cửa sổ slot".into(),
+        ))
+    }
+
+    /// Slot của block mới nhất. Bên gọi dùng nó để tự quyết cửa sổ đã đủ sâu để đóng
+    /// chưa — lượt quét không tự quyết thay.
+    fn tip_slot(&self) -> Result<u64, AnchorError> {
+        Err(AnchorError::Rejected(
+            "tip_slot: ChainQuery này không hỗ trợ quét theo cửa sổ slot".into(),
+        ))
+    }
+
     /// Tx hash MỚI NHẤT có đụng tới asset `unit` (`policyId` ++ `assetName`, hex);
     /// `None` nếu asset chưa từng tồn tại. Dùng cho `beacon_mode` — con-trỏ-latest theo
     /// asset thay vì quét cửa sổ địa chỉ (miễn nhiễm flood). Impl mặc định báo không hỗ
@@ -575,6 +597,92 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
         Ok(Self::fold_best_anchor(None, &cbor, ref_id))
     }
 
+    /// Quét cửa sổ slot `[from_slot, to_slot)` và trả **mọi** anchor đã phát trong
+    /// đó — nguồn lá của luồng checkpoint toàn cục.
+    ///
+    /// # Luật quét, và vì sao mỗi vế tồn tại
+    ///
+    /// - `address_txs` trả MỚI → CŨ. Tx có `slot >= to_slot` là **trên** cửa sổ ⇒
+    ///   bỏ qua rồi **đi tiếp**; tx đầu tiên có `slot < from_slot` là **dưới** cửa sổ
+    ///   ⇒ dừng, và chính nó là **bằng chứng đã phủ hết** cửa sổ.
+    /// - Chỉ tin tx do publisher **CHI** — cùng luật với `resolve`, không phải một
+    ///   luật thứ hai. Kiểm **sau** khi biết tx có label 1234, để tx không liên quan
+    ///   không tốn thêm lượt gọi nào.
+    /// - **Hết cửa sổ quét mà chưa chạm đáy ⇒ `Rejected`, KHÔNG trả danh sách
+    ///   ngắn.** Đây là gác quan trọng nhất của cả hàm: `root` tính trên tập thiếu
+    ///   vẫn là một `root` hợp lệ về hình thức, vẫn chốt lên chuỗi được, và chuỗi
+    ///   `epoch` nhìn vẫn liên tục — không có gì bật ra để nói cam kết vừa ghi ít
+    ///   hơn sự thật.
+    ///
+    /// Chi phí: `1 + n` lượt gọi cho `n` tx trong tầm quét (`address_txs` một lượt,
+    /// rồi mỗi tx: slot + metadata + input). Đó là **giá của một chu kỳ**, không phải
+    /// giá của một lô — nên nó rơi vào nhịp checkpoint, không vào đường neo.
+    pub fn scan_window(&self, from_slot: u64, to_slot: u64) -> Result<WindowScan, AnchorError> {
+        self.ensure_configured()?;
+        if to_slot <= from_slot {
+            return Err(AnchorError::Rejected(format!(
+                "cửa sổ rỗng hoặc lùi: [{from_slot}, {to_slot})"
+            )));
+        }
+        let tip_slot = self.query.tip_slot()?;
+        let txs = self
+            .query
+            .address_txs(&self.cfg.publisher_address, self.cfg.resolve_scan_limit)?;
+        let exhausted_history = txs.len() < self.cfg.resolve_scan_limit;
+
+        let mut anchors: Vec<WindowAnchor> = Vec::new();
+        let mut scanned = 0usize;
+        let mut reached_below = false;
+        for txid in &txs {
+            scanned += 1;
+            let Some(slot) = self.query.tx_slot(txid)? else {
+                // Tx chưa confirm ⇒ chưa có slot ⇒ chưa thuộc cửa sổ nào. Không
+                // phải lý do để dừng: nó nằm ở đầu danh sách (mới nhất).
+                continue;
+            };
+            if slot < from_slot {
+                reached_below = true;
+                break;
+            }
+            if slot >= to_slot {
+                continue;
+            }
+            let Some(cbor) = self.query.tx_metadata_cbor(txid, self.cfg.label)? else {
+                continue;
+            };
+            let inputs = self.query.tx_input_addresses(txid)?;
+            if !inputs.iter().any(|a| a == &self.cfg.publisher_address) {
+                continue;
+            }
+            for rec in decode_records_lenient(&cbor) {
+                if let SettlementRecord::Anchor(a) = rec {
+                    anchors.push(WindowAnchor {
+                        anchor: a,
+                        slot,
+                        txid: txid.clone(),
+                    });
+                }
+            }
+        }
+
+        if !reached_below && !exhausted_history {
+            return Err(AnchorError::Rejected(format!(
+                "cửa sổ [{from_slot}, {to_slot}) CHƯA quét hết: hết trần {} tx mà chưa chạm tx \
+                 nào dưới from_slot. Trả tập thiếu ở đây là chốt một `root` ít hơn sự thật mà \
+                 không có gì bật ra — nới `resolve_scan_limit` hoặc thu hẹp cửa sổ.",
+                self.cfg.resolve_scan_limit
+            )));
+        }
+
+        Ok(WindowScan {
+            from_slot,
+            to_slot,
+            tip_slot,
+            scanned_txs: scanned,
+            anchors,
+        })
+    }
+
     /// Gộp record CBOR của một tx vào `best` (anchor `seq` cao nhất khớp `ref_id`).
     fn fold_best_anchor(
         best: Option<StrataAnchor>,
@@ -595,6 +703,11 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
 }
 
 impl<Q: ChainQuery, S: Submitter> AnchorSink for SettlementSink<Q, S> {
+    /// Ghi đè mặc định fail-closed: backend này **quét được** theo slot.
+    fn scan_window(&self, from_slot: u64, to_slot: u64) -> Result<WindowScan, AnchorError> {
+        SettlementSink::scan_window(self, from_slot, to_slot)
+    }
+
     fn publish(
         &self,
         anchor: &StrataAnchor,
@@ -873,6 +986,9 @@ mod tests {
         /// "một lô = một lượt quét" — không đếm thì ai đó đổi `resolve_many` về
         /// vòng lặp `resolve()` và cả bộ kiểm vẫn xanh.
         scans: std::cell::Cell<usize>,
+        /// txid → slot. Vắng mặt = tx chưa confirm.
+        slots: HashMap<String, u64>,
+        tip: u64,
     }
     impl ChainQuery for MockQuery {
         fn address_txs(&self, addr: &str, limit: usize) -> Result<Vec<String>, AnchorError> {
@@ -891,6 +1007,12 @@ mod tests {
             _label: u64,
         ) -> Result<Option<Vec<u8>>, AnchorError> {
             Ok(self.meta.get(txid).cloned())
+        }
+        fn tx_slot(&self, txid: &str) -> Result<Option<u64>, AnchorError> {
+            Ok(self.slots.get(txid).copied())
+        }
+        fn tip_slot(&self) -> Result<u64, AnchorError> {
+            Ok(self.tip)
         }
     }
 
@@ -952,6 +1074,12 @@ mod tests {
         }
         fn tx_metadata_cbor(&self, txid: &str, label: u64) -> Result<Option<Vec<u8>>, AnchorError> {
             self.borrow().tx_metadata_cbor(txid, label)
+        }
+        fn tx_slot(&self, txid: &str) -> Result<Option<u64>, AnchorError> {
+            self.borrow().tx_slot(txid)
+        }
+        fn tip_slot(&self) -> Result<u64, AnchorError> {
+            self.borrow().tip_slot()
         }
     }
 
@@ -1129,6 +1257,231 @@ mod tests {
         assert!(r.is_some());
         assert_eq!(slept, vec![10, 20]); // backoff mũ 2 lần
     }
+    // ---- scan_window: nguồn lá của luồng checkpoint toàn cục ----
+
+    fn anchor_of(ref_byte: u8, seq: u64) -> StrataAnchor {
+        StrataAnchor {
+            ref_id: [ref_byte; 32],
+            head_version_hash: [ref_byte ^ 0xff; 32],
+            mmr_root: [ref_byte.wrapping_add(1); 32],
+            seq,
+        }
+    }
+
+    /// Dựng một ví publisher với `txs` = `(txid, slot, do_publisher_chi, anchors)`,
+    /// MỚI → CŨ theo đúng thứ tự truyền vào.
+    fn sink_with_window(
+        publisher: &str,
+        txs: &[(&str, Option<u64>, bool, Vec<StrataAnchor>)],
+        tip: u64,
+        scan_limit: usize,
+    ) -> SettlementSink<std::rc::Rc<RefCell<MockQuery>>, MockSubmitter> {
+        let store = std::rc::Rc::new(RefCell::new(MockQuery {
+            publisher: publisher.to_string(),
+            tip,
+            ..Default::default()
+        }));
+        {
+            let mut q = store.borrow_mut();
+            for (txid, slot, mine, anchors) in txs {
+                q.txs.push((*txid).to_string());
+                if let Some(sl) = slot {
+                    q.slots.insert((*txid).to_string(), *sl);
+                }
+                q.inputs.insert(
+                    (*txid).to_string(),
+                    vec![if *mine {
+                        publisher.to_string()
+                    } else {
+                        "addr_test1_ke_la".to_string()
+                    }],
+                );
+                let recs: Vec<SettlementRecord> = anchors
+                    .iter()
+                    .cloned()
+                    .map(SettlementRecord::Anchor)
+                    .collect();
+                q.meta.insert((*txid).to_string(), encode_records(&recs));
+            }
+        }
+        let submitter = MockSubmitter {
+            publisher: publisher.to_string(),
+            store: store.clone(),
+            fail_times: RefCell::new(0),
+        };
+        let cfg = SinkConfig {
+            publisher_address: publisher.to_string(),
+            resolve_scan_limit: scan_limit,
+            ..Default::default()
+        };
+        SettlementSink::new(cfg, store, submitter)
+    }
+
+    const PUB: &str = "addr_test1_publisher";
+
+    #[test]
+    fn scan_window_lay_dung_khoang_va_dung_bien() {
+        // Biên: `from` ĐÓNG, `to` MỞ. Hai tx đúng ở hai biên là chỗ duy nhất phân
+        // biệt được `[from, to)` với `(from, to]` — thiếu chúng thì mọi cửa sổ liền
+        // kề đều hoặc bỏ sót hoặc đếm hai lần một anchor, mà root vẫn "hợp lệ".
+        let sink = sink_with_window(
+            PUB,
+            &[
+                ("tx_tren", Some(300), true, vec![anchor_of(0xaa, 9)]),
+                ("tx_bien_tren", Some(200), true, vec![anchor_of(0xbb, 9)]),
+                ("tx_trong", Some(150), true, vec![anchor_of(0xcc, 1)]),
+                ("tx_bien_duoi", Some(100), true, vec![anchor_of(0xdd, 1)]),
+                ("tx_duoi", Some(99), true, vec![anchor_of(0xee, 1)]),
+            ],
+            400,
+            50,
+        );
+        let w = sink.scan_window(100, 200).unwrap();
+        let refs: Vec<u8> = w.anchors.iter().map(|a| a.anchor.ref_id[0]).collect();
+        assert_eq!(refs, vec![0xcc, 0xdd], "from ĐÓNG, to MỞ");
+        assert_eq!(w.tip_slot, 400);
+    }
+
+    #[test]
+    fn scan_window_bo_tx_khong_do_publisher_chi() {
+        // Cùng luật tin cậy với `resolve`: kẻ lạ phát label 1234 tới ví publisher
+        // thì record của nó KHÔNG được vào tập lá — nếu vào, người ngoài ghi thêm
+        // được vào cam kết của ta mà chỉ tốn phí một tx.
+        let sink = sink_with_window(
+            PUB,
+            &[
+                ("tx_ke_la", Some(150), false, vec![anchor_of(0xaa, 1)]),
+                ("tx_cua_ta", Some(140), true, vec![anchor_of(0xbb, 1)]),
+                ("tx_day", Some(50), true, vec![]),
+            ],
+            400,
+            50,
+        );
+        let w = sink.scan_window(100, 200).unwrap();
+        assert_eq!(w.anchors.len(), 1);
+        assert_eq!(w.anchors[0].anchor.ref_id[0], 0xbb);
+    }
+
+    /// Gác quan trọng nhất: hết trần quét mà chưa chạm tx nào **dưới** `from_slot`
+    /// ⇒ **lỗi**. Trả tập thiếu ở đây là chốt một `root` ít hơn sự thật, mà chuỗi
+    /// epoch nhìn vẫn liên tục và cửa sổ vẫn khít — không gì bật ra.
+    #[test]
+    fn quet_khong_phu_het_cua_so_phai_la_loi_khong_phai_danh_sach_ngan() {
+        let sink = sink_with_window(
+            PUB,
+            &[
+                ("t1", Some(190), true, vec![anchor_of(0xaa, 1)]),
+                ("t2", Some(180), true, vec![anchor_of(0xbb, 1)]),
+                ("t3", Some(170), true, vec![anchor_of(0xcc, 1)]),
+            ],
+            400,
+            3, // trần = đúng số tx ⇒ không chứng minh được đã tới đáy
+        );
+        let e = sink.scan_window(100, 200).unwrap_err();
+        match e {
+            AnchorError::Rejected(m) => {
+                assert!(m.contains("CHƯA quét hết"), "{m}");
+                assert!(m.contains("scan_limit") || m.contains("trần"), "{m}");
+            }
+            other => panic!("phải là Rejected, gặp {other:?}"),
+        }
+    }
+
+    /// Lịch sử ngắn hơn trần quét ⇒ đã nhìn hết đời ví ⇒ cửa sổ phủ hết, kể cả khi
+    /// không có tx nào nằm dưới `from_slot`. Không có vế này thì chu kỳ ĐẦU TIÊN —
+    /// lúc ví chưa có gì cũ hơn cửa sổ — không bao giờ đóng được.
+    #[test]
+    fn lich_su_ngan_hon_tran_thi_van_phu_het() {
+        let sink = sink_with_window(
+            PUB,
+            &[("t1", Some(150), true, vec![anchor_of(0xaa, 1)])],
+            400,
+            50,
+        );
+        let w = sink.scan_window(100, 200).unwrap();
+        assert_eq!(w.anchors.len(), 1);
+    }
+
+    /// Tx chưa confirm (chưa có slot) nằm ở đầu danh sách: **bỏ qua rồi đi tiếp**,
+    /// không được coi là đã chạm đáy — nếu dừng ở đó thì một tx đang chờ xác nhận
+    /// che khuất toàn bộ cửa sổ bên dưới.
+    #[test]
+    fn tx_chua_confirm_khong_lam_dung_lat_quet() {
+        let sink = sink_with_window(
+            PUB,
+            &[
+                ("tx_pending", None, true, vec![anchor_of(0xaa, 1)]),
+                ("t1", Some(150), true, vec![anchor_of(0xbb, 1)]),
+                ("t_day", Some(50), true, vec![]),
+            ],
+            400,
+            50,
+        );
+        let w = sink.scan_window(100, 200).unwrap();
+        assert_eq!(w.anchors.len(), 1);
+        assert_eq!(w.anchors[0].anchor.ref_id[0], 0xbb);
+    }
+
+    #[test]
+    fn cua_so_rong_hoac_lui_bi_tu_choi() {
+        let sink = sink_with_window(PUB, &[], 400, 50);
+        assert!(sink.scan_window(200, 200).is_err());
+        assert!(sink.scan_window(200, 100).is_err());
+    }
+
+    /// Backend không quét được slot phải **nói ra**. Rỗng và "không đọc được" là hai
+    /// câu khác nhau, mà bên tính `root` coi rỗng là một chu kỳ hợp lệ.
+    #[test]
+    fn backend_khong_ho_tro_thi_fail_closed_chu_khong_tra_rong() {
+        struct KhongBietSlot;
+        impl ChainQuery for KhongBietSlot {
+            fn address_txs(&self, _: &str, _: usize) -> Result<Vec<String>, AnchorError> {
+                Ok(Vec::new())
+            }
+            fn tx_input_addresses(&self, _: &str) -> Result<Vec<String>, AnchorError> {
+                Ok(Vec::new())
+            }
+            fn tx_metadata_cbor(&self, _: &str, _: u64) -> Result<Option<Vec<u8>>, AnchorError> {
+                Ok(None)
+            }
+        }
+        struct KhongSubmit;
+        impl Submitter for KhongSubmit {
+            fn submit(&self, _: &[SettlementRecord]) -> Result<SubmitOutcome, AnchorError> {
+                unreachable!()
+            }
+        }
+        let cfg = SinkConfig {
+            publisher_address: PUB.to_string(),
+            ..Default::default()
+        };
+        let sink = SettlementSink::new(cfg, KhongBietSlot, KhongSubmit);
+        assert!(matches!(
+            sink.scan_window(100, 200),
+            Err(AnchorError::Rejected(_))
+        ));
+    }
+
+    /// Hai tx cùng chở một anchor (thử lại) ⇒ lượt quét trả **cả hai**. Khử trùng là
+    /// luật của bên tính `root`, không phải của bên đọc — trộn hai việc thì bên đọc
+    /// tự quyết cái mà cam kết on-chain phụ thuộc vào.
+    #[test]
+    fn khong_khu_trung_o_tang_doc() {
+        let sink = sink_with_window(
+            PUB,
+            &[
+                ("t1", Some(150), true, vec![anchor_of(0xaa, 3)]),
+                ("t2", Some(140), true, vec![anchor_of(0xaa, 3)]),
+                ("t_day", Some(50), true, vec![]),
+            ],
+            400,
+            50,
+        );
+        let w = sink.scan_window(100, 200).unwrap();
+        assert_eq!(w.anchors.len(), 2);
+        assert_eq!(w.scanned_txs, 3);
+    }
+
     // Hợp nhất AnchoredTable (resolve Settlement → verify_resolved dùng chung) — test
     // cần chain ký thật, đặt ở `tests/settlement.rs`.
 }

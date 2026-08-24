@@ -67,6 +67,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/strata/_anchor_batch", post(anchor_batch))
         // Nguồn đọc của hàng đợi neo phía Mosaic (§13.1 lớp (1)).
         .route("/v1/strata/_dirty", get(dirty))
+        // Nguồn LÁ của luồng checkpoint toàn cục (`Specs#32` mục 10).
+        .route("/v1/strata/_settlement_window", get(settlement_window))
         .with_state(state)
 }
 
@@ -97,6 +99,17 @@ fn body<T>(r: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
 #[derive(Debug, Deserialize)]
 pub struct DirtyQuery {
     pub limit: Option<usize>,
+}
+
+/// Query của `GET /v1/strata/_settlement_window`.
+///
+/// Cả hai tham số **bắt buộc**, không có mặc định. Một cửa sổ mặc định là một cửa sổ
+/// mà bên gọi không khai — và cam kết on-chain thì phải nói rõ nó cam kết đúng quãng
+/// nào, chứ không phải quãng mà server tự chọn hôm đó.
+#[derive(Debug, Deserialize)]
+pub struct WindowQuery {
+    pub from_slot: u64,
+    pub to_slot: u64,
 }
 
 /// Biên lệch đồng hồ cho phép giữa `ts` client khai và đồng hồ daemon (giây).
@@ -735,6 +748,65 @@ fn dirty_blocking(st: &AppState, limit: Option<usize>) -> DirtyResp {
         truncated,
         refs: out,
     }
+}
+
+/// `GET /v1/strata/_settlement_window?from_slot=&to_slot=` — **nguồn lá** của luồng
+/// checkpoint toàn cục (`Specs#32` mục 10).
+///
+/// Trả mọi record anchor `t = 1` dưới label 1234, trong các tx **do publisher đã pin
+/// CHI**, có slot ∈ `[from_slot, to_slot)`.
+///
+/// # Vì sao route này nằm ở kho NÀY
+///
+/// Bên tính `root` là Mosaic, nhưng decoder label 1234 và luật tin cậy
+/// (*"chỉ tin tx do publisher chi"*) là **chain logic** và đã có **đúng một** bản ở
+/// `settlement.rs`. Dựng bản thứ hai bên Mosaic để đọc cùng byte đó là đúng lớp lỗi
+/// `stamp_id` 32-vs-36 byte: hai bộ giải mã cho một sự thật, lệch nhau vào ngày
+/// không ai đang nhìn — và ở đây "lệch" nghĩa là hai bên tính ra hai `root` khác
+/// nhau cho cùng một chu kỳ, tức cam kết on-chain trở thành không kiểm được.
+///
+/// # Fail-closed
+///
+/// Quét không phủ hết cửa sổ ⇒ **502 `AnchorRejected`**, không phải danh sách ngắn.
+/// Xem `WindowResp` cho lý do đầy đủ.
+///
+/// Route này **không** quyết cửa sổ đã đủ sâu để đóng chưa — nó trả `tip_slot` để
+/// bên gọi tự quyết. Độ sâu an toàn là tham số của mạng và của khẩu vị rủi ro; đặt
+/// nó vào phép đọc là ghim một hằng vào sai tầng.
+async fn settlement_window(
+    State(st): State<AppState>,
+    Query(q): Query<WindowQuery>,
+) -> ApiResult<Json<WindowResp>> {
+    if q.to_slot <= q.from_slot {
+        return Err(ApiError::Malformed(format!(
+            "cửa sổ rỗng hoặc lùi: [{}, {}) — `from_slot` ĐÓNG, `to_slot` MỞ",
+            q.from_slot, q.to_slot
+        )));
+    }
+    let scan = tokio::task::spawn_blocking(move || st.sink.scan_window(q.from_slot, q.to_slot))
+        .await
+        .map_err(|e| ApiError::Malformed(format!("tác vụ quét cửa sổ hỏng: {e}")))??;
+
+    let anchors: Vec<WindowAnchorResp> = scan
+        .anchors
+        .iter()
+        .map(|w| WindowAnchorResp {
+            ref_id: hex::encode(w.anchor.ref_id),
+            head_version_hash: hex::encode(w.anchor.head_version_hash),
+            mmr_root: hex::encode(w.anchor.mmr_root),
+            seq: w.anchor.seq,
+            slot: w.slot,
+            txid: w.txid.clone(),
+        })
+        .collect();
+    Ok(Json(WindowResp {
+        from_slot: scan.from_slot,
+        to_slot: scan.to_slot,
+        tip_slot: scan.tip_slot,
+        scanned_txs: scan.scanned_txs,
+        count: anchors.len(),
+        anchors,
+    }))
 }
 
 /// `POST /v1/strata/_anchor_batch` — neo N ref trong MỘT tx.

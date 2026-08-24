@@ -195,6 +195,32 @@ impl ChainQuery for BlockfrostQuery {
         Ok(out)
     }
 
+    /// `/txs/{hash}` → `slot`. 404 = tx chưa lên chuỗi ⇒ `None`.
+    ///
+    /// Một lượt gọi riêng cho mỗi tx: `/addresses/{addr}/transactions` trả
+    /// `block_height` + `block_time` nhưng **không** trả slot, và cửa sổ checkpoint
+    /// được định nghĩa theo **slot** (đơn vị mà datum on-chain mang). Quy đổi
+    /// height/time sang slot ở tầng này là đưa một phép ước vào chỗ đang cần một
+    /// phép so chính xác.
+    fn tx_slot(&self, txid: &str) -> Result<Option<u64>, AnchorError> {
+        let Some(v) = self.get_json(&format!("/txs/{txid}"))? else {
+            return Ok(None);
+        };
+        Ok(v.get("slot").and_then(|s| s.as_u64()))
+    }
+
+    /// `/blocks/latest` → `slot`.
+    fn tip_slot(&self) -> Result<u64, AnchorError> {
+        let Some(v) = self.get_json("/blocks/latest")? else {
+            return Err(AnchorError::Network(
+                "/blocks/latest trả 404 — indexer chưa sẵn sàng".into(),
+            ));
+        };
+        v.get("slot")
+            .and_then(|s| s.as_u64())
+            .ok_or_else(|| AnchorError::Network("/blocks/latest thiếu trường `slot`".into()))
+    }
+
     fn asset_latest_tx(&self, unit: &str) -> Result<Option<String>, AnchorError> {
         // /assets/{unit}/transactions?order=desc → tx đụng asset, MỚI→CŨ. Phần tử đầu =
         // lần di chuyển beacon gần nhất. 404 = asset chưa từng tồn tại → chưa neo.
