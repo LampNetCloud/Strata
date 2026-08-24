@@ -871,3 +871,68 @@ ref là 74 lượt quét.
 - **"Spec không đòi" ≠ "không cần làm".** `fval_hash` không salt là *hợp lệ theo câu chữ*; cái sai là hệ
   không có **đường nào** để bật blinding khi dữ liệu thật rơi vào đúng ca spec cảnh báo. Một tuỳ chọn
   không xây được thì trên thực tế là một tuỳ chọn không tồn tại.
+
+## 13. Đợt 2026-08-24 — nguồn LÁ của checkpoint toàn cục thuộc kho NÀY
+
+Phần Mosaic + số học: `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` **§14**.
+
+### 13.1 Vì sao đường đọc theo cửa sổ slot nằm ở kho này
+
+`SEAM-REPORT` §13.16 để lại ba mảnh cho luồng checkpoint, mảnh đầu là *"nguồn lá quét
+chuỗi theo cửa sổ slot"*, kèm một câu ràng buộc: **decoder label 1234 thuộc Strata,
+đừng dựng bản thứ hai bên Mosaic.**
+
+Lý do không phải gọn gàng kiến trúc. Tập lá được định nghĩa **thuần theo dữ liệu
+on-chain** — *"mọi record anchor `t = 1` dưới label 1234, trong tx do publisher đã pin
+CHI, có slot ∈ `[from, to)`"* — nên hai bộ giải mã cho cùng byte đó không chỉ *lệch
+nhau*, mà làm **hai bên tính ra hai `root` khác nhau cho cùng một chu kỳ**. Khi ấy cam
+kết on-chain thành thứ **không kiểm được**, tức mất đúng tính chất mà cả luồng sinh ra
+để mua. Cùng lớp lỗi `stamp_id` 32-vs-36 byte, nhưng hậu quả nặng hơn một bậc.
+
+### 13.2 Đã dựng — `GET /v1/strata/_settlement_window` (`#66`)
+
+| Mảnh | Nội dung |
+|---|---|
+| `AnchorSink::scan_window` + `WindowAnchor`/`WindowScan` | mặc định **fail-closed** |
+| `ChainQuery::tx_slot` · `tip_slot` | `BlockfrostQuery` cài `/txs/{h}` + `/blocks/latest` |
+| `SettlementSink::scan_window` | luật quét |
+| route `_settlement_window` | trả `tip_slot` + `scanned_txs` |
+
+**Luật quét:** đi MỚI → CŨ; tx **trên** cửa sổ ⇒ bỏ qua rồi **đi tiếp**; tx đầu tiên
+**dưới** `from_slot` ⇒ dừng — và chính nó là **bằng chứng đã phủ hết**.
+
+#### 🔺 Gác quan trọng nhất: quét thiếu là LỖI, không phải danh sách ngắn
+
+Hết trần quét mà chưa chạm tx nào dưới `from_slot` ⇒ `Rejected`. Vì sao nó đáng một
+gác riêng: `root` tính trên tập thiếu **vẫn hợp lệ về hình thức**, vẫn chốt lên chuỗi
+được, chuỗi `epoch` nhìn vẫn liên tục và cửa sổ vẫn khít — **không có gì bật ra** để
+nói cam kết vừa ghi ít hơn sự thật. Một luồng sinh ra để chặn *"tin khoá vĩnh viễn"*
+mà lại tự đẻ ra một cách nói dối không ai kiểm được thì nó tự huỷ.
+
+Ba vế nhỏ hơn, mỗi vế chặn một cách hỏng:
+
+- **Backend không quét được slot ⇒ nói ra, không trả rỗng.** Rỗng là một chu kỳ hợp
+  lệ; *"không đọc được"* thì không. Gộp hai câu này thì một backend cấu hình sai sinh
+  ra cả một chuỗi checkpoint toàn chu kỳ rỗng, tất cả đều "hợp lệ".
+- **Lịch sử ngắn hơn trần ⇒ vẫn phủ hết.** Thiếu vế này thì chu kỳ **đầu tiên** —
+  lúc ví chưa có gì cũ hơn cửa sổ — không bao giờ đóng được.
+- **Tx chưa confirm không làm dừng lượt quét.** Dừng ở đó thì một tx đang chờ xác
+  nhận che khuất toàn bộ cửa sổ bên dưới.
+
+#### Hai ranh giới ghi ra thay vì để ngầm
+
+- **Không khử trùng ở tầng đọc** — luật `(ref_id, seq)` thuộc bên tính `root`. Trộn
+  hai việc thì bên đọc tự quyết cái mà cam kết on-chain phụ thuộc vào.
+- **Route không quyết cửa sổ đã đủ SÂU để đóng chưa** — nó trả `tip_slot`, bên gọi tự
+  quyết. Độ sâu an toàn là tham số của **mạng** và của **khẩu vị rủi ro**, không phải
+  của phép đọc; ghim nó vào đây là đặt một hằng vào sai tầng.
+
+**Chi phí:** `1 + n` lượt gọi cho `n` tx trong tầm quét — **giá của một chu kỳ**, không
+phải giá của một lô, nên nó rơi vào nhịp checkpoint chứ không vào đường neo.
+`scanned_txs` trả về để đo được thay vì ước.
+
+**Nợ spec:** route này (cùng `_dirty`, `_anchor_batch`) **chưa** có trong
+`spec/Strata-API.md`. `#64` vẫn đang chờ anh Đức cho §4.4; phần này đi cùng track spec
+đó, không bọc chung PR với code.
+
+**Bộ kiểm:** lib **135 pass** · node **33 pass** · fmt + clippy `-D warnings` sạch.
