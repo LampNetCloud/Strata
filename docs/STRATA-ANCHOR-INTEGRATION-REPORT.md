@@ -936,3 +936,295 @@ phải giá của một lô, nên nó rơi vào nhịp checkpoint chứ không v
 đó, không bọc chung PR với code.
 
 **Bộ kiểm:** lib **135 pass** · node **33 pass** · fmt + clippy `-D warnings` sạch.
+
+---
+
+## 14. HỢP ĐỒNG TÍCH HỢP — cái `OriLife-Core` cần để cắm vào
+
+> **Mục đích của chương này.** Đường neo đã chạy thật (§10 · §12 · §13 · `SEAM-REPORT`
+> §13–§14), nhưng đầu OriLife tới nay luôn là `anchor-io/examples/orilife_e2e.rs` — một
+> ví dụ **trong kho này**, do chính bên viết daemon viết. Nó chứng minh daemon chạy; nó
+> **không** chứng minh một đội khác đọc tài liệu rồi cắm vào được.
+>
+> Chương này viết **trước** khi sửa mã, và viết ở mức *"đội OriLife-Core cầm nó là cài
+> được"*: route nào, schema nào, ai ký gì, ai chạy tiến trình nào, và — phần dễ bị bỏ
+> quên nhất — **chỗ nào còn là stub**.
+>
+> Phần Mosaic/on-chain của cùng hợp đồng: `VeDataIO/Core:
+> docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` **§15**.
+
+### 14.1 Ai chạy tiến trình nào — ba tiến trình, ba bộ khoá, KHÔNG gộp
+
+Đây là mảnh hay bị hiểu sai nhất, vì cả ba đều tên "neo".
+
+| # | Tiến trình | Kho | Ai vận hành | Khoá nó cầm | Cổng |
+|---|---|---|---|---|---|
+| 1 | `strata-node` | `LampNetCloud/Strata` | **VeData** | **KHÔNG có khoá bí mật nào** — chỉ pubkey trong registry | `:6690` |
+| 2 | `mosaic-anchor-door` | `VeDataIO/Core` (`mosaic/l1`) | **VeData** | ví **publisher** (`MOSAIC_KEY_ANCHOR_*`) + vai beacon (`MOSAIC_KEY_BEACON_*`, đang TẮT) | `:6691` |
+| 3 | `mosaic-anchor-coordinator` | `VeDataIO/Core` (`mosaic/l1`) | **VeData** | không cầm khoá — nó gọi (1) và (2) | — |
+| 4 | *(bên trong 3)* lệnh `MOSAIC_CHECKPOINT_SUBMIT_CMD` | `VeDataIO/Core` (`mosaic/tx-builder`) | **VeData** | **ngưỡng operator 2-of-3** | — |
+
+**`OriLife-Core` KHÔNG chạy tiến trình nào trong bảng trên.** Nó là **client HTTP** của
+(1). Đó là toàn bộ nghĩa vụ vận hành của phía OriLife.
+
+Và một hệ quả phải nói thẳng: **`OriLife-Core` không bao giờ nói chuyện với Cardano, với
+Mosaic, hay với Blockfrost.** Không có env Blockfrost, không có ví, không có tADA. Nếu
+một thiết kế phía OriLife cần một trong ba thứ đó thì thiết kế đó đã đi sai tầng — ranh
+giới `Strata#1` (*"Strata giữ logic chain; Mosaic giữ tx"*) vẫn đứng.
+
+🔑 **Vì sao (1) không cầm khoá bí mật, và vì sao điều đó là tính chất chứ không phải
+tiện lợi.** Daemon **không ký** và **không băm hộ**: chữ ký do client gửi, daemon gắn
+vào version rồi để **core** kiểm (`verify_strict`). Không có đường nào ghi mà bỏ qua
+sig. ⇒ Một daemon bị chiếm **không** giả mạo được một version của OriLife; nó chỉ **từ
+chối phục vụ**. Đó là ranh giới đáng giữ khi hai bên thuộc hai tổ chức.
+
+### 14.2 Đường GHI — đúng ba lời gọi `OriLife-Core` phải cài
+
+```text
+  ┌─ OriLife-Core ──────────┐        ┌─ strata-node :6690 ─────────────────────┐
+  │ 1. dựng state_fields    │        │                                          │
+  │ 2. POST _canonical  ────┼───────▶│ dựng lại state_root + canonical_core     │
+  │ 3. so BYTE, rồi KÝ      │◀───────┤ trả version_hash (32B) ← thứ phải ký     │
+  │ 4. POST create/version ─┼───────▶│ verify_strict → ghi → trả seq/mmr_root   │
+  └─────────────────────────┘        └──────────────────────────────────────────┘
+```
+
+#### Bước 2 — `POST /v1/strata/_canonical` (KHÔ, không ghi, không cần chữ ký)
+
+Bước này **không bắt buộc về mặt giao thức nhưng bắt buộc về mặt thực tế**. Client phải
+tự cài lại **hai cây băm** (state-tree + MMR) và **một encoding canonical** ở ngôn ngữ
+của mình. Lệch một bit ⇒ đường ghi trả `403 BadSignature` — một thông điệp **không hề
+nhắc tới `state_root`**, nên đội tích hợp không có manh mối nào để lần.
+
+```jsonc
+// req — genesis: seq=0, prev_hash = "00"×32, kèm genesis_nonce để nhận luôn ref_id
+{ "seq":0, "prev_hash":"00…00", "content_cid":"<hex var>",
+  "state_fields":[{"key":"diagnosis","value":"<hex>"}],
+  "author_did":"<hex32>", "policy_hash":"<hex32>", "ts":1756100000,
+  "genesis_nonce":"<hex32>" }              // optional
+// 200
+{ "canonical_core":"<hex>",   // so BYTE với bản mình dựng — chỗ lệch lộ ra ở đây
+  "version_hash":"<hex32>",   // ← THỨ PHẢI KÝ
+  "state_root":"<hex32>",     // chỗ lệch phổ biến nhất
+  "ref_id":"lnref1…" }        // null khi không gửi genesis_nonce
+```
+
+Route này chạy **đúng bộ cổng** của đường ghi (kể cả gác `ts`), chỉ bỏ phần ghi.
+
+#### `canonical_core` — byte-layout, để đội OriLife cài lại được mà không phải đọc mã Rust
+
+`TLV length-prefix, KHÔNG phải CBOR` (đã trả ở §4.1, `OriLife-Core#161`):
+
+| Thứ tự | Trường | Mã hoá |
+|---|---|---|
+| 1 | `seq` | `u64` **BE**, 8 B |
+| 2 | `prev_hash` | 32 B thô (genesis: `00`×32) |
+| 3 | `len(content_cid)` | `u32` **BE**, 4 B |
+| 4 | `content_cid` | var, đúng `len` byte |
+| 5 | `state_root` | 32 B |
+| 6 | `author_did` | 32 B |
+| 7 | `policy_hash` | 32 B |
+| 8 | `ts` | `u64` **BE**, 8 B |
+
+**`sig` KHÔNG nằm trong `canonical_core`** (CHỐT-1) — đổi `sig` không đổi `version_hash`.
+
+```text
+version_hash = H_dom(TAG_VER, canonical_core)
+sig          = Ed25519_sign(sk, version_hash)     ← PureEdDSA TRỰC TIẾP trên 32 byte đó,
+                                                     KHÔNG băm thêm lần nữa
+```
+
+`state_root`: sort khoá **tăng dần**, lá lẻ **carry** (không nhân đôi). Khoá **trùng là
+400**, kể cả hai mục cùng giá trị (INV-E6 — trùng key làm root phụ thuộc thứ tự truyền
+vào, mà root thì được ký).
+
+#### Bước 4 — `POST /v1/strata/create` rồi `POST /v1/strata/:ref/version`
+
+Schema đúng như §3 spec, cộng **một mở rộng ngoài spec** phải nói ra:
+`create.policy_authors` (danh sách DID hex được phép ghi; vắng ⇒ policy một-thành-viên
+`[author_did]`). **Mọi** DID trong đó phải phân giải được qua key-registry — xem §14.4.
+
+Ba trường mà client **phải lấy từ `GET /:ref/head`** trước mỗi lần append, không được
+đoán: `head_seq` (⇒ `prev_seq`), `ts` (phải gửi `ts >=` giá trị này), `policy_hash`
+(sai ⇒ `403 PolicyHashMismatch`).
+
+⚠️ **`ts` là giây, và gác này không có nút hoàn tác.** Gửi mili giây (`Date.now()`) một
+lần là **khoá chết quyền ghi của ref đó tới năm 56000**: mọi version sau với `ts` giây
+thật đều `TimestampRegress`, không có route sửa, không có rollback. Daemon chặn ở cửa
+bằng hai gác — biên lệch đồng hồ `300 s` và một trần **tuyệt đối** `10^12` (không phụ
+thuộc đồng hồ daemon, nên nó vẫn đúng khi đồng hồ container chưa kịp NTP).
+
+### 14.3 Ai ký gì — bảng một dòng cho mỗi chữ ký trên toàn đường
+
+| Chữ ký | Ai giữ khoá | Ký cái gì | Bên nào kiểm |
+|---|---|---|---|
+| `version.sig` | **OriLife-Core** (người dùng / nền tảng OriLife) | `version_hash` (32 B) | `strata-node` — `verify_strict`, low-S |
+| chữ ký operator trên lô | **coordinator VeData** | payload lô gửi vào cửa | `mosaic-anchor-door` (`MOSAIC_DOOR_OPERATOR_KEYS`) |
+| chữ ký tx neo | ví **publisher** VeData | tx Cardano | ledger |
+| chữ ký tx checkpoint | **2-of-3 operator** VeData | tx Plutus | validator `strata_checkpoint` |
+
+⇒ **Chỉ dòng đầu tiên thuộc về OriLife-Core.** Ba dòng dưới là việc của VeData, và cả
+ba đều nằm sau ranh giới F-2.
+
+### 14.4 🔴 `DID → pubkey` hôm nay là `InMemoryRegistry` nạp từ env — DID lạ ăn **424**
+
+Đây là chỗ hợp đồng phải nói thẳng nhất, vì nó là **chỗ đầu tiên một lượt nối thật sẽ
+hỏng**, và nó hỏng bằng một mã lỗi mà đọc tên không đoán ra nguyên nhân.
+
+**Cơ chế hôm nay, đo bằng mã chứ không bằng trí nhớ:**
+
+| Mảnh | Trạng thái |
+|---|---|
+| `node/src/registry.rs` — trait `KeyRegistry` | **có**, là chỗ cắm đúng |
+| bản cài duy nhất | **`InMemoryRegistry`** — `BTreeMap<Did, VerifyingKey>` trong RAM |
+| nguồn nạp duy nhất | env **`STRATA_NODE_KEYS`** = `did_hex32:pubkey_hex32` ngăn bởi dấu phẩy |
+| PhoenixKey resolver | **chưa có dòng nào** |
+| đường đăng ký lúc chạy | **KHÔNG có** — không route nào ghi vào registry |
+
+⇒ **`OriLife-Core` gửi một DID mà `STRATA_NODE_KEYS` chưa có sẽ nhận `424 Failed
+Dependency`, `{"error":"UnknownAuthor"}`** — ở `create` (kể cả cho từng DID trong
+`policy_authors`) và ở mọi đường ghi sau đó. Fail-closed, đúng thiết kế (CHỐT-5: `Did`
+là **băm** DID PhoenixKey, **không** phải pubkey, nên daemon **không được** suy khoá từ
+chính `Did`).
+
+**Ba hệ quả vận hành, cả ba đều phải nằm trong hợp đồng chứ không nằm trong đầu ai:**
+
+1. **Đăng ký khoá là một bước THỦ CÔNG, ngoài băng.** Trước khi OriLife-Core gọi lần
+   đầu, phía OriLife phải gửi cho VeData cặp `did_hex : pubkey_hex` của mọi author sẽ
+   ghi; VeData đặt vào `STRATA_NODE_KEYS` rồi khởi động lại daemon.
+2. **Thêm khoá = KHỞI ĐỘNG LẠI daemon.** Env chỉ đọc một lần lúc `main()`. Cộng với
+   §14.5 (`store` in-memory) thì hôm nay khởi động lại còn **mất sạch hồ sơ cây** — nên
+   *"thêm một author"* hiện là một thao tác **phá huỷ**. Đây là lý do daemon bền vững
+   nằm ngay sau chương này trong hàng việc.
+3. **Sai định dạng `STRATA_NODE_KEYS` ⇒ daemon KHÔNG khởi động** (fail-closed có chủ ý:
+   chạy với registry thiếu khoá thì mọi lượt ghi đều 424, im lặng còn tệ hơn).
+
+**❓ Chỗ KHÔNG tự quyết — xin anh Đức và anh Tuân.** `Did` là **băm** của DID PhoenixKey.
+Nhưng *băm của cái gì, sau khi chuẩn hoá thế nào* thì chưa có văn bản nào chốt:
+
+| Câu hỏi | Vì sao nó không tự quyết được |
+|---|---|
+| Chuỗi DID được canonicalize ra sao trước khi băm (chữ hoa/thường, `did:` prefix, phần `#fragment`, `%`-encoding, Unicode NFC) | **PhoenixKey là nguồn canonical của DID** — chốt ở đây rồi sau lệch với PhoenixKey thì mọi `ref_id` đã sinh đều trỏ sai chủ, và `ref_id` là **hàm một chiều**, không có route sửa |
+| Domain-tag của phép băm đó | cùng lý do; và nó phải khớp cả hai đầu ngay từ lượt ghi đầu tiên |
+| Một DID **xoay khoá** thì `Did` có đổi không | nếu đổi ⇒ policy của các lineage cũ trỏ vào một `Did` không còn ai phân giải ⇒ lineage **đóng băng**. Nếu không đổi ⇒ registry phải trả **pubkey nào** cho các version đã ký bằng khoá cũ |
+
+Báo cáo này **ghi câu hỏi, không chốt đáp án**. Cho tới khi có đáp án, hợp đồng tạm thời
+là: *`Did` là 32 byte do phía OriLife cấp, VeData nhận nguyên văn và chỉ dùng nó làm khoá
+tra; hai bên giữ chung một bảng `did_hex : pubkey_hex` trao tay.* Bảng đó là **nợ**, và
+nó có tên: điều kiện thu hồi của nó chính là PhoenixKey resolver cắm vào trait
+`KeyRegistry`.
+
+### 14.5 🔴 `strata-node` hôm nay là IN-MEMORY — và đó là dữ kiện của hợp đồng, không phải chi tiết cài đặt
+
+`node/src/store.rs`: `ChainStore { refs: RwLock<HashMap<Hash32, Arc<Mutex<ChainEntry>>>> }`.
+Không có đường ghi xuống đĩa nào. Docstring của chính tệp ghi *"Bền vững (đĩa/Mirage) là
+milestone sau; struct này là chỗ cắm."*
+
+**Cái mất khi tiến trình dừng — và vì sao không dựng lại được từ chuỗi:**
+
+| Mất | Dựng lại được từ chuỗi? |
+|---|---|
+| toàn bộ `StrataChain` (mọi version + `sig` + MMR) | **KHÔNG** — on-chain chỉ có `StrataAnchor` 104 byte (`ref_id ‖ head_version_hash ‖ mmr_root ‖ seq`), không có version nào |
+| `policy` đang thực thi | **KHÔNG** |
+| `fields` theo seq (nguồn của mọi `prove_field`) | **KHÔNG** — `state_root` là hàm một chiều |
+| gương `anchored` | một phần: `resolve()` đọc lại được `seq` đã neo từ chuỗi |
+
+⇒ Nói thẳng trong hợp đồng: **hôm nay, restart `strata-node` = mất hồ sơ cây.** Một lượt
+nối thật với OriLife-Core mà không vá chỗ này thì thứ hai bên ráp được là một nguyên mẫu,
+không phải một đường chạy.
+
+Điểm nhẹ duy nhất: `ChainStore` đã là **chỗ cắm đúng** — mọi lối vào trạng thái đã đi qua
+`insert` / `get` / `all`, và khoá đã là **theo từng ref**, không phải khoá toàn cục.
+
+### 14.6 Đường NEO — `OriLife-Core` KHÔNG gọi, và gọi là hỏng
+
+`POST /v1/strata/:ref/anchor` **tồn tại** và OriLife-Core **về mặt kỹ thuật gọi được**.
+Hợp đồng vẫn nói: **đừng gọi.**
+
+| | Ai gọi | Vì sao |
+|---|---|---|
+| `GET /v1/strata/_dirty` | coordinator VeData | *cái gì đã ghi mà chưa lên chuỗi* |
+| `POST /v1/strata/_anchor_batch` | coordinator VeData | 1 tx / N anchor — **~0,896 tADA** thay vì ~89,6 |
+| `POST /v1/strata/:ref/anchor` | *(không ai, trên đường sản xuất)* | 1 tx / 1 lineage |
+
+Nhịp neo là **quyết định của Mosaic**, không phải của người ghi: gom lô **LIÊN HỘ**, chia
+theo **kích cỡ** (chốt `Specs#32`, 2026-08-19). Một OriLife-Core tự gọi `:ref/anchor` cho
+từng cây sẽ **chạy đúng** và trả về txid thật — rồi đội phí **100×** mà không lỗi nào bật
+ra. Đây là chỗ *"chạy được"* và *"đúng"* tách nhau.
+
+Nếu phía OriLife muốn **giữ nhịp** cho một hồ sơ giá-trị-cao lẻ, đại lượng để nói chuyện
+là `anchor_priority` của Stamp (`immediate` · `milestone` · `batch_daily` · `no_anchor`),
+không phải một lời gọi trực tiếp.
+
+### 14.7 Đường ĐỌC — cái OriLife-Core lấy ra để chứng minh với bên thứ ba
+
+| Route | Trả | Ghi chú hợp đồng |
+|---|---|---|
+| `GET /:ref/head` | `head_seq` · `mmr_root` · `ts` · `policy_hash` | **bắt buộc gọi trước mỗi append** |
+| `GET /:ref/version?at=<unix_ts>` | version tại thời điểm t + `InclusionProof` | |
+| `GET /:ref/proof/version/:seq` | `InclusionProof` — so với `mmr_root` **đã neo** | INV-E3 |
+| `GET /:ref/proof/field/:key[?seq=]` | `FieldProof` | ⚠️ có trường **`salt`** — xem dưới |
+
+⚠️ **`salt` là trường mà spec §3 chưa có, và bỏ qua nó làm MỌI proof đỏ ở phía client.**
+Verifier phải băm theo **length-prefix** (`fval_hash` nhận salt từ `Strata#63`), không
+phải nối trần `salt ‖ value` như `Strata-Math.md:292` đang viết. Rỗng = không làm mù.
+Trường này **luôn có mặt kể cả khi rỗng**, đúng vì lý do trên: một trường vắng mặt lúc
+blinding được bật sẽ làm mọi proof đỏ ở client mà nhìn từ server thì không có gì sai.
+
+### 14.8 Bảng lỗi `OriLife-Core` phải map — và ba cái dễ hiểu sai nhất
+
+Body lỗi luôn là `{ "error":"<tên biến thể>", "detail":{…} }`, tên giữ **nguyên văn**
+tên biến thể lõi để client map ngược được.
+
+| HTTP | `error` | Nghĩa với người tích hợp |
+|---|---|---|
+| **424** | `UnknownAuthor` | 🔴 **DID chưa đăng ký trong registry** — §14.4. Không phải "sai khoá", không phải "hết hạn" |
+| **403** | `BadSignature` | ký sai — **99 % là lệch `canonical_core`/`state_root`**, không phải sai khoá. Dùng `_canonical` để tìm chỗ lệch |
+| **403** | `PolicyHashMismatch` | chưa gọi `head` trước khi append |
+| **403** | `PolicyDenied` | author không nằm trong policy của lineage |
+| **409** | `HashLinkBroken` | `prev_hash` ≠ head — có người ghi chen vào |
+| **422** | `SeqNotMonotonic` | `prev_seq` sai |
+| **422** | `TimestampRegress` | `ts` < `ts` head |
+| **422** | `TimestampTooFarFuture` | 🔴 **gửi mili giây** — đọc cảnh báo §14.2 |
+| **400** | *(mức cửa)* | body hỏng, hex sai độ dài, **khoá trùng trong `state_fields`** |
+| **409** | `AnchorRollback` | neo lại seq ≤ seq đã neo (đường neo, không phải đường ghi) |
+| **501/502/503** | `AnchorNotConfigured` / `AnchorRejected` / `AnchorNetwork` | backend neo — **chỉ 503 là retry được** |
+
+**Ba cái dễ hiểu sai nhất** — đáng nằm trong tài liệu tích hợp phía OriLife, không chỉ ở
+đây: `424 UnknownAuthor` không nói gì về khoá; `403 BadSignature` không nhắc `state_root`
+dù đó gần như luôn là nguyên nhân; `422 TimestampTooFarFuture` là gác **duy nhất** đứng
+giữa một lỗi gõ và một lineage chết vĩnh viễn.
+
+### 14.9 Bảng TRUNG THỰC — chỗ nào còn là stub
+
+Đây là mục quan trọng nhất của cả chương, vì nó là thứ một hợp đồng tích hợp hay thiếu.
+
+| # | Mảnh | Trạng thái đo được | Hậu quả nếu đội OriLife không biết |
+|---|---|---|---|
+| 1 | `KeyRegistry` → PhoenixKey | 🔴 **stub** — `InMemoryRegistry` + env `STRATA_NODE_KEYS`, không route đăng ký | lượt gọi đầu tiên ăn `424`, và không ai đoán ra vì sao |
+| 2 | `ChainStore` → đĩa | 🔴 **stub** — RAM thuần | restart = mất hồ sơ cây |
+| 3 | `fields` → Mirage | 🟠 **stub** — byte nằm thẳng trong RAM (§8.4 nói bản thật giữ CID) | `prove_field` mất cùng lúc với (2) |
+| 4 | `canonicalize(DID)` | 🔴 **chưa có văn bản** — §14.4 | hai bên băm ra hai `Did` khác nhau ⇒ `424` hoặc, tệ hơn, hai `ref_id` cho một chủ |
+| 5 | 4 route `_canonical` `_dirty` `_anchor_batch` `_settlement_window` | 🔴 **không có chương nào trong `spec/Strata-API.md`** | đội tích hợp đọc spec sẽ **không thấy** đường đối chiếu byte tồn tại |
+| 6 | trường `salt` của field-proof | 🔴 **không có trong spec §3** | verifier bỏ qua ⇒ mọi proof đỏ khi bật blinding |
+| 7 | `Strata-Math §6.3` length-prefix | 🟠 mã **length-prefix**, spec `:292` viết **nối trần** | ai cài theo spec sẽ verify đỏ |
+| 8 | beacon | 🟠 **TẮT** (`Specs#32`) — không ảnh hưởng OriLife | — |
+| 9 | `N-1` nhịp neo | 🟠 chưa ghim (chờ `Mosaic-Math`) — hồ sơ sản xuất `epoch 8 h / tuổi 24 h`, **24 h là trần cứng** | SLA neo chưa cam kết được bằng số |
+| 10 | mainnet | ⛔ **đóng** — `K-1`, chỉ Preprod | — |
+
+**(5) là một đính chính về phạm vi.** §13.2 và `SEAM-REPORT` §14.6 đều ghi nợ spec là
+*"3 route"*. Đo lại toàn tệp: `_canonical` **cũng** chưa có chương — hit duy nhất của
+chuỗi đó trong `Strata-API.md` là chữ `entry_bytes_canonical` ở §8.3, không liên quan.
+Nợ thật là **4 route + 1 trường**, và `_canonical` là cái **đắt nhất** trong bốn: nó là
+đúng đường mà một đội tích hợp mới cần và cũng là đường duy nhất họ không có cách nào
+biết là có.
+
+### 14.10 Cái hợp đồng này KHÔNG nói
+
+Ghi ra để không ai đọc nhầm phạm vi:
+
+- **Không** chốt `canonicalize(DID)` — của anh Đức và anh Tuân (§14.4).
+- **Không** chốt nhịp neo (`N-1`) — chờ `Mosaic-Math`.
+- **Không** mở mainnet — `K-1` còn hiệu lực, mọi lượt chạy thật là **Preprod**.
+- **Không** đụng PhoenixKey trong đợt này — chỉ ghi ra rằng chỗ cắm là trait
+  `KeyRegistry` và điều kiện thu hồi của bảng khoá trao tay là resolver đó.
