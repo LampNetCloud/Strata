@@ -1403,3 +1403,122 @@ fail** · fmt + clippy `-D warnings` sạch.
 | 3 | `fields` vẫn nằm **trong nhật ký**, chưa đi Mirage | §8.4 nói bản thật giữ CID. Hôm nay byte nằm cùng request đã ký ⇒ nhật ký mang cả dữ liệu riêng tư |
 | 4 | **Một tệp, một tiến trình** | không có khoá tệp: hai daemon cùng trỏ một nhật ký sẽ ghi xen kẽ và cả hai đều sai. Chưa gác |
 | 5 | Xoay khoá vẫn **phá** | §15.2 — nối vào nợ PhoenixKey của §14.4 |
+
+---
+
+## 16. Đường neo sản xuất đã **401 suốt 4 ngày** — và vì sao không ai thấy (`#70`)
+
+Phát hiện trong lúc dựng lượt chạy đầu-cuối *có lá* (`SEAM §16`). Không phải một lỗi
+mới viết ra: nó **đã sống trên `main` của cả hai kho** từ 2026-08-21.
+
+### 16.1 Mốc thời gian — đo bằng `git`, không bằng trí nhớ
+
+| Ngày | Việc | Cửa có gác chữ ký operator? |
+|---|---|---|
+| 08-15 | cửa `strata-anchor-batch` dựng (`Core#58`) | **không** |
+| 08-17 | `dfd242a` thêm gác — trên **nhánh** | không (chưa vào `main`) |
+| **08-20 17:02** | ✅ lượt chạy thật **lô LIÊN HỘ**, 3 tx Preprod (§12.8) | **không** |
+| **08-21 08:48** | `Core#96` merge ⇒ gác **vào `main`** | **có** |
+| 08-24 | hai đợt chạy thật — nhưng là luồng **checkpoint** | *(không đi qua cửa neo)* |
+| **08-25** | lượt chạy này | 🔴 **401** |
+
+⇒ Giữa mốc gác land và hôm nay, **không lượt chạy nào đi qua đường
+`Strata → cửa Mosaic`.** Hai đợt 08-24 đều đi đường Plutus của coordinator, một seam
+khác hẳn. Đường neo — đường **chính** của cả MB-6 — nằm hỏng bốn ngày.
+
+### 16.2 Hai lỗi, và lỗi THỨ HAI mới là lý do lỗi thứ nhất vô hình
+
+**Lỗi 1 — bên gửi không ký.** `MosaicDoorSubmitter::submit` gửi
+`{label, payload_cbor, ref_ids, beacon, network}`. Cửa đòi thêm `operator_vkey` +
+`operator_sig`, và `check_operator_signature` **từ chối `401`** khi thiếu — không có
+nhánh "coi như hợp lệ". Đo thẳng vào cửa, có đối chứng:
+
+```
+gửi lô KHÔNG chữ ký  → HTTP 401 {"error_kind":"Unauthorized",
+                                 "error":"thiếu hoặc sai chữ ký operator …"}
+gửi KHÔNG token      → HTTP 401 {"error_kind":"Unauthorized",
+                                 "error":"thiếu hoặc sai `Authorization: Bearer …`"}
+```
+
+*(Đối chứng thứ hai là phần bắt buộc: không có nó thì dòng đầu cũng đúng với một cửa
+từ chối mọi thứ vì lý do khác.)*
+
+**🪤 Lỗi 2 — `Unauthorized` bị gộp vào `NotConfigured`.** Bảng ánh xạ của bên gửi có:
+
+```rust
+Some("NotConfigured") | Some("Unauthorized") => AnchorError::NotConfigured,
+```
+
+Nên một cửa **401** hiện ra ở đầu Strata là:
+
+```
+HTTP 501  {"error":"AnchorNotConfigured","detail":{"detail":"daemon chưa cắm AnchorSink"}}
+```
+
+> Người vận hành đọc câu đó sẽ đi kiểm cấu hình sink — **đúng chỗ không có lỗi**. Còn
+> chỗ có lỗi thì không được nhắc tới một chữ.
+
+Hai trạng thái này khác hẳn nhau: `NotConfigured` là *ta chưa cắm gì*; `Unauthorized`
+là *ta đã cắm, đã gọi tới nơi, và bị **từ chối***. Gộp chúng làm mất đúng thông tin
+phân biệt được hai việc phải làm khác nhau.
+
+Và nó cộng dồn với một tính chất **cố ý** của cửa: cửa trả **một thông điệp chung** cho
+mọi đường hỏng của chữ ký (phân biệt "khoá lạ" với "chữ ký sai" biến cửa thành **máy dò
+allow-list**). Bên cửa im lặng có chủ ý là đúng — nhưng khi bên gửi cũng bóp méo nốt
+`error_kind` thì tín hiệu **mất cả hai chặng**.
+
+### 16.3 Bản vá — và ba chỗ suýt dựng sai
+
+| Vá | Nội dung |
+|---|---|
+| ký lô | `MOSAIC_DOOR_OPERATOR_SK` (hex 32 B seed ed25519); ký **sau** `encode_records`, trên **đúng byte gửi đi** |
+| fail-closed | có `MOSAIC_DOOR_URL` mà thiếu khoá ký ⇒ **không khởi động** (cùng khuôn gác token đã có) |
+| ánh xạ lỗi | `Unauthorized` ⇒ `Rejected` **giữ nguyên văn lời cửa nói**, kèm tên hai env phải kiểm |
+| chẩn đoán | in **`operator_vkey=…`** lúc khởi động — nó là khoá **công khai**, chính là thứ phải nằm trong allow-list của cửa |
+
+**Chỗ suýt sai thứ nhất — hai nguồn sự thật cho `network`.** Bản nháp đầu đọc
+`MOSAIC_DOOR_NETWORK` làm env **bắt buộc**. Nhưng `sink_config` **đã** phân giải mạng từ
+`STRATA_ANCHOR_NETWORK` để chọn endpoint Blockfrost. Mạng nằm **trong thông điệp được
+ký**, nên hai nguồn cho cùng giá trị = hai thông điệp cho cùng một lô, và triệu chứng là
+`401` không nói lý do. ⇒ Mạng thành **tham số** truyền xuống, env thứ hai bị bỏ đọc.
+
+**Chỗ suýt sai thứ hai — ký ở sai tầng.** Thông điệp phủ `payload`, mà `payload` chỉ tồn
+tại **sau** `encode_records`. Ký ở tầng trên là ký một byte khác byte gửi đi.
+
+**Chỗ suýt sai thứ ba — in khoá.** In `operator_vkey` nghe như rò rỉ. Nó là khoá **công
+khai**; thứ đắt ở đây là *không in* — người vận hành mất đường đối chiếu một chuỗi hex
+trước lượt neo đầu, và đường duy nhất còn lại là đọc một `401` cố ý câm.
+
+### 16.4 🔺 `operator_sig_message` là **bản sao của một định nghĩa sống ở kho khác**
+
+Đây là chỗ nguy hiểm nhất của bản vá, nên nó được ghi ra thay vì để ngầm: hàm này phải
+khớp **từng byte** với `Core: mosaic/l1/src/door.rs::operator_sig_message`.
+
+```text
+blake2b-256( "MOSAIC-STRATA-BATCH-v1" ‖ u8(len(net)) ‖ net
+             ‖ u64be(label) ‖ u8(beacon) ‖ u64be(len(payload)) ‖ payload )
+```
+
+Một bài kiểm chỉ so bản này với **chính nó** sẽ xanh vĩnh viễn kể cả khi hai bên đã
+lệch — **xanh giả**, và triệu chứng ngoài đời đúng là cái vừa xảy ra. Nên bộ kiểm ghim
+**5 vector sinh từ chính cửa**, cộng hai bài mà thiếu chúng thì vector cũng vô dụng:
+
+| Bài | Nó chặn |
+|---|---|
+| `thong_diep_ky_khop_tung_byte_voi_cua_mosaic` (5 vector) | hai bản lệch nhau |
+| `moi_dai_luong_deu_doi_thong_diep` | một bản **bỏ quên** `beacon`/`label`/`network` vẫn khớp 5/5 vector đã ghim |
+| `bien_giua_network_va_payload_khong_nhap_nhang` | mất length-prefix ⇒ `net="ab"‖payload="c"` = `net="a"‖payload="bc"` |
+
+**Bộ kiểm:** anchor-io 8 → **12** · node **19** (sink_config + ca âm thiếu khoá ký) ·
+workspace **260 pass / 0 fail** · fmt + clippy `-D warnings` sạch.
+
+### 16.5 Luật rút ra
+
+> **Một gác mới ở phía nhận là một thay đổi phá vỡ hợp đồng của phía gửi — kể cả khi
+> hai phía nằm ở hai kho và CI của cả hai đều xanh.**
+
+Cùng lớp với *"soát PR bằng cách GHÉP"*: chỗ hỏng nặng nhất nằm ở **mối nối**, và mối
+nối không thuộc bộ kiểm của bên nào. Ở đây nó còn thêm một tầng: bên gửi **bóp méo mã
+lỗi** của bên nhận, nên ngay cả một lượt chạy thật cũng chỉ ra một câu sai.
+
+Cái đã bắt được nó không phải một bài kiểm mới — mà là **chạy thật đường đó một lần**.
