@@ -39,6 +39,11 @@ pub enum ApiError {
     /// nhận nó một lần là **khoá chết quyền ghi của ref đó tới tận năm 56000**: mọi version
     /// sau với `ts` giây thật đều `TimestampRegress`. Không có route sửa, không có rollback.
     /// Một ký tự thừa của `Date.now()` = mất hồ sơ vĩnh viễn. Đây là chỗ duy nhất chặn được.
+    /// Nhật ký bền vững hỏng ⇒ RAM đã tiến quá trạng thái ghi được. 503.
+    ///
+    /// Không phải 500: 500 nói *"lỗi bất ngờ"*, còn đây là một trạng thái **đã biết và
+    /// đã chọn** — daemon còn phục vụ ĐỌC đúng, chỉ không nhận thêm việc nó không nhớ nổi.
+    JournalBroken(String),
     TimestampTooFarFuture {
         /// `ts` client gửi.
         got: u64,
@@ -83,6 +88,17 @@ impl From<AnchorError> for ApiError {
 
 fn h(x: &Hash32) -> String {
     hex::encode(x)
+}
+
+/// Mô tả một dòng — dùng cho log khởi động và cho thông điệp replay.
+///
+/// Cùng nguồn với thân response (`split`), nên câu người vận hành đọc trong log **là**
+/// câu client nhận. Hai câu khác nhau cho cùng một lỗi là hai lời khai phải đối chiếu tay.
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (status, name, detail) = split(self);
+        write!(f, "{} {name} {detail}", status.as_u16())
+    }
 }
 
 /// `(status, tên lỗi, detail)` — bảng §3.1 cho phần lõi.
@@ -173,6 +189,11 @@ fn split(e: &ApiError) -> (StatusCode, &'static str, Value) {
             StatusCode::SERVICE_UNAVAILABLE,
             "AnchorNetwork",
             json!({ "reason": m }),
+        ),
+        ApiError::JournalBroken(m) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "JournalBroken",
+            json!({ "detail": m }),
         ),
         // 422 — cùng nhóm với `TimestampRegress` của lõi (cả hai là lỗi miền `ts`).
         // Thông điệp nói THẲNG nguyên nhân thật (đơn vị), vì client đọc "ts không hợp lệ"

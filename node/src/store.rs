@@ -16,9 +16,14 @@
 //! Khoá: một `Mutex` **theo từng ref** (không phải khoá toàn cục) — vừa cho phép song song
 //! giữa các ref, vừa cho `anchor` giữ trọn chuỗi *kiểm → đẩy → chốt* trong một vùng loại trừ.
 //!
-//! Bền vững (đĩa/Mirage) là milestone sau; struct này là chỗ cắm.
+//! **Bền vững:** [`ChainStore`] nhận một [`Journal`] tuỳ chọn. Có nhật ký thì mọi lượt
+//! ghi được ghi lại **sau khi lõi đã nhận**, và daemon dựng lại chính mình lúc khởi động
+//! bằng cách **chạy lại** chúng qua đúng đường ghi — xem [`crate::journal`]. Không có
+//! nhật ký thì kho là phù du (dev/test), và bin `strata-node` bắt người vận hành **khai
+//! tường minh** điều đó chứ không cho rơi vào im lặng.
 
 use crate::dto::StateFields;
+use crate::journal::{Journal, JournalError, JournalRecord};
 use lampnet_strata::audit::AuditLog;
 use lampnet_strata::chain::{Policy, StrataChain};
 use lampnet_strata::version::Hash32;
@@ -66,29 +71,73 @@ impl ChainEntry {
 }
 
 /// Lỗi mức kho.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum StoreError {
     /// `create` trên ref_id đã tồn tại — KHÔNG ghi đè lịch sử.
     RefExists,
+    /// Ghi nhật ký hỏng ⇒ phép chèn **không xảy ra** (không có ref nào được tạo).
+    Journal(JournalError),
 }
 
 /// Kho ref → trạng thái, khoá theo từng ref.
 #[derive(Default)]
 pub struct ChainStore {
     refs: RwLock<HashMap<Hash32, Arc<Mutex<ChainEntry>>>>,
+    /// Nhật ký bền vững. `None` = kho phù du (dev/test).
+    journal: Option<Arc<Journal>>,
 }
 
 impl ChainStore {
+    /// Kho **phù du** — không nhật ký. Dùng cho test và cho lượt chạy dev đã khai rõ.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Kho có nhật ký bền vững.
+    pub fn with_journal(journal: Arc<Journal>) -> Self {
+        Self {
+            refs: RwLock::new(HashMap::new()),
+            journal: Some(journal),
+        }
+    }
+
+    /// Nhật ký đang gắn (nếu có) — đường ghi của [`crate::routes`] dùng nó cho `append` /
+    /// `audit` / `anchor`, những thao tác nằm dưới khoá của **từng ref** chứ không dưới
+    /// khoá kho.
+    pub fn journal(&self) -> Option<&Arc<Journal>> {
+        self.journal.as_ref()
     }
 
     /// Thêm ref mới. `RefExists` nếu ref_id đã tồn tại (cùng `author_did`+`genesis_nonce`
     /// ⇒ cùng ref_id — `create` lần hai KHÔNG được ghi đè lịch sử).
     pub fn insert(&self, ref_id: Hash32, entry: ChainEntry) -> Result<(), StoreError> {
+        self.insert_journaled(ref_id, entry, None)
+    }
+
+    /// Chèn ref mới, **ghi nhật ký trong cùng vùng loại trừ** với phép kiểm-rồi-chèn.
+    ///
+    /// # Vì sao I/O nằm dưới khoá ghi của kho, dù nghe như một thứ nên tránh
+    ///
+    /// Bất biến cần giữ là: **bản ghi `Create` có trong nhật ký ⟺ ref đã được chèn.**
+    /// Tách hai bước ra ngoài khoá thì mất nó theo cả hai chiều — ghi nhật ký trước rồi
+    /// `RefExists` để lại một `Create` mồ côi (replay sẽ chèn hai lần và **từ chối khởi
+    /// động**); chèn trước rồi ghi hỏng để lại một ref sống trong RAM mà nhật ký không
+    /// biết, tức mất im lặng đúng ca nhật ký sinh ra để chặn.
+    ///
+    /// `create` là thao tác **hiếm** (một lần cho mỗi lineage, cả đời), nên đây là chỗ
+    /// đúng để đổi thông lượng lấy một bất biến không có cách nào phục hồi nếu vỡ.
+    pub fn insert_journaled(
+        &self,
+        ref_id: Hash32,
+        entry: ChainEntry,
+        rec: Option<JournalRecord>,
+    ) -> Result<(), StoreError> {
         let mut g = self.refs.write().unwrap_or_else(|e| e.into_inner());
         if g.contains_key(&ref_id) {
             return Err(StoreError::RefExists);
+        }
+        if let (Some(j), Some(rec)) = (self.journal.as_ref(), rec.as_ref()) {
+            j.append(rec).map_err(StoreError::Journal)?;
         }
         g.insert(ref_id, Arc::new(Mutex::new(entry)));
         Ok(())
