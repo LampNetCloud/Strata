@@ -193,10 +193,21 @@ Style axum khớp `lampnet-node.rs` (`Router::new().route("/v1/...", post(handle
 // req
 { "author_did":"<hex32>", "genesis_nonce":"<hex32>", "content_cid":"<hex>",
   "state_fields":[{"key":"diagnosis","value":"<hex32-content_cid-thuần>"}],
-  "policy_hash":"<hex32>", "ts":1719600000, "sig":"<hex64>" }
+  "policy_hash":"<hex32>", "ts":1719600000, "sig":"<hex64>",
+  "policy_authors":["<hex32>", ...] }        // TUỲ CHỌN — xem dưới
 // 200
 { "ref_id":"lnref1...", "head_seq":0, "head_version_hash":"<hex32>", "mmr_root":"<hex32>" }
 ```
+
+`policy_authors` — danh sách DID được phép ghi lineage này. Vắng ⇒ policy **một
+thành viên** `[author_did]`. **Mọi** DID trong danh sách phải phân giải được qua
+key-registry, và `policy_hash` gửi lên phải khớp policy dựng ra — lệch ⇒ `403
+PolicyHashMismatch`. Trường này quyết định `policy_hash`, mà `policy_hash` nằm trong
+`canonical_core` **được ký**, nên nó không thể là một tham số ngoài lề.
+
+`state_fields`: khoá **trùng bị từ chối** (`400`), kể cả hai mục cùng giá trị — trùng
+khoá làm `state_root` cam kết hai giá trị mâu thuẫn cho cùng trường **và** làm root phụ
+thuộc thứ tự người gọi xếp danh sách (INV-E6).
 
 ### POST `/v1/strata/:ref/version`
 ```jsonc
@@ -219,8 +230,19 @@ Style axum khớp `lampnet-node.rs` (`Router::new().route("/v1/...", post(handle
 ### GET `/v1/strata/:ref/head`
 ```jsonc
 { "ref_id":"lnref1...", "head_seq":5, "head_version_hash":"<hex32>",
-  "mmr_root":"<hex32>", "content_cid":"<hex>" }
+  "mmr_root":"<hex32>", "content_cid":"<hex>",
+  "ts":1719603600, "policy_hash":"<hex32>", "author_did":"<hex32>" }
 ```
+
+🔺 **Ba trường cuối là BẮT BUỘC phải có trong response, không phải tiện ích.** Client
+không có chúng thì **không append tiếp được**, và phải lách bằng
+`GET /version?at=<số lớn>`:
+
+| Trường | Client dùng làm gì | Thiếu thì |
+|---|---|---|
+| `ts` | version kế phải gửi `ts >=` giá trị này | `422 TimestampRegress` |
+| `policy_hash` | version kế phải gửi **đúng** giá trị này | `403 PolicyHashMismatch` |
+| `author_did` | đối chiếu (không bắt buộc để append) | — |
 
 ### GET `/v1/strata/:ref/version?at=<unix_ts>`
 ```jsonc
@@ -230,11 +252,25 @@ Style axum khớp `lampnet-node.rs` (`Router::new().route("/v1/...", post(handle
 ```
 
 ### GET `/v1/strata/:ref/proof/version/:seq`  → `InclusionProof` (so `mmr_root` đã neo, INV-E3)
-### GET `/v1/strata/:ref/proof/field/:key`
+### GET `/v1/strata/:ref/proof/field/:key[?seq=<n>]`
 ```jsonc
 { "key":"diagnosis", "value":"<hex32-content_cid-thuần>", "fvh":"<hex32>",
+  "salt":"<hex>",                       // "" = KHÔNG làm mù
   "siblings":[["<hex32>",false], ...], "state_root":"<hex32>", "version_seq":5 }
 ```
+
+`?seq=` vắng ⇒ head.
+
+🔺 **`salt` LUÔN có mặt, kể cả khi rỗng.** Verifier phải băm salt cùng giá trị để dựng
+lại `fvh`; một trường **vắng mặt** lúc blinding được bật sẽ làm **mọi** proof đỏ ở phía
+client trong khi nhìn từ server không có gì sai.
+
+⚠️ **Phép băm là `H_dom(TAG, len(salt) ‖ salt ‖ len(value) ‖ value)` — LENGTH-PREFIX,
+không phải nối trần.** `Strata-Math §6.3` (`:292`) hiện viết `H_dom(TAG, salt ‖ value)`;
+nối trần thì `(salt="ab", value="c")` và `(salt="a", value="bc")` cho **cùng một `fvh`
+— mà cả hai đều do **người ghi** chọn, còn proof thì công khai cả `salt` lẫn `value`, nên
+người ghi **đổi được lời khai về giá trị sau khi đã ký**, chỉ bằng cách dịch biên.
+Cài đặt đang length-prefix; **chỗ cần xác nhận là câu chữ `Strata-Math §6.3`**.
 
 ### POST `/v1/strata/:ref/anchor`  (đẩy anchor on-chain qua adapter §4)
 ```jsonc
@@ -244,6 +280,169 @@ Style axum khớp `lampnet-node.rs` (`Router::new().route("/v1/...", post(handle
 { "ref_id":"<hex32>", "head_version_hash":"<hex32>", "mmr_root":"<hex32>", "seq":5,
   "anchor_txid":"<hex>", "backend":"settlement" }     // anchor_txid null nếu no_anchor
 ```
+
+### Route tiền tố `_` — KHÔNG phải một `:ref`
+
+Bốn route dưới đây dùng tiền tố `_` có chủ ý: chúng đứng cùng vị trí đường dẫn với
+`:ref`, và `_` không phải ký tự hợp lệ của `ref_id` (bech32m `lnref1…` hoặc hex32) — nên
+**không `ref_id` hợp lệ nào đụng vào được**.
+
+Ba trong bốn route này trả `ref_id` dạng **hex32**, cùng dạng `POST /:ref/anchor` trả ra
+và **khác** dạng bech32m của `create`/`head`. Đó là cam kết, không phải tình cờ: người
+đọc `_dirty` nạp thẳng danh sách đó vào `_anchor_batch`, và trộn hai dạng trong một đường
+ống là cách tự tạo lỗi phân giải.
+
+#### POST `/v1/strata/_canonical` — route KHÔ (dry-run), **KHÔNG ghi**
+
+```jsonc
+// req — genesis: seq=0, prev_hash="00"×32, kèm genesis_nonce để nhận luôn ref_id
+{ "seq":0, "prev_hash":"<hex32>", "content_cid":"<hex>",
+  "state_fields":[{"key":"diagnosis","value":"<hex>"}],
+  "author_did":"<hex32>", "policy_hash":"<hex32>", "ts":1719600000,
+  "genesis_nonce":"<hex32>" }                 // tuỳ chọn
+// 200
+{ "canonical_core":"<hex>",    // so BYTE với bản client tự dựng
+  "version_hash":"<hex32>",    // THỨ PHẢI KÝ
+  "state_root":"<hex32>",      // chỗ lệch phổ biến nhất
+  "ref_id":"lnref1…" }         // null khi không gửi genesis_nonce
+```
+
+**Vì sao route này phải có mặt trong spec.** Client tự cài lại **hai cây băm**
+(state-tree + MMR) và **một encoding canonical** ở ngôn ngữ của mình rồi ký lên
+`version_hash`. Lệch một bit ⇒ đường ghi trả `403 BadSignature` — một thông điệp **không
+hề nhắc tới `state_root`**. Không có route này thì bên tích hợp không có đường đối chiếu
+nào trước khi ghi, và cũng **không có cách nào biết đường ấy tồn tại**.
+
+Không đụng `store`, không cần `sig`, không cần `ref` tồn tại ⇒ không rò sự tồn tại của hồ
+sơ nào. Route khô chạy **đúng bộ cổng** của đường ghi (kể cả gác `ts`), chỉ bỏ phần ghi —
+một bản xem trước chạy ít gác hơn cửa thật không phải bản xem trước, nó là **một câu trả
+lời khác**.
+
+**`canonical_core` — byte-layout (TLV length-prefix, KHÔNG phải CBOR):**
+
+| # | Trường | Mã hoá |
+|---|---|---|
+| 1 | `seq` | `u64` **BE**, 8 B |
+| 2 | `prev_hash` | 32 B (genesis: `00`×32) |
+| 3 | `len(content_cid)` | `u32` **BE**, 4 B |
+| 4 | `content_cid` | var |
+| 5 | `state_root` | 32 B |
+| 6 | `author_did` | 32 B |
+| 7 | `policy_hash` | 32 B |
+| 8 | `ts` | `u64` **BE**, 8 B |
+
+`sig` **KHÔNG** nằm trong `canonical_core` (CHỐT-1). `version_hash = H_dom(TAG_VER,
+canonical_core)`; `sig = Ed25519_sign(sk, version_hash)` — **PureEdDSA trực tiếp** trên 32
+byte đó, **không băm thêm lần nữa**. `state_root`: sort khoá tăng dần, lá lẻ **carry**
+(không nhân đôi).
+
+#### GET `/v1/strata/_dirty[?limit=<n>]` — lineage ĐANG CHỜ NEO
+
+```jsonc
+{ "count":3, "total_pending_versions":9, "oldest_unanchored_ts":1719600000,
+  "truncated":false,
+  "refs":[ { "ref_id":"<hex32>", "author_did":"<hex32>",
+             "head_seq":2, "anchored_seq":null,
+             "pending_versions":3, "oldest_unanchored_ts":1719600000 } ] }
+```
+
+Nguồn đọc của hàng đợi neo phía Mosaic (`Mosaic-Math §13.1` lớp (1)). Kho này **không**
+quyết lô và **không** giữ hàng đợi — nó trả lời một câu hỏi thuần về trạng thái: *cái gì
+đã ghi mà chưa lên chuỗi.*
+
+**Không trường nào là bộ đếm.** Mọi số **tính ra** từ trạng thái đã có (`chain` cho
+`head_seq`, gương neo cho `anchored_seq`). Một bộ đếm tăng dần thì lệch được, đếm trùng
+được, mất khi restart được; một tổng suy từ nguồn sự thật thì không có chỗ để lệch.
+
+- `anchored_seq = null` ⇒ **chưa neo lần nào** ⇒ `pending_versions = head_seq + 1` (tính
+  cả genesis), **không** phải `head_seq`.
+- **Thứ tự là cam kết:** cũ trước mới sau (`oldest_unanchored_ts` tăng dần, hoà thì theo
+  `ref_id`). Nhờ vậy `limit` cắt đúng phần chờ lâu nhất, và lô **tất định** giữa hai lượt.
+- `truncated = true` khi `limit` đã cắt. Cắt **im lặng** là cách một hàng đợi tưởng mình
+  rỗng trong khi vẫn còn việc. `limit=0` ⇒ `400`.
+- ⚠️ `author_did` (của **genesis**) **KHÔNG còn là ranh giới lô** kể từ `Specs#32`
+  (2026-08-19): lô gom **LIÊN HỘ**, chia theo **kích cỡ**. Nhóm lô theo trường này là dựng
+  lại một ràng buộc đã bỏ, và trả giá bằng phần cố định của tx nhân với *số hộ* thay vì
+  *số tx*.
+
+#### POST `/v1/strata/_anchor_batch` — neo N ref trong MỘT tx (mối nối B1′)
+
+```jsonc
+// req
+{ "refs":["<hex32|lnref1…>", ...], "priority":"batch_daily" }
+// 200
+{ "anchor_txid":"<hex>", "backend":"settlement", "batch_size":5,
+  "anchors":[ { "ref_id":"<hex32>", "head_version_hash":"<hex32>",
+                "mmr_root":"<hex32>", "seq":7,
+                "anchor_txid":"<hex>", "backend":"settlement" } ] }
+```
+
+**MỘT `anchor_txid` cho cả lô** — đó chính là tính chất đường này giữ (1 tx / N anchor).
+
+**Phân vai, không được trộn** (§4.4): **Mosaic** quyết *khi nào* bắn và lô gồm *ref nào*;
+**Strata** kiểm INV-E7 từng ref rồi encode label 1234; **Mosaic** dựng tx + ký + submit.
+
+⚠️ **Đi vòng qua route này** (Mosaic tự gom lô rồi submit thẳng) là **mất gác chống
+rollback**: lô vẫn lên chuỗi, tx vẫn confirmed, và không còn ai chặn một anchor
+tụt-lùi-seq. **Không lỗi nào bật ra.**
+
+**Trùng `ref` trong một lô ⇒ TỪ CHỐI.** Hai entry cùng lineage trong một tx thì entry sau
+mang cùng `seq` với entry trước; đọc lại chỉ một cái sống, còn lõi đã chốt
+`publish_anchor()` hai lần. Không thứ tự nào cứu được, nên chặn ở cửa.
+
+`priority = "no_anchor"` ⇒ **xem trước, không tốn tx**: trả `anchor_txid: null` và
+**không** chốt seq đã neo. Bản xem trước này **phải chạy đủ tập gác của cửa thật**, kể cả
+gác đọc-on-chain — chạy ít hơn thì nó là một câu trả lời khác, và nó được tin đúng lúc
+người ta cần sự thật nhất.
+
+#### GET `/v1/strata/_settlement_window?from_slot=&to_slot=` — nguồn LÁ của checkpoint
+
+```jsonc
+{ "from_slot":131883090, "to_slot":131884333, "tip_slot":131889651,
+  "scanned_txs":2, "count":8,
+  "anchors":[ { "ref_id":"<hex32>", "head_version_hash":"<hex32>", "mmr_root":"<hex32>",
+                "seq":7, "slot":131883500, "txid":"<hex>" } ] }
+```
+
+Trả mọi record anchor `t = 1` dưới label **1234**, trong các tx **do publisher đã pin
+CHI**, có `slot ∈ [from_slot, to_slot)` — `from_slot` **đóng**, `to_slot` **mở**.
+
+**Cả hai tham số BẮT BUỘC, không có mặc định.** Một cửa sổ mặc định là một cửa sổ mà bên
+gọi không khai — và cam kết on-chain thì phải nói rõ nó cam kết đúng quãng nào, chứ không
+phải quãng server tự chọn hôm đó. `to_slot <= from_slot` ⇒ `400`.
+
+**Bốn trường anchor giữ ĐÚNG thứ tự canonical của `StrataAnchor`** (`ref_id ‖
+head_version_hash ‖ mmr_root ‖ seq`): bên tiêu thụ băm lại đúng 104 byte đó để dựng lá
+checkpoint, nên thứ tự ở đây là **hợp đồng byte**, không phải lựa chọn trình bày.
+
+🔺 **Quét không phủ hết cửa sổ là LỖI (`502`), không phải một danh sách ngắn hơn.** Route
+này **không** có cờ `truncated`, có chủ ý: `root` tính trên tập thiếu **vẫn hợp lệ về hình
+thức**, vẫn chốt lên chuỗi được, chuỗi `epoch` nhìn vẫn liên tục và cửa sổ vẫn khít —
+**không có gì bật ra** để nói cam kết vừa ghi ít hơn sự thật. Một luồng sinh ra để chặn
+*"tin khoá vĩnh viễn"* mà lại tự đẻ ra một cách nói dối không ai kiểm được thì nó tự huỷ.
+
+Ba vế nhỏ hơn, mỗi vế chặn một cách hỏng:
+
+- **Backend không quét được slot ⇒ nói ra, không trả rỗng.** Rỗng là một chu kỳ hợp lệ;
+  *"không đọc được"* thì không. Gộp hai câu này thì một backend cấu hình sai sinh ra cả
+  một chuỗi checkpoint toàn chu kỳ rỗng, tất cả đều "hợp lệ".
+- **Lịch sử ngắn hơn trần quét ⇒ vẫn tính là phủ hết** — thiếu vế này thì chu kỳ **đầu
+  tiên** không bao giờ đóng được.
+- **Tx chưa confirm không làm dừng lượt quét** — dừng ở đó thì một tx đang chờ xác nhận
+  che khuất toàn bộ cửa sổ bên dưới.
+
+**Hai ranh giới, ghi ra thay vì để ngầm:**
+
+- **KHÔNG khử trùng ở tầng đọc.** Hai tx cùng chở một anchor (thử lại) thì **cả hai** xuất
+  hiện. Luật khử trùng `(ref_id, seq)` thuộc **bên tính `root`** — trộn hai việc thì bên
+  đọc tự quyết cái mà cam kết on-chain phụ thuộc vào.
+- **Route KHÔNG quyết cửa sổ đã đủ SÂU để đóng chưa.** Nó trả `tip_slot`, bên gọi tự
+  quyết. Độ sâu an toàn là tham số của **mạng** và của **khẩu vị rủi ro**, không phải của
+  phép đọc; ghim nó vào đây là đặt một hằng vào sai tầng.
+
+**Chi phí:** `1 + n` lượt gọi backend cho `n` tx trong tầm quét — **giá của một chu kỳ**,
+không phải giá của một lô, nên nó rơi vào nhịp checkpoint chứ không vào đường neo.
+`scanned_txs` trả về để **đo được** thay vì ước.
 
 ### §3.1 Bảng lỗi HTTP (ánh xạ `StrataError`)
 
@@ -260,7 +459,58 @@ Style axum khớp `lampnet-node.rs` (`Router::new().route("/v1/...", post(handle
 | 409 | `AnchorRollback` | neo lại seq ≤ seq đã neo | E7 |
 | 404 Not Found | (None từ `version`/`prove_version`/`prove_field`) | ref/seq/key không tồn tại | — |
 
+**Lỗi mức CỬA — không phải biến thể lõi**, nhưng client vẫn phải map. Đánh dấu tách ra để
+không ai nhầm chúng là `StrataError`:
+
+| HTTP | `error` | Khi nào |
+|---|---|---|
+| 400 Bad Request | *(Malformed)* | body/param không giải mã được: hex sai độ dài, enum lạ, **khoá trùng trong `state_fields`** (INV-E6), `limit=0`, cửa sổ rỗng/lùi |
+| 409 Conflict | `RefExists` | `create` lần hai trên cùng `(author_did, genesis_nonce)` — **KHÔNG** ghi đè lịch sử |
+| 422 | `TimestampTooFarFuture` | 🔴 gần như chắc chắn client gửi **mili giây** thay vì giây — xem dưới |
+| 501 Not Implemented | `AnchorNotConfigured` | daemon chưa cắm `AnchorSink` |
+| 502 Bad Gateway | `AnchorRejected` | backend neo từ chối (gồm **quét không phủ hết cửa sổ** ở `_settlement_window`) — retry vô ích |
+| 503 Service Unavailable | `AnchorNetwork` | lỗi mạng của backend neo — **retry được** |
+| 503 | `JournalBroken` | nhật ký bền vững hỏng — xem dưới |
+
+🔴 **`TimestampTooFarFuture` là gác DUY NHẤT đứng giữa một lỗi gõ và một lineage chết
+vĩnh viễn.** `ts` là **giây** unix. Lõi là hàm thuần, không có đồng hồ — nó chỉ ép `ts`
+không-giảm, nên một `ts` tương lai xa **vẫn hợp lệ với lõi**. Nhận nó một lần là khoá chết
+quyền ghi của ref đó tới tận năm 56000: mọi version sau với `ts` giây thật đều
+`TimestampRegress`. **Không có route sửa, không có rollback.** Cửa vì thế gác hai lớp —
+biên lệch đồng hồ (`300 s`) **và** một trần **tuyệt đối** `10^12` không phụ thuộc đồng hồ
+daemon, để gác vẫn đúng khi container chưa kịp NTP.
+
+🔴 **`JournalBroken` — daemon còn ĐỌC đúng, chỉ không nhận thêm việc.** Một lượt ghi nhật
+ký hỏng để lại trạng thái trong bộ nhớ **đã tiến** quá trạng thái bền vững; mọi request
+sau đó sẽ xây tiếp lên một nền **sẽ biến mất**. Nên daemon **tự đóng đường ghi** cho tới
+khi khởi động lại. `503` chứ không `500`: `500` nói *"lỗi bất ngờ"*, còn đây là một trạng
+thái **đã biết và đã chọn**.
+
 Daemon trả `{ "error":"<StrataError variant>", "detail":{...} }`. Fail-closed: mọi vi phạm invariant từ chối version, KHÔNG ghi.
+
+### §3.2 Bền vững — daemon phải dựng lại được chính mình
+
+Trạng thái daemon giữ (`chain` · `policy` · `fields` · `audit` · gương neo) **không dựng
+lại được từ chuỗi**: on-chain chỉ có `StrataAnchor` **104 byte**, không có version nào,
+không `sig`, không `policy`, không `fields` — và `state_root` là hàm **một chiều**.
+
+⇒ Một bản triển khai phục vụ dữ liệu thật **PHẢI** có nhật ký bền vững, và nhật ký đó
+**PHẢI** ghi lại **request đã được nhận**, không phải trạng thái nội bộ đã tuần tự hoá.
+
+**Vì sao normative chứ không phải lựa chọn cài đặt.** Nạp lại trạng thái đã tuần tự hoá là
+**bỏ qua lõi**: mọi bất biến `INV-E1/E2/E4` và `verify_strict` chỉ chạy ở đường ghi, nên
+một tệp bị sửa nạp vào thành một chuỗi **chưa bao giờ đi qua cửa nào** — rồi nó phục vụ
+proof, và những proof ấy **verify đúng**. Ghi request rồi **chạy lại đường ghi** cho một
+tính chất thay cho một lời hứa: *nhật ký chỉ chứa được những lịch sử mà cửa sẽ nhận lần
+nữa.*
+
+| Ràng buộc | Lý do |
+|---|---|
+| `Did → pubkey` **KHÔNG** được nằm trong nhật ký | CHỐT-5: registry là nguồn **duy nhất**. Ghi pubkey vào nhật ký là dựng nguồn sự thật thứ hai, và hai nguồn thì lệch. Hệ quả đã biết: gỡ một khoá khỏi registry ⇒ daemon **từ chối khởi động** |
+| Bản ghi neo ghi **SAU** khi backend trả biên nhận | ghi trước ⇒ dựng lại một ref *"đã neo"* mà chuỗi không biết ⇒ ref **cháy** vĩnh viễn |
+| Bản ghi `create` **nguyên tử** với phép chèn | *bản ghi có ⟺ ref đã chèn*; tách ra thì mất bất biến theo **cả hai** chiều |
+| Replay chạy **trước khi mở cổng** | daemon nhận request lúc còn đang dựng lại chính mình sẽ trả `404` cho những ref nó sắp có, rồi ghi vào một chuỗi chưa đủ dài |
+| Chế độ **phù du** phải được KHAI tường minh | mất hồ sơ vì *không ai nghĩ tới nó* khác hẳn mất hồ sơ vì một lựa chọn đã nói ra |
 
 ---
 
@@ -434,7 +684,7 @@ Rà toàn bộ tên hàm/struct trong `Strata-Tech.md` với code thật. Các l
 | struct `StrataRef { ref_id, head_version_hash, mmr_root, ... }` (§1.2) | KHÔNG tồn tại; trạng thái trong `StrataChain`, đọc qua `chain.anchor()` | §1 đính chính |
 | `gen_ref_id(...) -> H32` (§2.1) | `gen_ref_id(...) -> String` (bech32m); raw 32B = `gen_ref_id_raw` | §2.1 đính chính |
 | `extend_mmr` / `read_head` / `version_at` free-fn (§3.3/§3.5/§3.7) | MMR mở rộng TRONG `append_version`; `chain.head()`; `chain.version_at(t)` | §2.3/§2.4 |
-| `FieldProof { value_cid, leaf_idx, merkle_path, version_seq }` (§1.6) | `FieldProof { key, value, fvh, siblings: Vec<(Hash32,bool)>, state_root }` (no `value_cid`/`leaf_idx`/`version_seq`) | §1 + §3 dùng schema code thật |
+| `FieldProof { value_cid, leaf_idx, merkle_path, version_seq }` (§1.6) | `FieldProof { key, value, fvh, salt, siblings: Vec<(Hash32,bool)>, state_root }` (no `value_cid`/`leaf_idx`; `version_seq` chỉ có ở **DTO** cửa, không ở struct lõi) | §1 + §3 dùng schema code thật. **`salt` thêm 2026-08-20** (`#63`) — bật blinding §6.3; rỗng = không làm mù |
 | `MmrProof { leaf_seq, leaf_hash, mmr_size, merkle_path, peaks }` (§1.6) | `InclusionProof { siblings: Vec<(Hash32,bool)>, peak_index, peaks }` (mmr_size truyền riêng từ `prove_version`) | §1 + §3 |
 | `AuditEntry { target_ref_id, subject_hash, action, ts, location_cid, sig }` (§1.6b) | `AuditEntry { created_ts, actor_did, action, signed_hash, location }` (no `target_ref_id`/`sig` trong leaf; ts tên `created_ts`) | §1 + §2.6 |
 | `Cid = Vec<u8>` "content_cid thuần" | khớp — `content_cid: Vec<u8>`, `value: Vec<u8>` (CHỐT-4) | ✅ |
