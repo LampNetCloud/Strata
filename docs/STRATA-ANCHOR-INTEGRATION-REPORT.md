@@ -1228,3 +1228,178 @@ Ghi ra để không ai đọc nhầm phạm vi:
 - **Không** mở mainnet — `K-1` còn hiệu lực, mọi lượt chạy thật là **Preprod**.
 - **Không** đụng PhoenixKey trong đợt này — chỉ ghi ra rằng chỗ cắm là trait
   `KeyRegistry` và điều kiện thu hồi của bảng khoá trao tay là resolver đó.
+
+---
+
+## 15. Daemon BỀN VỮNG — `store` in-memory → nhật ký trên đĩa (`#68`)
+
+Việc chặn duy nhất của bảng §14.9. Hôm nay `strata-node` restart là **mất hồ sơ cây**, và
+§14.5 đã đo là **không dựng lại được từ chuỗi**: on-chain chỉ có `StrataAnchor` 104 byte.
+
+### 15.1 🔑 Ghi REQUEST, không ghi TRẠNG THÁI — và đó là cả giá trị của đợt này
+
+Cách hiển nhiên là tuần tự hoá `ChainEntry` (versions + MMR + policy) rồi nạp lại. Cách đó
+**bỏ qua lõi**: mọi bất biến `INV-E1/E2/E4` và `verify_strict` chỉ chạy ở đường ghi, nên
+một tệp bị sửa — hỏng đĩa, tay người, một bản vá sai — nạp vào thành một `StrataChain`
+**chưa bao giờ đi qua cửa nào**. Sau đó nó phục vụ proof, và những proof ấy **verify đúng**.
+
+Nhật ký này vì thế ghi **đúng cái client đã gửi và cửa đã nhận**, rồi replay bằng cách
+**gọi lại chính hàm của đường ghi** (`create_inner` · `append_inner` · `audit_inner` ·
+`publish_anchor`). Hệ quả là một **tính chất**, không phải một lời hứa:
+
+> Nhật ký chỉ chứa được những lịch sử mà cửa sẽ nhận **lần nữa**.
+
+Đo bằng cách cố ý phá: đổi `content_cid` của một version từ `"beef"` thành `"bee0"` trong
+tệp ⇒ replay đỏ `403 BadSignature` ⇒ **daemon không khởi động**. Không có đường nào để nó
+phục vụ lịch sử giả.
+
+Giá phải trả nói thẳng: replay là `O(n)` lượt `verify_strict`. Nó **đo được**, không ước —
+xem §15.7.
+
+Cùng lý do ấy dẫn tới một chi tiết dễ tưởng là thừa: `create_inner` / `audit_inner` được
+**tách ra** khỏi handler thay vì viết bản thứ hai cho replay. Hai đường dựng genesis là
+**hai định nghĩa cho cùng một vị ngữ**, và chúng lệch nhau vào ngày không ai nhìn.
+
+### 15.2 `Did → pubkey` KHÔNG nằm trong nhật ký — và cái giá đã biết của việc đó
+
+`Create` chỉ ghi **danh sách `Did`**, không ghi pubkey; replay phân giải khoá qua
+**key-registry** như đường ghi thật (CHỐT-5). Ghi pubkey vào tệp là dựng **nguồn sự thật
+thứ hai** cho đúng thứ registry sinh ra để là nguồn duy nhất — và hai nguồn thì lệch nhau.
+
+**Cái giá, ghi ra để nó là hành vi có chủ ý chứ không phải một bất ngờ:** gỡ một khoá khỏi
+`STRATA_NODE_KEYS` rồi khởi động lại ⇒ **daemon từ chối lên**, kèm tên dòng và
+`424 UnknownAuthor`. Có một bài kiểm riêng cho đúng ca đó.
+
+Fail-closed đúng chiều: phục vụ một lineage mà ta **không còn xác minh được chủ của nó**
+thì tệ hơn là không phục vụ. Nhưng nó nối thẳng vào §14.4 — chừng nào đăng ký khoá còn là
+một biến env, thì *"xoay khoá"* và *"khởi động lại"* còn là cùng một thao tác nguy hiểm.
+
+### 15.3 Ba bất biến của **thứ tự ghi** — mỗi cái chặn một cách mất im lặng
+
+| Thao tác | Nhật ký ghi ở đâu | Cái nó chặn |
+|---|---|---|
+| `create` | **dưới cùng khoá ghi của kho**, giữa `contains_key` và `insert` | bản ghi `Create` mồ côi (replay `RefExists`, daemon không lên) **và** ref sống trong RAM mà tệp không biết |
+| `append` / `audit` | **sau** khi lõi nhận, **vẫn trong khoá của ref** | hai version đảo chỗ trong tệp ⇒ replay dựng ra một chuỗi khác |
+| `anchor` | **sau** khi backend trả biên nhận | ref bị **cháy**: replay dựng lại một ref "đã neo" mà chuỗi không biết ⇒ `AnchorRollback` vĩnh viễn |
+
+Bất biến của dòng đầu đáng viết ra thành câu: **bản ghi `Create` có trong nhật ký ⟺ ref đã
+được chèn.** Tách hai bước ra ngoài khoá thì mất nó theo **cả hai chiều**. `create` là thao
+tác một-lần-mỗi-lineage, nên đây là chỗ đúng để đổi thông lượng lấy một bất biến không có
+cách nào phục hồi nếu vỡ.
+
+Neo **lô** ghi `N` bản ghi rồi **fsync một lần** — lô là *một tx*, nên nó cũng là *một* sự
+kiện bền vững. Mọi khoá ref của lô vẫn đang được giữ lúc đó, nên không ai chen vào giữa.
+
+### 15.4 Ghi hỏng ⇒ nhật ký **tự đầu độc**, cửa trả `503`
+
+Ghi **trước** khi lõi kiểm thì nhật ký chứa cả request bị từ chối ⇒ replay đỏ. Nên phải ghi
+**sau**. Nhưng khi ấy một lượt ghi đĩa hỏng để lại trạng thái RAM **đã tiến** quá trạng thái
+bền vững, và mọi request sau đó xây tiếp lên một nền sẽ biến mất.
+
+⇒ Ghi hỏng ⇒ `Journal` bật cờ đầu độc **trước khi trả lỗi** (người gọi có thể nuốt lỗi, cờ
+thì không), mọi lượt ghi sau trả `503 JournalBroken`. **Đọc vẫn phục vụ** — dữ liệu trong
+RAM vẫn đúng, chỉ là daemon không nhận thêm việc nó không nhớ nổi.
+
+`503` chứ không `500`: `500` nói *"lỗi bất ngờ"*, còn đây là một trạng thái **đã biết và đã
+chọn**.
+
+Bài kiểm dùng **`/dev/full`** (mọi lượt ghi trả `ENOSPC`) — một lỗi I/O **thật**, không phải
+một cờ do bài kiểm tự bật.
+
+### 15.5 🪤 Đuôi rách — bỏ **đúng** dòng cuối, và điều kiện đặt theo BYTE
+
+Tiến trình chết giữa một lượt `write_all` để lại một dòng không có `\n` kết thúc. Bỏ nó là
+**khôi phục đúng sự thật**: cửa chỉ trả `200` sau khi `append` nhật ký trả `Ok`, nên dòng
+đó là một thao tác client **chưa từng được báo thành công**.
+
+Điều kiện đặt theo **byte cuối tệp**, không theo *"dòng cuối có parse được không"*: một
+dòng rách vẫn có thể **tình cờ parse được** (JSON cụt ở đúng chỗ), và khi ấy phép thử theo
+nội dung sẽ nhận vào một bản ghi cụt — im lặng.
+
+Và `fsync` không phải chi tiết thừa: thiếu nó thì *"đã ghi"* chỉ có nghĩa *"đã nằm trong
+cache của hệ điều hành"* — đúng thứ biến mất trong chính ca mà nhật ký sinh ra để sống sót.
+
+### 15.6 `STRATA_NODE_JOURNAL` **bắt buộc** — phù du phải được KHAI
+
+Chạy phù du là một lựa chọn hợp lệ (dev, test, một lượt thử). Mất hồ sơ vì **không ai nghĩ
+tới nó** thì không. Hai ca ấy phân biệt bằng đúng một thứ: người vận hành đã **nói ra** hay
+chưa.
+
+```
+(thiếu env)                ⇒ TỪ CHỐI khởi động, mã thoát 1
+STRATA_NODE_JOURNAL=none   ⇒ chạy, in "⚠️ kho PHÙ DU, restart là mất sạch hồ sơ cây"
+STRATA_NODE_JOURNAL=<path> ⇒ replay rồi mới mở cổng
+```
+
+Cùng khuôn với `--commit` của bootstrap checkpoint (`SEAM §14.8`) và với **beacon mặc định
+TẮT**: chỗ nào mất mát không lấy lại được thì mặc định phải là chỗ **đòi người vận hành
+khai**.
+
+Và replay chạy **trước khi mở cổng**: một daemon nhận request trong lúc còn đang dựng lại
+chính mình sẽ trả `404` cho những ref nó sắp có, rồi ghi vào một chuỗi chưa đủ dài.
+
+### 15.7 ✅ Nghiệm thu — restart THẬT bằng chính bin, kèm đối chứng
+
+Lượt 1 — daemon lên với nhật ký mới, ví dụ OriLife ghi 3 cây × 3 version:
+
+```
+nhật ký: /tmp/strata-restart-demo.jsonl — replay 1 bản ghi trong 246,99µs: 0 ref · 0 version
+_dirty  → count=3 total_pending=9   (head_seq=2 cả ba)
+```
+
+Tắt tiến trình. Lượt 2 — **tiến trình mới**, cùng tệp:
+
+```
+nhật ký: /tmp/strata-restart-demo.jsonl — replay 10 bản ghi trong 88,40ms: 3 ref · 9 version
+_dirty  → count=3 total_pending=9   (head_seq=2 cả ba)   ← KHỚP
+prove_field/tree_state → state_root be9338d8… , version_seq 2   ← `fields` sống
+head    → mmr_root e285a2cf… , head_version_hash caf9cf65…
+```
+
+**Đối chứng là phần bắt buộc:** cùng bin, nhật ký **mới rỗng** ⇒ `_dirty count = 0`. Không
+có nó thì ba dòng "KHỚP" ở trên cũng đúng với một daemon đọc lại chính bộ nhớ cũ.
+
+`prove_field` là phép đo đáng giá nhất trong bảng: `state_root` là hàm **một chiều**, nên
+mất `fields` là mất `prove_field` **vĩnh viễn** dù `chain` còn nguyên — và một bản replay
+quên đúng nhánh đó vẫn qua sạch phép so `head`.
+
+**Số đo quy mô** (bản release, 40 lineage × 25 version):
+
+| | |
+|---|---|
+| nhật ký | 1 001 dòng · **560 267 byte** ⇒ ~**560 B/version** |
+| replay | **54,18 ms** cho 1 000 version ⇒ ~**54 µs/version** |
+
+Ngoại suy để biết ngưỡng chứ không để yên tâm: **1 triệu version ⇒ ~54 s replay, ~560 MB
+tệp**. Đó là chỗ nợ nén/ảnh chụp bắt đầu có thật — và nay nó có **một con số**, không phải
+một linh cảm.
+
+### 15.8 Đảo mã — bốn mũi, mỗi mũi đỏ đúng bài của nó
+
+Bộ kiểm xanh mà đảo mã vẫn xanh là bộ kiểm trang trí.
+
+| Mũi đảo | Bài đỏ |
+|---|---|
+| bỏ xử lý **đuôi rách** | `duoi_rach_bo_dung_dong_cuoi_va_phan_con_lai_van_song` |
+| bỏ **đối chứng `Anchor.seq`** | `anchor_seq_lech_thi_tu_choi_chu_khong_nap_vao_guong` |
+| đường ghi **không ghi nhật ký** | 5 bài, gồm cả `audit_log_song_qua_restart` |
+| bỏ **đầu độc** khi ghi hỏng | `ghi_hong_that_thi_dau_doc_va_cua_tra_503` |
+
+`Anchor.seq` đáng một mũi riêng vì nó là chỗ dễ hiểu nhầm nhất: nó **KHÔNG** phải giá trị
+nạp lại — replay tính lại `seq` bằng `publish_anchor()` rồi **so** với con số trong tệp.
+Lệch nghĩa là chuỗi dựng lại **khác** chuỗi lúc ghi, tức mọi proof daemon sắp phục vụ nói
+về một lịch sử khác lịch sử đã neo lên chuỗi. Nạp thẳng con số đó vào gương thì không có gì
+bật ra.
+
+**Bộ kiểm:** lib **135** · node **42** (33 + **9** mới) · toàn workspace **252 pass / 0
+fail** · fmt + clippy `-D warnings` sạch.
+
+### 15.9 Còn hở — nói ra, không giấu
+
+| # | Chỗ hở | Đo được |
+|---|---|---|
+| 1 | **Cửa sổ giữa "on-chain nhận" và "fsync xong"** | tiến trình chết đúng khe đó ⇒ mất bản ghi `Anchor`. Replay để `last_anchor_seq = None` ⇒ ref lại nằm trong `_dirty` ⇒ coordinator neo lại **cùng `seq`**. Gác on-chain là `c.seq > a.seq` (`routes.rs:1000`) nên **bằng nhau vẫn qua** ⇒ hậu quả là **một tx trùng nội dung**, tốn phí, **không** phải ref kẹt. Ghi ra vì nó là đánh đổi, không phải sơ suất: đường duy nhất đóng hẳn là two-phase commit với chuỗi, mà chuỗi không có `prepare` |
+| 2 | **Không nén, không ảnh chụp** | tệp lớn tuyến tính theo version; ngưỡng đã đo ở §15.7 |
+| 3 | `fields` vẫn nằm **trong nhật ký**, chưa đi Mirage | §8.4 nói bản thật giữ CID. Hôm nay byte nằm cùng request đã ký ⇒ nhật ký mang cả dữ liệu riêng tư |
+| 4 | **Một tệp, một tiến trình** | không có khoá tệp: hai daemon cùng trỏ một nhật ký sẽ ghi xen kẽ và cả hai đều sai. Chưa gác |
+| 5 | Xoay khoá vẫn **phá** | §15.2 — nối vào nợ PhoenixKey của §14.4 |

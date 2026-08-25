@@ -75,7 +75,10 @@ pub fn to_pairs(fields: &[FieldDto]) -> Result<StateFields, String> {
 // POST /v1/strata/create
 // ────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
+/// ⚠️ `Serialize` có mặt vì **nhật ký bền vững ghi lại chính request này** (xem
+/// [`crate::journal`]), không phải để trả ra cửa. Thêm/đổi trường ở `CreateReq` là
+/// **đổi định dạng nhật ký** ⇒ phải nâng `journal::FORMAT_VERSION`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateReq {
     #[serde(with = "hexs::h32")]
     pub author_did: [u8; 32],
@@ -110,7 +113,10 @@ pub struct CreateResp {
 // POST /v1/strata/:ref/version
 // ────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
+/// ⚠️ `Serialize` có mặt vì **nhật ký bền vững ghi lại chính request này** (xem
+/// [`crate::journal`]), không phải để trả ra cửa. Thêm/đổi trường ở `AppendReq` là
+/// **đổi định dạng nhật ký** ⇒ phải nâng `journal::FORMAT_VERSION`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendReq {
     /// seq của head mà client tin là mình đang nối vào (chống ghi đè mù).
     pub prev_seq: u64,
@@ -139,7 +145,10 @@ pub struct AppendResp {
 // POST /v1/strata/:ref/event
 // ────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
+/// ⚠️ `Serialize` có mặt vì **nhật ký bền vững ghi lại chính request này** (xem
+/// [`crate::journal`]), không phải để trả ra cửa. Thêm/đổi trường ở `AuditEventReq` là
+/// **đổi định dạng nhật ký** ⇒ phải nâng `journal::FORMAT_VERSION`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEventReq {
     #[serde(with = "hexs::h32")]
     pub actor_did: [u8; 32],

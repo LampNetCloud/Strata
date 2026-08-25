@@ -2,6 +2,8 @@
 //!
 //! Cấu hình qua ENV:
 //! - `STRATA_NODE_ADDR` — địa chỉ lắng nghe (mặc định `127.0.0.1:6690`).
+//! - `STRATA_NODE_JOURNAL` — **bắt buộc**. Đường dẫn tệp nhật ký bền vững, hoặc chuỗi
+//!   `none` để chạy **phù du** (mất sạch khi restart).
 //! - `STRATA_NODE_KEYS` — nạp key-registry: `did_hex32:pubkey_hex32` ngăn bởi dấu phẩy.
 //!   Chỉ nạp **khoá công khai** — daemon không bao giờ cầm khoá bí mật (nó không ký).
 //!   Bản thật thay bằng PhoenixKey resolver qua trait [`KeyRegistry`].
@@ -13,8 +15,59 @@
 //!   đầu tiên, tức sau khi dữ liệu đã đi vào.
 
 use ed25519_dalek::VerifyingKey;
-use lampnet_strata_node::{AppState, ChainStore, InMemoryRegistry, build_sink, router};
+use lampnet_strata_node::{
+    AppState, ChainStore, InMemoryRegistry, Journal, KeyRegistry, build_sink, read_records,
+    replay_into, router,
+};
 use std::sync::Arc;
+use std::time::Instant;
+
+/// Vì sao `STRATA_NODE_JOURNAL` **bắt buộc**, chứ không mặc định phù du.
+///
+/// Chạy phù du là một lựa chọn hợp lệ (dev, test, một lượt thử). Mất hồ sơ vì **không ai
+/// nghĩ tới nó** thì không. Hai ca ấy phân biệt được bằng đúng một thứ: người vận hành đã
+/// **nói ra** hay chưa.
+///
+/// Cùng khuôn với `--commit` của bootstrap checkpoint và với "beacon mặc định TẮT": chỗ
+/// nào mất mát không lấy lại được thì mặc định phải là chỗ đòi người vận hành khai.
+const JOURNAL_ENV: &str = "STRATA_NODE_JOURNAL";
+
+/// Dựng kho: replay nhật ký nếu có, hoặc kho phù du nếu người vận hành đã khai `none`.
+fn build_store(registry: &dyn KeyRegistry) -> Result<Arc<ChainStore>, String> {
+    let spec = std::env::var(JOURNAL_ENV).map_err(|_| {
+        format!(
+            "thiếu `{JOURNAL_ENV}`. Đặt đường dẫn tệp nhật ký để daemon dựng lại được \
+             chính mình sau khi restart, hoặc đặt `{JOURNAL_ENV}=none` để khai RÕ rằng \
+             lượt chạy này là phù du (restart = MẤT SẠCH hồ sơ cây: on-chain chỉ có \
+             StrataAnchor 104 byte, không có version/sig/policy/fields nào để dựng lại)"
+        )
+    })?;
+
+    if spec.trim() == "none" {
+        println!(
+            "⚠️  nhật ký: TẮT (`{JOURNAL_ENV}=none`) — kho PHÙ DU, restart là mất sạch hồ sơ cây"
+        );
+        return Ok(Arc::new(ChainStore::new()));
+    }
+
+    let journal = Arc::new(Journal::open(&spec).map_err(|e| format!("mở nhật ký `{spec}`: {e}"))?);
+    let recs = read_records(&spec).map_err(|e| format!("{e}"))?;
+    let store = ChainStore::with_journal(journal);
+
+    let t0 = Instant::now();
+    let stats = replay_into(&store, registry, &recs).map_err(|e| format!("{e}"))?;
+    // In SỐ ĐO, không in "OK": một lượt replay đọc nhầm tệp rỗng cũng "OK".
+    println!(
+        "nhật ký: {spec} — replay {} bản ghi trong {:?}: {} ref · {} version · {} audit · {} neo",
+        stats.records,
+        t0.elapsed(),
+        stats.refs,
+        stats.versions,
+        stats.audits,
+        stats.anchors
+    );
+    Ok(Arc::new(store))
+}
 
 /// `did_hex:pk_hex,did_hex:pk_hex…` → registry. Sai định dạng ⇒ dừng hẳn (fail-closed:
 /// chạy với registry thiếu khoá thì mọi ghi đều 424, im lặng còn tệ hơn).
@@ -57,7 +110,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         build_sink(&|k| std::env::var(k).ok()).map_err(|e| format!("cấu hình neo: {e}"))?;
     println!("neo: {}", choice.description);
 
-    let state = AppState::new(Arc::new(ChainStore::new()), Arc::new(registry), choice.sink);
+    // Replay TRƯỚC khi mở cổng: một daemon nhận request trong lúc còn đang dựng lại chính
+    // mình sẽ trả 404 cho những ref nó sắp có, và ghi vào một chuỗi chưa đủ dài.
+    let registry: Arc<dyn KeyRegistry> = Arc::new(registry);
+    let store = build_store(registry.as_ref())?;
+
+    let state = AppState::new(store, registry, choice.sink);
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
