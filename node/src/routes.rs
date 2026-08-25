@@ -11,6 +11,7 @@ use crate::anchor::backend_name;
 use crate::dto::*;
 use crate::error::{ApiError, ApiResult};
 use crate::hexs;
+use crate::journal::{JournalError, JournalRecord, ref_hex};
 use crate::registry::KeyRegistry;
 use crate::store::{AnchorState, ChainEntry, ChainStore, lock};
 use axum::Json;
@@ -75,6 +76,23 @@ pub fn router(state: AppState) -> Router {
 // ────────────────────────────────────────────────────────────────────────────
 // Tiện ích chung
 // ────────────────────────────────────────────────────────────────────────────
+
+/// Ghi nhật ký hỏng ⇒ **503**, và daemon đã tự đầu độc (mọi lượt ghi sau cũng 503).
+///
+/// Không nuốt được: lượt ghi vừa rồi ĐÃ vào RAM nhưng KHÔNG vào đĩa, nên trả 200 ở đây
+/// là hứa một thứ sẽ biến mất ở lần khởi động sau — đúng loại hỏng im lặng mà cả nhật ký
+/// lẫn cửa này sinh ra để chặn.
+fn journal_err(e: JournalError) -> ApiError {
+    ApiError::JournalBroken(e.to_string())
+}
+
+/// Ghi một bản ghi vào nhật ký của kho (không có nhật ký ⇒ không làm gì).
+fn journal(st: &AppState, rec: JournalRecord) -> ApiResult<()> {
+    match st.store.journal() {
+        Some(j) => j.append(&rec).map_err(journal_err),
+        None => Ok(()),
+    }
+}
 
 /// `:ref` nhận **bech32m `lnref1…`** (dạng §2.1 trả ra) hoặc hex 64 ký tự (tiện debug).
 fn parse_ref(s: &str) -> ApiResult<Hash32> {
@@ -211,11 +229,16 @@ fn action_from_str(s: &str) -> ApiResult<AuditAction> {
 // POST /v1/strata/create — §2.1 genesis
 // ────────────────────────────────────────────────────────────────────────────
 
-async fn create(
-    State(st): State<AppState>,
-    req: Result<Json<CreateReq>, JsonRejection>,
-) -> ApiResult<Json<CreateResp>> {
-    let req = body(req)?;
+/// Phần THUẦN của `create` — dựng `ChainEntry` + `CreateResp` từ request đã nhận.
+///
+/// Tách ra vì **replay nhật ký phải đi đúng đường này**, không phải một đường thứ hai:
+/// hai đường dựng genesis là hai định nghĩa cho cùng một vị ngữ, và chúng lệch nhau vào
+/// ngày không ai nhìn. Ở đây "đúng đường" gồm cả phần dễ quên — `policy` dựng từ khoá
+/// **do registry trả**, không phải khoá suy từ `Did` (CHỐT-5).
+pub(crate) fn create_inner(
+    registry: &dyn KeyRegistry,
+    req: &CreateReq,
+) -> ApiResult<(Hash32, ChainEntry, CreateResp)> {
     check_ts(req.ts)?;
     let fields = to_pairs(&req.state_fields).map_err(ApiError::Malformed)?;
 
@@ -232,8 +255,7 @@ async fn create(
     // CHỐT-5: khoá đến TỪ key-registry, không suy từ Did.
     let mut policy = Policy::new();
     for did in &authors {
-        let pk = st
-            .registry
+        let pk = registry
             .resolve(did)
             .ok_or(ApiError::Core(StrataError::UnknownAuthor))?;
         policy.allow(*did, pk);
@@ -267,10 +289,28 @@ async fn create(
         head_version_hash: hex::encode(chain.head_version_hash()),
         mmr_root: hex::encode(chain.mmr_root()),
     };
+    Ok((ref_id, ChainEntry::new(chain, policy, fields), resp))
+}
 
+async fn create(
+    State(st): State<AppState>,
+    req: Result<Json<CreateReq>, JsonRejection>,
+) -> ApiResult<Json<CreateResp>> {
+    let req = body(req)?;
+    let (ref_id, entry, resp) = create_inner(st.registry.as_ref(), &req)?;
+
+    // Nhật ký đi CÙNG phép chèn, dưới cùng một khoá — xem `ChainStore::insert_journaled`
+    // cho lý do I/O nằm dưới khoá ghi của kho.
+    let rec = JournalRecord::Create {
+        r: ref_hex(&ref_id),
+        req: req.clone(),
+    };
     st.store
-        .insert(ref_id, ChainEntry::new(chain, policy, fields))
-        .map_err(|_| ApiError::RefExists(ref_id))?;
+        .insert_journaled(ref_id, entry, Some(rec))
+        .map_err(|e| match e {
+            crate::store::StoreError::RefExists => ApiError::RefExists(ref_id),
+            crate::store::StoreError::Journal(j) => journal_err(j),
+        })?;
     Ok(Json(resp))
 }
 
@@ -336,7 +376,7 @@ async fn canonical(
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Phần thân dùng chung cho `POST /version` và `POST /event` với `kind="version"` (§2.6 cách 1).
-fn append_inner(e: &mut ChainEntry, req: &AppendReq) -> ApiResult<AppendResp> {
+pub(crate) fn append_inner(e: &mut ChainEntry, req: &AppendReq) -> ApiResult<AppendResp> {
     check_ts(req.ts)?;
     let fields = to_pairs(&req.state_fields).map_err(ApiError::Malformed)?;
     let head = e.chain.head();
@@ -387,12 +427,82 @@ async fn append(
     let ref_id = parse_ref(&r)?;
     let entry = st.store.get(&ref_id).ok_or(ApiError::NotFound("ref"))?;
     let mut g = lock(&entry);
-    Ok(Json(append_inner(&mut g, &req)?))
+    let resp = append_inner(&mut g, &req)?;
+    // Ghi nhật ký SAU khi lõi nhận, và VẪN dưới khoá của ref: thứ tự các bản ghi của một
+    // ref trong tệp phải đúng thứ tự chúng được áp, nếu không replay dựng ra một chuỗi
+    // khác. Thả khoá trước khi ghi là mở đúng khe cho hai version đảo chỗ.
+    journal(
+        &st,
+        JournalRecord::Append {
+            r: ref_hex(&ref_id),
+            req: req.clone(),
+        },
+    )?;
+    Ok(Json(resp))
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // POST /v1/strata/:ref/event — §2.6
 // ────────────────────────────────────────────────────────────────────────────
+
+/// Phần THUẦN của nhánh `kind="audit"` — dùng chung với replay nhật ký.
+///
+/// ── Hai cổng dưới đây vá một lỗ ĐÃ DỰNG LẠI ĐƯỢC bằng 2 request HTTP ──────
+///
+/// Đường audit và đường version cùng ghi vào MỘT `ChainEntry`, nhưng trước đây chỉ đường
+/// version đi qua `check_auth` → `policy.is_allowed`. Đường audit chỉ phân giải khoá từ
+/// key-registry TOÀN CỤC rồi `verify_strict` — nghĩa là bất kỳ ai có DID trong registry
+/// (đủ điều kiện để tạo hồ sơ của CHÍNH MÌNH) đều ghi được vào nhật ký truy cập của hồ sơ
+/// NGƯỜI KHÁC. Chữ ký hợp lệ, nhưng hợp lệ cho sai hồ sơ: xác thực ≠ phân quyền.
+///
+/// Nối với `ts` thì thành bất-khả-hồi: người ngoài ghi một mục `ts = u64::MAX`,
+/// `AuditLog.last_ts` nhảy lên trần, và từ đó MỌI mục thật của chính chủ trả
+/// `TimestampRegress` vĩnh viễn (`audit.rs` append-only, không có API xoá/reset).
+///
+/// THỨ TỰ CÓ CHỦ Ý — chữ ký TRƯỚC, policy SAU, `ts` cuối. Đặt `is_allowed` lên trước
+/// `verify_strict` (bản nháp đầu) mở ra một **oracle dò thành viên policy**: người lạ gửi
+/// chữ ký rác `00`×64 với một DID ứng viên và đọc mã lỗi — DID trong policy trả
+/// `BadSignature`, DID ngoài policy trả `PolicyDenied`. Ba request là biết "bác sĩ D có
+/// quyền ghi hồ sơ bệnh nhân P không", không cần khoá nào. Chính quan hệ đó mới là thứ
+/// phải giấu.
+///
+/// Đặt `verify_strict` trước thì cửa đầu tiên đòi **sở hữu khoá riêng**: người không có
+/// khoá luôn nhận `BadSignature`, không phân biệt được gì. Người CÓ khoá đi tiếp và có
+/// thể học rằng DID của CHÍNH MÌNH không nằm trong policy — đó là quyền của chính họ,
+/// không phải rò rỉ. `check_ts` xuống cuối cùng vì `now` của daemon chỉ nên lộ cho bên đã
+/// qua cả xác thực lẫn phân quyền.
+pub(crate) fn audit_inner(
+    registry: &dyn KeyRegistry,
+    g: &mut ChainEntry,
+    a: &AuditEventReq,
+) -> ApiResult<AuditEventResp> {
+    let ae = AuditEntry {
+        created_ts: a.ts,
+        actor_did: a.actor_did,
+        action: action_from_str(&a.action)?,
+        signed_hash: a.signed_hash,
+        location: a.location,
+    };
+    // `AuditEntry` không có trường `sig` (chữ ký KHÔNG đi vào leaf, nên không cam kết
+    // byte-layout nào cả) — nhưng §3 vẫn bắt gửi `sig`, nên daemon kiểm ở CỬA:
+    // Ed25519 trên `canonical()` của chính entry, khoá lấy từ key-registry (CHỐT-5).
+    let pk = registry
+        .resolve(&a.actor_did)
+        .ok_or(ApiError::Core(StrataError::UnknownAuthor))?;
+    // `verify_strict` (không phải `verify`) — cùng độ chặt với core: loại chữ ký
+    // malleable / khoá small-order (INV-E4).
+    let sig = Signature::from_bytes(&a.sig);
+    pk.verify_strict(&ae.canonical(), &sig)
+        .map_err(|_| ApiError::Core(StrataError::BadSignature))?;
+    if !g.policy.is_allowed(&a.actor_did) {
+        return Err(StrataError::PolicyDenied.into());
+    }
+    check_ts(a.ts)?;
+
+    let index = g.audit.append_access(ae)?;
+    let log_root = hex::encode(g.audit.root());
+    Ok(AuditEventResp { index, log_root })
+}
 
 async fn event(
     State(st): State<AppState>,
@@ -405,63 +515,30 @@ async fn event(
     let entry = st.store.get(&ref_id).ok_or(ApiError::NotFound("ref"))?;
     let mut g = lock(&entry);
 
-    match req {
+    match &req {
         // Cách 1: event = một version state-rỗng.
-        EventReq::Version(a) => Ok(Json(append_inner(&mut g, &a)?).into_response()),
+        EventReq::Version(a) => {
+            let resp = append_inner(&mut g, a)?;
+            journal(
+                &st,
+                JournalRecord::Append {
+                    r: ref_hex(&ref_id),
+                    req: a.clone(),
+                },
+            )?;
+            Ok(Json(resp).into_response())
+        }
         // Cách 2: entry vào audit-log (không đẻ version).
         EventReq::Audit(a) => {
-            // ── Hai cổng dưới đây vá một lỗ ĐÃ DỰNG LẠI ĐƯỢC bằng 2 request HTTP ──────
-            //
-            // Đường audit và đường version cùng ghi vào MỘT `ChainEntry`, nhưng trước đây
-            // chỉ đường version đi qua `check_auth` → `policy.is_allowed`. Đường audit chỉ
-            // phân giải khoá từ key-registry TOÀN CỤC rồi `verify_strict` — nghĩa là bất kỳ
-            // ai có DID trong registry (đủ điều kiện để tạo hồ sơ của CHÍNH MÌNH) đều ghi
-            // được vào nhật ký truy cập của hồ sơ NGƯỜI KHÁC. Chữ ký hợp lệ, nhưng hợp lệ
-            // cho sai hồ sơ: xác thực ≠ phân quyền.
-            //
-            // Nối với `ts` thì thành bất-khả-hồi: người ngoài ghi một mục `ts = u64::MAX`,
-            // `AuditLog.last_ts` nhảy lên trần, và từ đó MỌI mục thật của chính chủ trả
-            // `TimestampRegress` vĩnh viễn (`audit.rs` append-only, không có API xoá/reset).
-            //
-            // THỨ TỰ CÓ CHỦ Ý — chữ ký TRƯỚC, policy SAU, `ts` cuối. Đặt `is_allowed` lên
-            // trước `verify_strict` (bản nháp đầu) mở ra một **oracle dò thành viên policy**:
-            // người lạ gửi chữ ký rác `00`×64 với một DID ứng viên và đọc mã lỗi — DID trong
-            // policy trả `BadSignature`, DID ngoài policy trả `PolicyDenied`. Ba request là
-            // biết "bác sĩ D có quyền ghi hồ sơ bệnh nhân P không", không cần khoá nào. Chính
-            // quan hệ đó mới là thứ phải giấu.
-            //
-            // Đặt `verify_strict` trước thì cửa đầu tiên đòi **sở hữu khoá riêng**: người
-            // không có khoá luôn nhận `BadSignature`, không phân biệt được gì. Người CÓ khoá
-            // đi tiếp và có thể học rằng DID của CHÍNH MÌNH không nằm trong policy — đó là
-            // quyền của chính họ, không phải rò rỉ. `check_ts` xuống cuối cùng vì `now` của
-            // daemon chỉ nên lộ cho bên đã qua cả xác thực lẫn phân quyền.
-            let ae = AuditEntry {
-                created_ts: a.ts,
-                actor_did: a.actor_did,
-                action: action_from_str(&a.action)?,
-                signed_hash: a.signed_hash,
-                location: a.location,
-            };
-            // `AuditEntry` không có trường `sig` (chữ ký KHÔNG đi vào leaf, nên không cam kết
-            // byte-layout nào cả) — nhưng §3 vẫn bắt gửi `sig`, nên daemon kiểm ở CỬA:
-            // Ed25519 trên `canonical()` của chính entry, khoá lấy từ key-registry (CHỐT-5).
-            let pk = st
-                .registry
-                .resolve(&a.actor_did)
-                .ok_or(ApiError::Core(StrataError::UnknownAuthor))?;
-            // `verify_strict` (không phải `verify`) — cùng độ chặt với core: loại chữ ký
-            // malleable / khoá small-order (INV-E4).
-            let sig = Signature::from_bytes(&a.sig);
-            pk.verify_strict(&ae.canonical(), &sig)
-                .map_err(|_| ApiError::Core(StrataError::BadSignature))?;
-            if !g.policy.is_allowed(&a.actor_did) {
-                return Err(StrataError::PolicyDenied.into());
-            }
-            check_ts(a.ts)?;
-
-            let index = g.audit.append_access(ae)?;
-            let log_root = hex::encode(g.audit.root());
-            Ok(Json(AuditEventResp { index, log_root }).into_response())
+            let resp = audit_inner(st.registry.as_ref(), &mut g, a)?;
+            journal(
+                &st,
+                JournalRecord::Audit {
+                    r: ref_hex(&ref_id),
+                    req: a.clone(),
+                },
+            )?;
+            Ok(Json(resp).into_response())
         }
     }
 }
@@ -635,6 +712,18 @@ fn anchor_blocking(
         txid: txid.clone(),
         backend: backend.clone(),
     });
+    // Nhật ký ghi SAU khi on-chain đã nhận — cùng thứ tự với gương `anchored`, và vì cùng
+    // lý do: ghi trước rồi backend hỏng thì replay dựng lại một ref "đã neo" mà chuỗi
+    // không biết, tức ref bị **cháy** (mọi lượt thử sau trả `AnchorRollback` vĩnh viễn).
+    journal(
+        st,
+        JournalRecord::Anchor {
+            r: ref_hex(&ref_id),
+            seq: committed.seq,
+            txid: txid.clone(),
+            backend: backend.clone(),
+        },
+    )?;
     Ok(AnchorResp::new(&committed, txid, backend))
 }
 
@@ -940,6 +1029,7 @@ fn anchor_batch_blocking(
 
     // 3. On-chain đã nhận ⇒ mới chốt `last_anchor_seq` ở lõi, cho từng ref.
     let mut out = Vec::with_capacity(guards.len());
+    let mut recs = Vec::with_capacity(guards.len());
     for g in &mut guards {
         let committed = g.chain.publish_anchor()?;
         g.anchored = Some(AnchorState {
@@ -947,7 +1037,19 @@ fn anchor_batch_blocking(
             txid: txid.clone(),
             backend: backend.clone(),
         });
+        recs.push(JournalRecord::Anchor {
+            r: ref_hex(&committed.ref_id),
+            seq: committed.seq,
+            txid: txid.clone(),
+            backend: backend.clone(),
+        });
         out.push(AnchorResp::new(&committed, txid.clone(), backend.clone()));
+    }
+    // MỘT lượt fsync cho cả lô: lô là **một tx**, nên nó cũng là một sự kiện bền vững —
+    // N lượt fsync cho một thứ đã tất định là trả giá cho không gì cả. Mọi khoá ref của
+    // lô vẫn đang được giữ ở đây, nên không ai chen vào giữa được.
+    if let Some(j) = st.store.journal() {
+        j.append_many(&recs).map_err(journal_err)?;
     }
 
     Ok(AnchorBatchResp {
