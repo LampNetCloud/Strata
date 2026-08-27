@@ -1114,7 +1114,15 @@ tra; hai bên giữ chung một bảng `did_hex : pubkey_hex` trao tay.* Bảng 
 nó có tên: điều kiện thu hồi của nó chính là PhoenixKey resolver cắm vào trait
 `KeyRegistry`.
 
-### 14.5 🔴 `strata-node` hôm nay là IN-MEMORY — và đó là dữ kiện của hợp đồng, không phải chi tiết cài đặt
+### 14.5 ~~🔴 `strata-node` hôm nay là IN-MEMORY~~ — **ĐÃ VÁ ở `#69`**, giữ lại làm hồ sơ
+
+> ⚠️ **Mục này mô tả trạng thái tới 2026-08-25 và KHÔNG còn đúng.** `#69` thay `ChainStore`
+> RAM thuần bằng **nhật ký ghi REQUEST** + replay qua đúng đường ghi — xem `§15`. Bảng
+> "cái mất khi tiến trình dừng" dưới đây vẫn đúng **về lý do** (on-chain chỉ có
+> `StrataAnchor` 104 byte, `state_root` một chiều), và chính lý do đó là thứ buộc `#69`
+> phải ghi **request** chứ không ghi **trạng thái**. Giữ lại vì nó là lập luận, không
+> phải một dòng trạng thái.
+
 
 `node/src/store.rs`: `ChainStore { refs: RwLock<HashMap<Hash32, Arc<Mutex<ChainEntry>>>> }`.
 Không có đường ghi xuống đĩa nào. Docstring của chính tệp ghi *"Bền vững (đĩa/Mirage) là
@@ -1202,12 +1210,12 @@ giữa một lỗi gõ và một lineage chết vĩnh viễn.
 | # | Mảnh | Trạng thái đo được | Hậu quả nếu đội OriLife không biết |
 |---|---|---|---|
 | 1 | `KeyRegistry` → PhoenixKey | 🔴 **stub** — `InMemoryRegistry` + env `STRATA_NODE_KEYS`, không route đăng ký | lượt gọi đầu tiên ăn `424`, và không ai đoán ra vì sao |
-| 2 | `ChainStore` → đĩa | 🔴 **stub** — RAM thuần | restart = mất hồ sơ cây |
-| 3 | `fields` → Mirage | 🟠 **stub** — byte nằm thẳng trong RAM (§8.4 nói bản thật giữ CID) | `prove_field` mất cùng lúc với (2) |
-| 4 | `canonicalize(DID)` | 🔴 **chưa có văn bản** — §14.4 | hai bên băm ra hai `Did` khác nhau ⇒ `424` hoặc, tệ hơn, hai `ref_id` cho một chủ |
-| 5 | 4 route `_canonical` `_dirty` `_anchor_batch` `_settlement_window` | 🔴 **không có chương nào trong `spec/Strata-API.md`** | đội tích hợp đọc spec sẽ **không thấy** đường đối chiếu byte tồn tại |
-| 6 | trường `salt` của field-proof | 🔴 **không có trong spec §3** | verifier bỏ qua ⇒ mọi proof đỏ khi bật blinding |
-| 7 | `Strata-Math §6.3` length-prefix | 🟠 mã **length-prefix**, spec `:292` viết **nối trần** | ai cài theo spec sẽ verify đỏ |
+| 2 | `ChainStore` → đĩa | ✅ **ĐÃ VÁ** (`#69`) — nhật ký ghi REQUEST, replay qua lõi | restart dựng lại đúng. Nợ còn lại: **nén/ảnh chụp**, có ngưỡng số ở `SEAM §17.6` |
+| 3 | `fields` → Mirage | 🟠 **stub** — byte nằm thẳng trong RAM (§8.4 nói bản thật giữ CID) | ~~mất cùng lúc với (2)~~ — nay dựng lại được qua replay; nợ còn lại là **kích thước**, không phải mất mát |
+| 4 | `canonicalize(DID)` | 🟡 **2/3 đã chốt** (`Specs#32` 2026-08-27): `blake2b_256(UTF-8(did))` không salt không domain-tag; xoay khoá **không** đổi `Did`. Câu 3 còn treo nhưng **không quan sát được** trong khuôn PhoenixKey — §17.2 | hai bên băm ra hai `Did` khác nhau ⇒ `424`; Strata bọc thêm `H_dom` là ra `Did` KHÁC |
+| 5 | 4 route `_canonical` `_dirty` `_anchor_batch` `_settlement_window` | 🟠 `#64` **mở**, chờ anh Đức merge phần chữ | đội tích hợp đọc spec **không thấy** `_canonical` tồn tại. Đường vòng: `scripts/orilife_handshake.py` |
+| 6 | trường `salt` của field-proof | 🟠 `#64` §3 **đã viết**, kèm vế CHẾ ĐỘ; chờ merge | verifier bỏ qua ⇒ không chỉ thiếu đầu vào mà **băm nhầm miền** (`#71`) |
+| 7 | `Strata-Math §6.3` | ✅ **ĐÃ VÁ** (`#71`, MERGED) — sai **hai** chỗ chứ không một: nối trần **và** chung tag | ai cài theo spec cũ thì verify đỏ; chung tag thì proof **khai sai vẫn xanh** |
 | 8 | beacon | 🟠 **TẮT** (`Specs#32`) — không ảnh hưởng OriLife | — |
 | 9 | `N-1` nhịp neo | 🟠 chưa ghim (chờ `Mosaic-Math`) — hồ sơ sản xuất `epoch 8 h / tuổi 24 h`, **24 h là trần cứng** | SLA neo chưa cam kết được bằng số |
 | 10 | mainnet | ⛔ **đóng** — `K-1`, chỉ Preprod | — |
@@ -1522,3 +1530,193 @@ nối không thuộc bộ kiểm của bên nào. Ở đây nó còn thêm một
 lỗi** của bên nhận, nên ngay cả một lượt chạy thật cũng chỉ ra một câu sai.
 
 Cái đã bắt được nó không phải một bài kiểm mới — mà là **chạy thật đường đó một lần**.
+
+---
+
+## 17. Phiên 2026-08-27 — miền băm `fvh`, và hợp đồng DID sau phản hồi của anh Đức
+
+> Nửa VeData của chương này (vận hành · runbook · ngưỡng) nằm ở
+> `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` **§17**. Chương này giữ phần
+> thuộc kho Strata: miền băm, schema dây, vector chung, và kịch bản bàn giao.
+
+### 17.1 🔴 `#71` — hai chế độ `fvh` đổ chung một miền
+
+`fval_hash` và `fval_hash_salted` dùng **chung** `TAG_STATE_FVAL`. Length-prefix của
+`#63` phân tách `salt` với `value` **bên trong** nhánh có salt; nó không phân tách
+**nhánh có salt với nhánh không salt**.
+
+```
+V = u32_be(|S|) ‖ S ‖ M        (không làm mù)
+fval_hash(V)  ==  fval_hash_salted(S, M)      ← trùng cả 32 byte
+```
+
+Người ghi cam kết `V`, rồi xuất `FieldProof` khai `salt = S, value = M`. `verify_field_proof`
+băm lại khớp, `state_root` khớp, đường anh em không đụng — **xanh**. Tức **đổi được lời
+khai về giá trị sau khi `state_root` đã nằm trong `version_hash` đã ký**, không cần va
+chạm băm, không cần khoá nào.
+
+Cùng lớp lỗi mà `nhap_nhang_bien_salt_value_bi_chan` đã chặn, lùi lên một bậc: chặn giữa
+hai **trường** thì được, giữa hai **chế độ** thì chưa.
+
+**Vá:** tag riêng `LN/STRATA/state/fval/salted/v1`. Nhánh không salt giữ tag cũ ⇒ trùng
+từng bit, không `state_root` đã ký nào phải tính lại.
+
+**Soát trước khi merge** — dựng lại lỗ độc lập (tự nối `V`, không gọi `fval_hash_salted`
+để sinh nó): trùng `2f4ddaa3b1b3a497…`. Đảo mã một dòng: cả hai PoC **đỏ**. Ba gác CI
+chạy tại máy — `262 pass` (workspace) · `fmt` sạch · `clippy` 0.
+
+**Bán kính vụ nổ = 0 trên ba kho** (câu anh Đức để ngỏ trong `#71`):
+
+| Kho | Kết quả |
+|---|---|
+| `Strata` đường **ghi** | `node/` chưa bao giờ dựng `SaltedField`; không route nào nhận `salt` |
+| `VeDataIO/Core` | 0 chỗ tính `fvh` |
+| `OriLifeTrace/OriLife-Core` `strata_client.py` | chỉ cài đường **không salt** |
+
+🪤 Lần grep đầu trỏ vào `src/node/` — **thư mục không tồn tại**, nên "0 hit" là **rỗng
+giả**. Vùng đúng là `node/` + `anchor-io/`. Kết luận không đổi; đường tới nó thì suýt sai.
+
+### 17.2 🔴 `§3` của `#64` lệch mã ba chỗ — và một trong ba là an toàn
+
+| | `§3` viết | Mã | Hỏng kiểu gì |
+|---|---|---|---|
+| tag | một | **hai**, chọn theo `salt` rỗng hay không | băm **nhầm miền** |
+| prefix `salt` | `len(salt)` | `u32_be(len(salt))` 4 byte BE | lệch byte nếu cài 1-byte/varint |
+| prefix `value` | `len(value)` | **không có** | thêm vào là **đổi byte** |
+
+Anh Đức xếp chỗ thứ ba là *"không phải lỗi an toàn — `value` là phần còn lại nên biên
+vẫn xác định duy nhất"*. Đúng, nhưng nó vẫn làm **mọi proof có salt đỏ** ở phía client
+trong khi nhìn từ server không có gì sai — nên hậu quả vận hành giống hệt hai chỗ kia.
+
+`§3` nay là bảng hai dòng + ba chi tiết dễ chép sai. Đoạn *"`salt` LUÔN có mặt"* cũng
+sửa: `salt` không phải một **đầu vào** của một phép băm — nó **chọn chế độ**.
+
+### 17.3 🟠 `#72` — chế độ phải NHÌN THẤY ĐƯỢC từ ngoài
+
+`#71` vá lõi; `OriLife-Core` không đọc lõi. Hai chỗ họ **thật sự** đọc vẫn dạy công thức cũ:
+
+| Chỗ | Vấn đề |
+|---|---|
+| `node/src/dto.rs:324` — chú thích `salt` của `FieldProofResp` | viết *"băm `salt ‖ value`"* — sai **hai lần** sau `#71` |
+| `apis/canonical-core-vectors.json` | không có `tag_fval_salted`, không có quy tắc chọn chế độ |
+
+🔺 **Vì sao vector thuận không đủ.** Mọi vector thuận đi **một chiều**: tính `fvh` từ
+`(salt, value)`. Một bản cài dùng **chung** một tag vẫn khớp **toàn bộ** vector thuận —
+không ca nào phát hiện hai miền đã chồng lên nhau. Phải có **đối chứng âm**:
+
+```
+NC1  fvh_salted(S, M) ≠ fvh_khong_salt(u32_be(|S|) ‖ S ‖ M)   ← khai thác của #71
+NC2  fvh_salted("ab","c") ≠ fvh_salted("a","bc")              ← biên salt/value
+```
+
+Hai chi tiết cố ý:
+
+- **`V` dựng lại trong test**, không đọc từ file — đọc từ file thì ai sửa `V` trong JSON
+  là biến đối chứng thành trang trí mà vẫn xanh;
+- `NC2` kèm khẳng định phụ rằng hai cặp **nối trần ra cùng một chuỗi** — thiếu nó thì
+  `NC2` xanh vì hai cặp vốn khác nhau, chứ không phải vì length-prefix có tác dụng.
+
+Bốn ca thuận: `M1` salt rỗng (phải trùng **bit** đường cũ) · `M2` salt 30 B · `M3` salt
+**1 byte** (bắt bản cài dùng 1-byte length thay `u32_be`) · `M4` value **rỗng** (bắt bản
+cài tự thêm `len(value)` cho "đối xứng").
+
+Đảo mã hai mũi, cả hai làm cả hai test mới **đỏ**. Diff tệp vector **+16/−0** — bằng
+chứng đường cũ không đổi một byte. `264 pass` · `fmt` sạch · `clippy` 0.
+
+### 17.4 🟠 Hợp đồng `Did` — ba điều đã chốt
+
+**(1)** `Did = blake2b_256(UTF-8(did))` — **không** salt, **không** domain-tag
+(`PhoenixKey-Anchorme-Tech.md:68` → `phoenix_address.rs:52`). Khác quy ước `H_dom` của
+Strata **có lý do**: khớp quy ước gốc bên PhoenixKey.
+
+⚠️ **Strata bọc thêm `H_dom` là ra một `Did` KHÁC** cho cùng một người — và không lỗi nào
+bật ra, chỉ `424 UnknownAuthor` mãi mãi.
+
+**(2)** Xoay khoá **không** đổi `Did` (`:147` — `Rotate` đổi `new_controller_pkh` /
+`new_hw_pubkey`, không đụng chuỗi DID). Lineage cũ **không đóng băng**.
+
+⇒ **Ràng buộc lên trait `KeyRegistry`**, ghi ngay dù resolver chưa cắm:
+
+> `resolve(did, at_ts)` **PHẢI** trả khoá công khai **có hiệu lực tại `at_ts`**, không
+> phải khoá hiện hành. Bản cài chỉ giữ khoá mới nhất là **không hợp lệ** — nó chạy đúng
+> tới đúng lần xoay đầu tiên, rồi **mọi version ký bằng khoá cũ verify hỏng**, và hỏng
+> lúc có người đi kiểm một proof cũ chứ không lúc xoay.
+
+`InMemoryRegistry` hôm nay giữ **một** khoá mỗi `Did` và **không** nhận `at_ts`. Stub đó
+hợp lệ trong giai đoạn này vì chưa có lượt xoay nào; điều kiện thu hồi gắn với **lượt
+xoay đầu tiên**, không gắn với lịch.
+
+**(3)** Proof/field phải cho verifier biết **chế độ** — đã dựng ở §17.3.
+
+### 17.5 ❓ Câu 3 của `canonicalize(DID)` — thư PhoenixKey ĐÃ VỀ
+
+Thư về từ **2026-07-30**:
+`OriLifeTrace/OriLife-Core: _Agents/inbox/_done/Phoenix-reply-did-canonical-158-2026-07-30.md`,
+ghim trong `MassTreeIdentify/core/test_strata_client.py` (`#159`).
+
+- PhoenixKey grep `author_did`/`authorDid` **toàn kho** = **0 hit** ⇒ bên đó **không có
+  khái niệm `author_did`** để cấp vector;
+- phần 64-hex của `did:phoenix` sinh từ `random256` ⇒ **không tất định**, không có bảng
+  *"input → DID"*;
+- thứ thư **có** cấp: 2 DID thật + **khuôn chặt** + xác nhận **không tầng nào
+  normalize/hạ-case** DID.
+
+```
+^did:phoenix:[a-z2-7]{13}:[0-9a-f]{64}$
+```
+
+🔺 **Trong khuôn đó, cả bốn câu treo KHÔNG quan sát được.** Đo: **20 000** DID sinh ngẫu
+nhiên đúng khuôn qua `NFC`/`NFKC`/`NFD`/`NFKD` + hạ-thường ⇒ **0 chuỗi lệch byte**; `%`
+và `#` **không lọt** khuôn. Đối chứng để phép đo không rỗng: DID **ngoài** khuôn
+(`did:phoenix:nông-dân:sầu-riêng`) thì `NFC` vs `NFD` **lệch byte thật**.
+
+⇒ Đề xuất (**không** phải chốt của kho này): thay quyết định chuẩn-hoá bằng một **cổng
+khuôn**. Trong khuôn thì chốt thế nào cũng ra cùng `Did`; ngoài khuôn thì lệch quan sát
+được ngay, và `ref_id = H_dom(author_did ‖ genesis_nonce)` một chiều nên **không có đường
+lui**.
+
+⚠️ **Chỗ không tự hoà giải:** anh Đức dẫn `did_hash` từ `phoenix_address.rs:52`; thư
+PhoenixKey nói bên đó **không có** khái niệm `author_did`. Có thể `did_hash` là hàm nội
+bộ dẫn **địa chỉ**, không phải đại lượng Strata gọi là `Did`. Nếu **cùng tên khác nghĩa**
+thì chỗ nó lộ ra là `424`, không phải lỗi build. Câu cần đóng: **`did_hash` ở
+`phoenix_address.rs:52` có cùng đại lượng với `Did` của Strata không?**
+
+### 17.6 🟡 Gói bàn giao — `scripts/orilife_handshake.py`
+
+Python 3.9+ **stdlib thuần**, ba bước, dừng ở bước đầu tiên hỏng.
+
+```
+python3 scripts/orilife_handshake.py --did did:phoenix:… --pubkey <hex64> \
+    [--url http://127.0.0.1:6690] [--canonical-core <hex bản mình dựng>]
+```
+
+| Bước | Làm gì |
+|---|---|
+| 1 | **cổng khuôn** DID + báo đúng dạng chuẩn-hoá nào đổi byte |
+| 2 | dẫn `author_did`, in sẵn dòng `STRATA_NODE_KEYS` (`did_hex32:pubkey_hex32`) |
+| 3 | `POST /_canonical`, so **BYTE** với bản bên gọi tự dựng; lệch thì chỉ **offset đầu tiên** + cửa sổ ±16 B |
+
+Đã chạy thật cả bốn nhánh trong phiên: đúng khuôn (sạch) · ngoài khuôn (kêu đúng
+`NFD`/`NFKD`) · `canonical_core` khớp (**148 B**, đúng `148 + len(content_cid)`) · lệch
+**1 nibble** (chỉ ra **offset 50**).
+
+🔺 **Dữ kiện xếp thứ tự, đo được:** `_canonical` **không** tra key-registry — daemon với
+**0 khoá** vẫn trả `200`. Nên hai mảnh bàn giao **độc lập**: OriLife khớp byte layout
+**trước khi** bảng khoá trao xong. Xếp nối đuôi là tự thêm một tuần chờ.
+
+🔺 **Xin chuỗi DID, KHÔNG xin băm.** `STRATA_NODE_KEYS` nhận `did_hex32`, nhưng nếu
+OriLife gửi thẳng băm thì phép dẫn xuất **không kiểm được** — hàm một chiều, sai thì nằm
+im tới `424`. Xin cả hai ⇒ băm thành **tổng kiểm** cho chuỗi.
+
+| Cột | Ai điền | Vì sao |
+|---|---|---|
+| `did` chuỗi đầy đủ | OriLife | thứ **duy nhất** kiểm được; qua cổng khuôn §17.5 |
+| `pubkey_hex` Ed25519 32 B | OriLife | vào registry |
+| `author_did_hex` | OriLife | **tổng kiểm** — VeData dẫn lại và so, lệch ⇒ dừng |
+| ghi chú | OriLife | người/thiết bị giữ khoá, để lượt xoay sau truy được |
+
+**Một đối chiếu ngoài dự tính:** `author_did` kịch bản dẫn ra cho
+`did:phoenix:nông-dân:sầu-riêng` (NFC) là `cd70bf3c01bc4f7ba3ceb09513938ae4067d2942…` —
+**trùng khít** vector `V3` đông lạnh trong `test_strata_client.py` của `OriLife-Core`.
+Hai bản cài độc lập, hai ngôn ngữ, cùng một số. Đường dẫn xuất `Did` đã khớp trước khi
+ai nối dây.
