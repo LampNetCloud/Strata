@@ -261,16 +261,39 @@ không có chúng thì **không append tiếp được**, và phải lách bằn
 
 `?seq=` vắng ⇒ head.
 
-🔺 **`salt` LUÔN có mặt, kể cả khi rỗng.** Verifier phải băm salt cùng giá trị để dựng
-lại `fvh`; một trường **vắng mặt** lúc blinding được bật sẽ làm **mọi** proof đỏ ở phía
-client trong khi nhìn từ server không có gì sai.
+🔺 **`salt` LUÔN có mặt, kể cả khi rỗng — nó là thứ CHỌN CHẾ ĐỘ, không phải một tham số
+phụ.** `salt` rỗng và `salt` khác rỗng băm dưới **hai domain-tag khác nhau** (bảng dưới),
+nên verifier không đọc `salt` thì không chỉ thiếu một đầu vào — nó **không biết mình đang
+ở miền băm nào**. Một trường `salt` vắng mặt lúc blinding được bật làm **mọi** proof đỏ ở
+phía client trong khi nhìn từ server không có gì sai.
 
-⚠️ **Phép băm là `H_dom(TAG, len(salt) ‖ salt ‖ len(value) ‖ value)` — LENGTH-PREFIX,
-không phải nối trần.** `Strata-Math §6.3` (`:292`) hiện viết `H_dom(TAG, salt ‖ value)`;
-nối trần thì `(salt="ab", value="c")` và `(salt="a", value="bc")` cho **cùng một `fvh`
-— mà cả hai đều do **người ghi** chọn, còn proof thì công khai cả `salt` lẫn `value`, nên
-người ghi **đổi được lời khai về giá trị sau khi đã ký**, chỉ bằng cách dịch biên.
-Cài đặt đang length-prefix; **chỗ cần xác nhận là câu chữ `Strata-Math §6.3`**.
+⚠️ **Phép băm `fvh` — hai chế độ, hai domain-tag. Chép đúng từng byte.**
+
+| `salt` | `fvh` |
+|---|---|
+| rỗng | `H_dom("LN/STRATA/state/fval/v1", value)` |
+| khác rỗng | `H_dom("LN/STRATA/state/fval/salted/v1", u32_be(len(salt)) ‖ salt ‖ value)` |
+
+Ba chi tiết dễ chép sai, mỗi cái làm **mọi** proof đỏ ở phía client mà server nhìn không
+có gì sai:
+
+1. **Tag khác nhau giữa hai chế độ.** Dùng chung một tag thì với `salt = S` và giá trị
+   `M` bất kỳ, giá trị **không làm mù** `V = u32_be(|S|) ‖ S ‖ M` cho **đúng cùng một
+   `fvh`** ⇒ người ghi cam kết `V` rồi xuất proof khai `(S, M)`, verifier băm lại khớp,
+   `state_root` khớp, **xanh**. Tức đổi được lời khai về giá trị **sau khi** `state_root`
+   đã nằm trong `version_hash` đã ký. Không cần va chạm băm nào.
+2. **Length-prefix cho `salt`, `u32_be` — 4 byte big-endian.** Nối trần thì
+   `(salt="ab", value="c")` và `(salt="a", value="bc")` cho cùng một `fvh`, mà cả hai đều
+   do **người ghi** chọn. Cùng một lớp lỗi, lùi xuống một bậc.
+3. **KHÔNG có length-prefix cho `value`.** `value` là phần còn lại của bộ đệm nên biên đã
+   xác định duy nhất; thêm prefix thứ hai là **đổi byte**, không phải làm chặt hơn.
+
+Cả (1) và (2) là lỗi **phân tách miền**, không phải rủi ro mật mã: chúng không phụ thuộc
+kích thước không gian giá trị, nên rào *"trường này chỉ có vài giá trị nên không lo"*
+không áp được.
+
+Nguồn chuẩn của công thức này là `Strata-Math §6.3` (đã vá ở `#71`) và cài đặt
+`src/state.rs`; bảng trên chép lại đúng cả hai.
 
 ### POST `/v1/strata/:ref/anchor`  (đẩy anchor on-chain qua adapter §4)
 ```jsonc
@@ -684,7 +707,7 @@ Rà toàn bộ tên hàm/struct trong `Strata-Tech.md` với code thật. Các l
 | struct `StrataRef { ref_id, head_version_hash, mmr_root, ... }` (§1.2) | KHÔNG tồn tại; trạng thái trong `StrataChain`, đọc qua `chain.anchor()` | §1 đính chính |
 | `gen_ref_id(...) -> H32` (§2.1) | `gen_ref_id(...) -> String` (bech32m); raw 32B = `gen_ref_id_raw` | §2.1 đính chính |
 | `extend_mmr` / `read_head` / `version_at` free-fn (§3.3/§3.5/§3.7) | MMR mở rộng TRONG `append_version`; `chain.head()`; `chain.version_at(t)` | §2.3/§2.4 |
-| `FieldProof { value_cid, leaf_idx, merkle_path, version_seq }` (§1.6) | `FieldProof { key, value, fvh, salt, siblings: Vec<(Hash32,bool)>, state_root }` (no `value_cid`/`leaf_idx`; `version_seq` chỉ có ở **DTO** cửa, không ở struct lõi) | §1 + §3 dùng schema code thật. **`salt` thêm 2026-08-20** (`#63`) — bật blinding §6.3; rỗng = không làm mù |
+| `FieldProof { value_cid, leaf_idx, merkle_path, version_seq }` (§1.6) | `FieldProof { key, value, fvh, salt, siblings: Vec<(Hash32,bool)>, state_root }` (no `value_cid`/`leaf_idx`; `version_seq` chỉ có ở **DTO** cửa, không ở struct lõi) | §1 + §3 dùng schema code thật. **`salt` thêm 2026-08-20** (`#63`) — bật blinding §6.3; rỗng = không làm mù. Từ `#71` hai chế độ nằm ở **hai domain-tag khác nhau**, nên `salt` là thứ chọn miền băm chứ không phải một đầu vào phụ (§3) |
 | `MmrProof { leaf_seq, leaf_hash, mmr_size, merkle_path, peaks }` (§1.6) | `InclusionProof { siblings: Vec<(Hash32,bool)>, peak_index, peaks }` (mmr_size truyền riêng từ `prove_version`) | §1 + §3 |
 | `AuditEntry { target_ref_id, subject_hash, action, ts, location_cid, sig }` (§1.6b) | `AuditEntry { created_ts, actor_did, action, signed_hash, location }` (no `target_ref_id`/`sig` trong leaf; ts tên `created_ts`) | §1 + §2.6 |
 | `Cid = Vec<u8>` "content_cid thuần" | khớp — `content_cid: Vec<u8>`, `value: Vec<u8>` (CHỐT-4) | ✅ |
