@@ -172,5 +172,21 @@
       ],
       "state_root": "f716fdb9c69ca0281de79f7a63670b74b94f1ba05a0af2c7df3f2b3f5a8fbf10"
     }
+  ],
+  "fval_mode_note": "Strata#71. `fvh` có HAI chế độ nằm ở HAI domain-tag KHÁC NHAU, và `salt` là thứ CHỌN chế độ: salt RỖNG ⇒ fvh = H_dom(tag_fval, value); salt KHÁC RỖNG ⇒ fvh = H_dom(tag_fval_salted, u32_be(len(salt)) || salt || value). KHÔNG có length-prefix cho value (value là phần còn lại, biên đã xác định duy nhất) — thêm prefix thứ hai là ĐỔI BYTE. Dùng CHUNG một tag cho hai chế độ là lỗ P0: xem fval_mode_negative_controls.",
+  "fval_mode_hash": {
+    "tag_fval": "LN/STRATA/state/fval/v1",
+    "tag_fval_salted": "LN/STRATA/state/fval/salted/v1",
+    "mode_selector": "salt rỗng (len 0) ⇒ khong_salt; ngược lại ⇒ salted. Verifier KHÔNG đọc salt thì không biết mình ở miền băm nào — đó không phải thiếu một đầu vào, đó là băm nhầm miền."
+  },
+  "fval_mode_vectors": [
+    {"name": "M1-salt-rong-trung-bit-duong-cu", "why": "salt RỖNG phải trả về ĐÚNG fval_hash(value) — mọi state_root đã ký từ trước không đổi một bit", "salt": "", "salt_len": 0, "value": "796573", "mode": "khong_salt", "tag": "LN/STRATA/state/fval/v1", "fvh": "019182e8f0f7ed1c04ced93ff2b31cd041e20c5ddd33a585fcdc5397a80ad9f9"},
+    {"name": "M2-salt-khac-rong", "why": "đường làm mù: tag RIÊNG + u32_be(len(salt)) trước salt", "salt": "73616c742d6e6761752d6e6869656e2d3332422d63686f2d766563746f72", "salt_len": 30, "value": "796573", "mode": "salted", "tag": "LN/STRATA/state/fval/salted/v1", "fvh": "28893bdc80824a947ba786f1a7ca9c6cd7cdcf03f1b5dc0ff6ac4215f8a42bb3"},
+    {"name": "M3-salt-1-byte", "why": "biên nhỏ nhất khác rỗng — bắt bên cài quên u32_be mà dùng 1 byte length", "salt": "73", "salt_len": 1, "value": "796573", "mode": "salted", "tag": "LN/STRATA/state/fval/salted/v1", "fvh": "18a6093d3826e16b4158246a99ebf7f4cf4fb05bbd855354091088436d5864fb"},
+    {"name": "M4-value-rong-salt-khac-rong", "why": "value RỖNG vẫn hợp lệ; thiếu length-prefix cho value là ĐÚNG, đừng thêm", "salt": "73616c742d6e6761752d6e6869656e2d3332422d63686f2d766563746f72", "salt_len": 30, "value": "", "mode": "salted", "tag": "LN/STRATA/state/fval/salted/v1", "fvh": "c53d80a8c0bf280652ce851dc96c890a1c7728822e40cc6fd63abbc790bfbc11"}
+  ],
+  "fval_mode_negative_controls": [
+    {"name": "NC1-hai-che-do-KHONG-duoc-chung-mien", "why": "Lỗ P0 Strata#71. Nếu bên cài dùng CHUNG một tag cho hai chế độ thì hai giá trị dưới đây cho ĐÚNG CÙNG một fvh, và người ghi cam kết `value_khong_salt` rồi xuất proof khai (salt, value_salted) — verifier băm lại khớp, state_root khớp, XANH. Không cần va chạm băm nào. Hai số dưới đây PHẢI KHÁC NHAU.", "salt": "73616c742d6e6761752d6e6869656e2d3332422d63686f2d766563746f72", "value_salted": "796573", "value_khong_salt": "0000001e73616c742d6e6761752d6e6869656e2d3332422d63686f2d766563746f72796573", "fvh_salted": "28893bdc80824a947ba786f1a7ca9c6cd7cdcf03f1b5dc0ff6ac4215f8a42bb3", "fvh_khong_salt_cua_V": "161a617d7ec98dba1fca6ae407eb01fdd4f2e3a8ecc5b40523926b361cc0dbd1", "must": "fvh_salted != fvh_khong_salt_cua_V"},
+    {"name": "NC2-noi-tran-bi-chan", "why": "Thiếu u32_be(len(salt)) thì (salt=ab, value=c) và (salt=a, value=bc) cho cùng một fvh, mà cả hai đều do NGƯỜI GHI chọn. Hai số dưới đây PHẢI KHÁC NHAU.", "a": {"salt": "6162", "value": "63", "fvh": "1f7bb2b9b0b259616233bb656b190063212d528013e652b76d8bc7cf1475c2e8"}, "b": {"salt": "61", "value": "6263", "fvh": "0ef5341e657d454ae6403d3b8bc06a6ab0aef150d8bb5da7c5291115a51d790b"}, "must": "a.fvh != b.fvh"}
   ]
 }
