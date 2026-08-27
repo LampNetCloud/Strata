@@ -1725,3 +1725,59 @@ im tới `424`. Xin cả hai ⇒ băm thành **tổng kiểm** cho chuỗi.
 **trùng khít** vector `V3` đông lạnh trong `test_strata_client.py` của `OriLife-Core`.
 Hai bản cài độc lập, hai ngôn ngữ, cùng một số. Đường dẫn xuất `Did` đã khớp trước khi
 ai nối dây.
+
+### 17.7 ✅ Lượt bắt tay kỹ thuật ĐÃ MỞ — `OriLife-Core#450`
+
+`#72` **MERGED** vào `main` (`3dc0d68`) trước khi mở thư, để `scripts/orilife_handshake.py`
+và `apis/canonical-core-vectors.json` lấy được từ `main` chứ không từ một nhánh có thể
+biến mất. Gác trên `main` sau merge: **264 pass / 0 fail** · `fmt` sạch · `clippy` **0**.
+
+**Luận điểm của thư:** lượt này **không đốt một quyết định một chiều nào** — không tạo
+`ref_id`, không ký, không ghi lineage. Sai thì chạy lại. Nên nó **không phải chờ** hai
+chỗ còn treo.
+
+**Thứ tự chạy hai lượt, và vì sao thứ tự đó có lý do:**
+
+| Lượt | `state_fields` | Đo cái gì | Cần gì |
+|---|---|---|---|
+| 1 | **RỖNG** | thuần **byte-layout TLV** — `state_root` = 32 byte `00` (`S1-empty`), **không phép băm nào** | không `blake3`, không `PinnedHasher` |
+| 2 | có trường | tới `state_root` | `blake3` |
+
+Tách được *"layout của mình sai"* khỏi *"`state_root` của mình sai"* — **hai lỗi cho cùng
+một triệu chứng `403 BadSignature`**, và `403` không nhắc một chữ nào tới `state_root`.
+
+**Ba phát hiện gửi kèm, đều đo được:**
+
+1. 🔺 **Thứ họ đang xin thì đã có.** Header `strata_client.py` còn ghi *"đang xin Strata
+   một vector `state_root`"* để khoá cách mã hoá `content_cid`. Vector `S6-cid-value-32B`
+   vào fixture từ **2026-08-13** (`0be9452`), ghi thẳng *"câu trả lời cho `OriLife-Core#161"*;
+   `#161` cũng đã đóng **08-15**. Chú thích của họ **cũ hơn** thứ họ cần.
+2. 🔺 **Bảng khoá chỉ cần MỘT dòng.** Anh Đức chốt ở `OriLife-Core#151` (**08-07**): server
+   **không giữ khoá nông dân** (PhoenixKey sinh trắc, on-device) ⇒ **khoá ký = nền tảng
+   (notary)**, `author_did` mức platform; quyền sở hữu đi qua **`owner_did` = state-field
+   CÓ KÝ**. Đây là chỗ em suýt báo nhầm thành "đang chặn" — nó đã chốt từ 7 tuần trước.
+3. 🔺 **`#71` không trừu tượng — nó ngồi đúng dưới lời khai sở hữu.** `owner_did` là
+   state-field ⇒ **field-proof trên `owner_did` chính là thứ chứng minh quyền sở hữu từng
+   nông dân với bên thứ ba**. Với tag dùng chung, người ghi cam kết `V` rồi khai một
+   `owner_did` **khác** mà proof vẫn xanh. Vá xong **trước** khi tồn tại lineage thật nào.
+
+**Nghiệm thu đề nghị — ba dòng:** `canonical_core` rỗng trùng byte · `canonical_core` có
+trường trùng byte · `author_did` hai bên trùng. Dòng thứ ba **đã có sẵn một điểm đối
+chiếu**: `cd70bf3c…` khớp vector `V3` đông lạnh của họ.
+
+**Hai chỗ chặn `lineage` thật, nói thẳng trong thư:** `did_hash` ↔ `Did` chưa đóng
+(§17.5) · `owner` chưa truyền xuống `try_shadow_write` ⇒ `owner_did` **chưa tồn tại trong
+bản ghi**, nối bây giờ thì các version đầu không mang chủ sở hữu.
+
+**Nêu kèm, không thuộc phạm vi thư:** `OriLife-Core#276` (ghi `confirmed` ngay lúc node
+nhận tx — đo lệch **108 giây**) và `#423` (`strata_doi_chieu` kết luận `khop` khi **không
+có mảnh bằng chứng Cardano nào**). Cả hai làm **lời khai đầu ra** mạnh hơn bằng chứng —
+chúng quyết *"nối xong thì mình nói được câu gì"*.
+
+**Một câu hỏi mở gửi họ:** `genesis_nonce` bên họ dùng tag `LN/STRATA/extkey/v1`. Grep
+toàn kho Strata (`spec/` `src/` `node/` `anchor-io/`) hôm nay: **tag đó không tồn tại**.
+Hôm nay vô hại (`genesis_nonce` do họ tính, Strata không tính lại), nhưng nó là một tag
+đặt trong **namespace của người khác** — ngày Strata định nghĩa đúng chuỗi ấy theo nghĩa
+khác thì thành **một tên, hai định nghĩa**, và chỗ lộ ra là `ref_id` lệch, không phải lỗi
+biên dịch. Không đề nghị đổi (đổi tag = đổi `ref_id`); hỏi có nên ghi nó vào bảng §2.1
+như một mục dành cho bên tiêu thụ.
