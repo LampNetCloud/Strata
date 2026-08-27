@@ -1700,6 +1700,11 @@ python3 scripts/orilife_handshake.py --did did:phoenix:… --pubkey <hex64> \
 `NFD`/`NFKD`) · `canonical_core` khớp (**148 B**, đúng `148 + len(content_cid)`) · lệch
 **1 nibble** (chỉ ra **offset 50**).
 
+🪤 Lượt thử đầu của nhánh *"khớp"* lại báo **LỆCH**, dài `155 B` thay vì `148 B` — không
+phải kịch bản sai mà **mẫu trích quá rộng** (`grep canonical_core` bắt luôn dòng tiêu đề).
+Neo mẫu thì đúng ngay. Cùng họ với chỗ grep vào thư mục không tồn tại ở §17.1; luật ở
+`Core: docs/VEDATA-ANCHOR-RUNBOOK.md §11.3`.
+
 🔺 **Dữ kiện xếp thứ tự, đo được:** `_canonical` **không** tra key-registry — daemon với
 **0 khoá** vẫn trả `200`. Nên hai mảnh bàn giao **độc lập**: OriLife khớp byte layout
 **trước khi** bảng khoá trao xong. Xếp nối đuôi là tự thêm một tuần chờ.
