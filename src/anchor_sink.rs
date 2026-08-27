@@ -494,8 +494,6 @@ pub struct ResolvedAnchor {
 /// Seam ra Mosaic (VeData). Ranh giới issue #1: **Mosaic dựng+submit tx**, Strata chỉ
 /// map datum + gọi. Real impl gọi Mosaic SDK/Lucid (Phase 2); test dùng mock.
 pub trait MosaicBackend {
-    /// `seq` on-chain hiện tại của `ref_id` (None = chưa neo). Cho idempotency/rollback.
-    fn on_chain_seq(&self, ref_id: &Hash32) -> Result<Option<u64>, AnchorError>;
     /// Mosaic dựng reference-UTxO CIP-68 spend-recreate từ datum + submit. Trả receipt.
     fn submit_anchor(&self, datum: &PlutusData) -> Result<AnchorReceipt, AnchorError>;
     /// **HỢP ĐỒNG BẢO MẬT (§8.1b, trust-model thread-token — anh Đức chốt phương án a):**
@@ -588,13 +586,51 @@ impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
         if priority == AnchorPriority::NoAnchor {
             return Ok(None); // sống tầng (a)/(b), không đẩy
         }
-        // Idempotency + rollback + nhảy bậc (§8.1b): query on-chain seq TRƯỚC khi build.
+        // **`AnchorPriority` THƯA không có nghĩa ở Mosaic-A.**
         //
-        // Ba nhánh, KHÔNG được gộp: neo lại đúng seq = no-op; neo lùi = rollback (INV-E7);
-        // neo vượt quá một bậc = wedge. Nhánh thứ ba trước đây rơi vào `_ => {}` và được đẩy
-        // thẳng lên chuỗi, nơi validator từ chối (`seq' == seq + 1`) — nhưng lúc đó head
-        // local đã tiến nên KHÔNG có đường quay lại: mọi lần neo sau đều nhảy bậc y hệt.
-        match self.backend.on_chain_seq(&anchor.ref_id)? {
+        // Validator ép `seq' == seq + 1`, tức backend này neo TỪNG anchor một. Neo thưa
+        // (`Milestone`/`BatchDaily`) làm head local tiến nhiều bậc rồi mới đẩy ⇒ từ lần neo
+        // thứ hai trở đi LUÔN `SeqGap`, kèm câu "on-chain đòi neo seq=N trước" — đọc như gọi
+        // sai thứ tự trong khi thực chất là **sai cấu hình**. Một thông điệp đúng sự thật mà
+        // dẫn người ta đi sai hướng thì tệ hơn im lặng, nên chặn ngay tại đây và nói thẳng.
+        //
+        // Chỗ đúng nhất để chặn là nơi ghép (backend, priority) — nhưng sink không nhận
+        // `priority` lúc dựng, nó tới theo từng lần gọi. Nên gác đặt ở cửa đầu của `publish`.
+        if matches!(
+            priority,
+            AnchorPriority::Milestone | AnchorPriority::BatchDaily
+        ) {
+            return Err(AnchorError::Rejected(format!(
+                "Mosaic-A neo từng anchor một (validator ép seq' == seq + 1), nên \
+                 AnchorPriority::{priority:?} không có nghĩa ở backend này và sẽ sinh SeqGap từ \
+                 lần neo thứ hai. Muốn neo thưa thì dùng backend Settlement."
+            )));
+        }
+        // **FAIL-ĐÓNG: đường GHI không chạy ở chế độ không-xác-thực.**
+        //
+        // Trước đây `publish` hỏi `on_chain_seq()` — một số VÔ HƯỚNG, nên sink không còn gì
+        // để lọc: backend trả "UTxO seq cao nhất tại address" thì kẻ lạ gửi một UTxO datum
+        // giả `seq = 2^63` (validator chỉ guard SPEND, KHÔNG guard CREATE) là kẹt lineage
+        // vĩnh viễn. `expected_token` khi đó chỉ gác đường ĐỌC, đường GHI mù hoàn toàn.
+        //
+        // Nay `publish` đi qua đúng cửa `resolve()` đã lọc thread-token. Nhưng `resolve()`
+        // chỉ lọc được KHI CÓ token pin — không pin thì nó nhận mọi ứng viên, tức lỗ cũ
+        // nguyên vẹn. Nên chế độ không-xác-thực bị chặn thẳng ở đây thay vì trả một kết quả
+        // trông-như-đúng: sink dựng bằng `new_unverified_for_tests` chỉ đọc được, không ghi.
+        if self.expected_token.is_none() {
+            return Err(AnchorError::Rejected(
+                "sink không pin thread-token: `resolve()` không phân biệt được UTxO thật với \
+                 UTxO cấy vào địa chỉ script, nên đường ghi bị chặn. Dùng \
+                 `MosaicAnchorSink::with_thread_token` cho mọi đường ghi thật."
+                    .to_string(),
+            ));
+        }
+        // Idempotency + rollback + nhảy bậc (§8.1b), đọc qua `resolve()` — cùng một cửa đã
+        // xác thực với đường đọc. Ba nhánh KHÔNG được gộp: neo lại đúng seq = no-op; neo lùi
+        // = rollback (INV-E7); neo vượt quá một bậc = wedge. Nhánh thứ ba trước đây rơi vào
+        // `_ => {}` và được đẩy thẳng lên chuỗi, nơi validator từ chối (`seq' == seq + 1`) —
+        // nhưng lúc đó head local đã tiến nên KHÔNG có đường quay lại.
+        match self.resolve(&anchor.ref_id)?.map(|a| a.seq) {
             Some(s) if s == anchor.seq => return Ok(None), // đã neo — no-op idempotent
             Some(s) if s > anchor.seq => {
                 return Err(AnchorError::RollbackAttempt {
@@ -609,10 +645,12 @@ impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
                     attempted: anchor.seq,
                 });
             }
-            // `None` (chưa neo lần nào) KHÔNG bị chặn: validator chỉ guard SPEND, không guard
-            // CREATE, nên UTxO anchor đầu tiên được mang `seq` bất kỳ. Đây là đường hợp lệ để
-            // đưa một chuỗi đã sống off-chain lên neo giữa chừng. Ràng buộc +1 chỉ bắt đầu
-            // từ lần neo THỨ HAI trở đi — đúng bằng phạm vi mà chuỗi thật sự ép.
+            // `None` = không có UTxO nào MANG ĐÚNG thread-token, tức lineage chưa neo lần nào.
+            // Không bị chặn: validator chỉ guard SPEND nên UTxO anchor đầu tiên được mang
+            // `seq` bất kỳ — đây là đường hợp lệ để đưa một chuỗi đã sống off-chain lên neo
+            // giữa chừng. Ràng buộc +1 chỉ bắt đầu từ lần neo THỨ HAI, đúng bằng phạm vi
+            // chuỗi thật sự ép. Khác hẳn `None` cũ: cũ là "backend không thấy gì", nay là
+            // "không có gì qua được cửa xác thực".
             _ => {}
         }
         let datum = map_anchor_to_datum(anchor);
