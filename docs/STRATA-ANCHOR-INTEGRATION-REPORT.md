@@ -1949,3 +1949,26 @@ thật thì đây là câu phải trả lời **trước** khi nhận dữ liệ
 Đo hiện trạng lúc viết (2026-08-28): **không có tiến trình `strata-node` nào đang chạy**,
 và `~/vedata-node/strata-journal.jsonl` **chưa tồn tại** — các lượt chạy thật trước đây
 dựng nhật ký theo từng lượt rồi kết thúc. Chưa có triển khai thường trực nào.
+
+#### `fields` còn trong nhật ký — và khung đúng để nói về nó
+
+`§15.9` mục 3: `fields` chưa đi Mirage, nên tệp `.jsonl` chứa **giá trị trường thật**
+(*"đã phun thuốc: có"*, `owner_did`), không phải chỉ hash.
+
+Khung đúng: **Mirage đang được phát triển và sẽ ráp vào sau**, cùng hạng với PhoenixKey
+resolver cho `KeyRegistry` — đây là **một tích hợp chưa tới**, không phải một sơ suất.
+Đừng viết nó như một lỗi.
+
+Nhưng cũng đừng bỏ vế hiện trạng: từ nay tới lúc Mirage vào, dữ liệu riêng tư nằm nguyên
+văn trong một tệp text, một máy, chưa có bản thứ hai. Nên nó đổi câu trả lời cho hai câu
+mà bên tích hợp bị hỏi trước — *"dữ liệu để ở đâu"* và *"ai đọc được"* — chứ không chỉ
+câu *"mất thì sao"*.
+
+#### Chỗ theo dõi
+
+| Chỗ hở | Issue |
+|---|---|
+| khoá tệp | `LampNetCloud/Strata#73` |
+| chỗ chạy thường trực + sao lưu | `VeDataIO/Core#129` |
+| nén / ảnh chụp | ngưỡng ở `Core: RUNBOOK §12` |
+| `fields` → Mirage | chờ Mirage, cùng nhịp PhoenixKey |
