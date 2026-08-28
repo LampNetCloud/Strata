@@ -1955,28 +1955,30 @@ dựng nhật ký theo từng lượt rồi kết thúc. Chưa có triển khai 
 `§15.9` mục 3: `fields` chưa đi Mirage, nên tệp `.jsonl` chứa **giá trị trường thật**
 (*"đã phun thuốc: có"*, `owner_did`), không phải chỉ hash.
 
-Khung đúng, và nó rộng hơn một mình Mirage: **cả LampNet đang được phát triển và sẽ ráp
-vào sau**, cùng hạng với PhoenixKey — đây là **những tích hợp chưa tới**, không phải sơ
-suất. Đừng viết chúng như lỗi.
+Khung đúng, và nó rộng hơn một mình Mirage: **LampNet (Đạt) và PhoenixKey (anh Tuân) đều
+là nền của đội khác, đã phát triển tương đối, và phần còn lại là VeData ráp vào sau.**
+Đây là **tích hợp chưa tới ở phía mình**, không phải sơ suất và cũng không phải bên kia
+chậm. Đừng viết chúng như lỗi.
 
-`MODULES.md §2.1` liệt LampNet gồm bốn hệ con, và ghi thẳng *"Tham chiếu kỹ thuật:
-`Specs/LampNet-*.md` (**chưa viết**)"*:
+🪤 **Một chỗ chương này từng viết SAI, giữ lại làm bài học.** Bản trước ghi *"LampNet chưa
+có cả spec kỹ thuật"*, suy từ dòng `MODULES.md §2.1`: *"Tham chiếu kỹ thuật:
+`Specs/LampNet-*.md` (chưa viết)"*. Suy vậy là **sai vùng**: dòng đó chỉ nói **kho `Specs`
+của VeData** chưa có tài liệu tham chiếu về LampNet. Nó **không nói gì** về mức phát triển
+của chính LampNet — thứ nằm ngoài tầm nhìn của kho này (org `LampNetCloud` lộ ra với
+VeData chỉ gồm `Strata` · `Spectra` · `Anchor` · `Cnode` · `lampnet-sdk`).
 
-| Hệ con LampNet | Vai trò | Trạng thái |
+*Vắng một tài liệu trong kho CỦA MÌNH không phải bằng chứng về trạng thái của hệ NGƯỜI
+KHÁC.* Cùng họ với luật vùng-tìm-phải-đóng ở `Core: RUNBOOK §11.3`.
+
+Trạng thái đúng của bốn hệ con LampNet, xét theo **đã ráp vào đường neo hay chưa** —
+không phải theo mức trưởng thành của chúng:
+
+| Hệ con LampNet | Vai trò | Đã ráp vào đường neo? |
 |---|---|---|
-| **Mirage** | kho nội-dung-địa-chỉ (`lamp://CID`) | chưa ráp |
-| **Cave** | TEE attestation | chưa ráp |
-| **Splash** | tính toán phân tán | chưa ráp |
-| **Strata** | chuỗi phiên bản có thứ tự | ✅ **đã chạy thật** — chính kho này |
-
-Đáng ghi ra vì nó đổi cách đọc cả chương: **Strata là hệ con LampNet duy nhất đang chạy**.
-Mọi chỗ tài liệu nói *"sau này đi Mirage"* là đang trỏ tới một hệ **chưa có spec**, chứ
-không phải một dịch vụ đã dựng mà ta chưa nối dây.
-
-Nhưng cũng đừng bỏ vế hiện trạng: từ nay tới lúc Mirage vào, dữ liệu riêng tư nằm nguyên
-văn trong một tệp text, một máy, chưa có bản thứ hai. Nên nó đổi câu trả lời cho hai câu
-mà bên tích hợp bị hỏi trước — *"dữ liệu để ở đâu"* và *"ai đọc được"* — chứ không chỉ
-câu *"mất thì sao"*.
+| **Mirage** | kho nội-dung-địa-chỉ (`lamp://CID`) | chưa — `fields` còn nằm trong nhật ký |
+| **Cave** | TEE attestation | chưa |
+| **Splash** | tính toán phân tán | chưa |
+| **Strata** | chuỗi phiên bản có thứ tự | ✅ đã — chính kho này |
 
 #### Chỗ theo dõi
 
