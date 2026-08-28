@@ -1892,6 +1892,12 @@ Bảng §17.8 ghi tầng bản ghi nằm ở *"`strata-node`, nhật ký trên �
 gọn quá, và phần bị gọn mất lại là phần một đội tích hợp sẽ hỏi ngay khi dữ liệu là của
 khách hàng họ. Ghi ra cho đủ.
 
+> **Chồng lấn có chủ ý với §15.9.** §15.9 đã liệt các chỗ hở của chính cài đặt nhật ký
+> (mục 2 nén/ảnh chụp · mục 3 `fields` còn nằm trong nhật ký · mục 4 một-tệp-một-tiến-trình,
+> *"chưa gác"*). Mục này **không** thay nó — nó trả lời một câu khác: **cột "Ở đâu" nghĩa
+> là gì trên thực địa**, và cái đó đã chống được / chưa chống được những ca nào. Sửa một
+> bên thì soát bên kia.
+
 #### Theo nghĩa đen
 
 `strata-node` là **một binary Rust** chạy trên **một máy**, nghe HTTP ở `127.0.0.1:6690`
