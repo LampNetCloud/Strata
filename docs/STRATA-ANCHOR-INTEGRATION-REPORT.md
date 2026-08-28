@@ -1784,41 +1784,89 @@ như một mục dành cho bên tiêu thụ.
 
 ### 17.8 "Neo dữ liệu on-chain" — *dữ liệu* ở đây là gì
 
-Bản đầy đủ: `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md §17.12`. Mục này
-giữ phần một đội tích hợp cần, để đọc được mà không phải sang kho khác. Đã gửi
-`OriLifeTrace/OriLife-Core#450`.
+> Bản đầy đủ nằm ở **chương này** (cùng quy ước với §14: bản đầy đủ ở kho Strata, kho
+> `Core` giữ nửa của nó). Nửa VeData — việc phán đúng-sai thuộc module nào — ở
+> `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` **§17.12**.
+>
+> Đã gửi `OriLifeTrace/OriLife-Core#450`. Viết ra vì nó quyết hai thứ rất thực tế cho đội
+> tích hợp: **cái gì lộ ra công khai vĩnh viễn**, và **nối xong thì nói được câu gì với
+> người mua**.
 
-**Dữ liệu KHÔNG lên chuỗi.** Cái lên chuỗi là chuỗi **cam kết** — toàn hash. Một cây gói
-trong **104 byte**: `StrataAnchor = ref_id(32) ‖ head_version_hash(32) ‖ mmr_root(32) ‖ seq(8)`
-(`src/chain.rs:100`). Lô 08-25 mang 6 anchor ⇒ **624 byte** trên chuỗi. Không mã cây,
-không tên người, không ảnh — thứ công khai vĩnh viễn là **hash**, không phải nội dung.
+#### Câu ngắn: dữ liệu KHÔNG lên chuỗi
 
-**Cái thang:**
+Cái lên chuỗi là một chuỗi **cam kết** — mỗi cái 32 byte băm. Với một cây, tất cả gói
+trong **104 byte**.
 
-```
-một trường → fvh → state_root → version_hash (thứ được KÝ) → mmr_root
-           → StrataAnchor (104 B) → Cardano nhãn 1234 → checkpoint root
-```
+#### Thứ thật sự nằm trong giao dịch
 
-Mỗi bậc một chiều. Dữ liệu thật ở `strata-node` (nhật ký) và Mirage (`content_cid`).
+`StrataAnchor` — 4 trường, đúng **104 byte** (`src/chain.rs:100`):
 
-**Chứng minh được:** bản ghi **đã tồn tại trước** một slot · **chưa từng bị sửa** · một
-trường có **giá trị X** (field-proof, không phải lộ trường khác).
-**KHÔNG chứng minh:** giá trị đó **đúng sự thật**.
-
-🔺 **Ranh giới, và nó là ranh giới giữa các module.** Neo on-chain biến một lời khai
-thành lời khai **không chối được**, không biến nó thành lời khai **đúng** — và đó không
-phải thiếu sót:
-
-| | Là gì | Giữ việc gì |
+| Trường | Byte | Là gì |
 |---|---|---|
-| **Strata** | **hạ tầng LampNet**, KHÔNG phải module VeData (`MODULES.md §2.1`) | *"đã khai gì, thứ tự nào, ai ký"*; byte do Strata sinh, **Mosaic chỉ chở** |
-| **Mosaic** | module VeData | lên L1: bất biến + mốc thời gian. `§1.4`: **KHÔNG** biết record content, **KHÔNG** tính `V(r)` |
-| **Score** | module VeData | **Trách nhiệm DUY NHẤT: `V(r) ∈ [0,1]`** — đánh giá độ tin cậy |
+| `ref_id` | 32 | định danh ổn định của **một cây** |
+| `head_version_hash` | 32 | băm của **bản ghi mới nhất** |
+| `mmr_root` | 32 | cam kết **toàn bộ lịch sử** bản ghi của cây đó |
+| `seq` | 8 | số thứ tự bản ghi — chống tụt lùi |
 
-`Rada`/`Stamp`/`Mosaic`/`Query` **đều** ghi *"tính `V(r)`"* vào ô **KHÔNG làm**; chỉ
-`Score` nhận ⇒ ranh giới **có chủ đích trong spec**.
+Lô liên hộ 08-25 (`35a0bb44…`) mang **6 anchor** ⇒ tổng **624 byte** trên chuỗi, phí
+`0,223385` tADA. Không mã cây, không tên nông dân, không ảnh, không ngày phun thuốc —
+**không một byte dữ liệu thật nào**. Đây cũng là câu trả lời cho lo ngại lộ dữ liệu: thứ
+công khai vĩnh viễn là **hash**, không phải nội dung.
 
-**Dính thẳng tới `#71`:** field-proof là **cách duy nhất** dữ liệu thật được đối chiếu
-với thứ đã neo; lỗ chung-tag cho phép cam kết một đằng khai một nẻo mà proof vẫn xanh —
-và theo `OriLife-Core#151`, `owner_did` đi **bằng chính đường đó**.
+#### Dữ liệu thật nằm ở đâu — ba tầng, tất cả NGOÀI chuỗi
+
+| Tầng | Chứa gì | Ở đâu |
+|---|---|---|
+| bản ghi (`StrataVersion`) | `seq · prev_hash · content_cid · state_root · author_did · policy_hash · ts` + chữ ký | `strata-node`, nhật ký trên đĩa |
+| trường có cấu trúc | *"đã phun thuốc: có"*, *"giai đoạn: ra hoa"*, `owner_did`… | cùng chỗ (sau đi Mirage) |
+| nội dung nặng | ảnh, tệp, hồ sơ | **Mirage**, trỏ tới bằng `content_cid` |
+
+#### Thứ được KÝ — `148 + len(content_cid)` byte
+
+```
+seq(8) ‖ prev_hash(32) ‖ len(content_cid)(4) ‖ content_cid(n)
+       ‖ state_root(32) ‖ author_did(32) ‖ policy_hash(32) ‖ ts(8)
+```
+
+Cũng **không** phải dữ liệu — là bảng tóm tắt bằng hash. `state_root` là gốc cây Merkle
+**trên các trường**: mỗi trường thành `fvh = H_dom(tag, giá_trị)` rồi gộp lên ⇒ **mọi
+trường của cây tại một thời điểm nén thành 32 byte**.
+
+#### Cái thang, từ một trường lên tới chuỗi
+
+```
+"đã phun thuốc: có"
+   → fvh             (băm một trường)
+   → state_root      (cây Merkle trên mọi trường của bản ghi)
+   → version_hash    (băm cả bản ghi — thứ OriLife KÝ)
+   → mmr_root        (cây trên toàn bộ lịch sử bản ghi của cây đó)
+   → StrataAnchor    (104 byte) → Cardano, nhãn 1234
+   → checkpoint root (cây trên mọi anchor trong một cửa sổ slot)
+```
+
+Mỗi bậc là một hàm **một chiều**. Đi lên rẻ; đi xuống không đi được.
+
+#### Neo chứng minh được gì — và KHÔNG chứng minh gì
+
+- ✅ *"Bản ghi này đã tồn tại **trước** slot 131977151"* — chuỗi Cardano làm chứng.
+- ✅ *"Nội dung nó **chưa từng bị sửa**"* — đổi một byte thì `version_hash` đổi, không
+  khớp thứ đã neo.
+- ✅ *"Trường `đã phun thuốc` có giá trị **X**"* — bằng **field-proof**: đưa giá trị +
+  đường anh em, người kiểm dựng lại `state_root` rồi so với thứ đã neo. **Không phải lộ
+  các trường khác.**
+- ❌ **Không** chứng minh giá trị đó **đúng sự thật**. Chuỗi chỉ chứng minh *"đã khai như
+  vậy, từ lúc đó, và chưa sửa"*.
+
+🔺 **Ranh giới đáng nhớ nhất:** neo on-chain biến một lời khai thành lời khai **KHÔNG CHỐI
+ĐƯỢC**, chứ không biến nó thành lời khai **ĐÚNG** — và `Strata` với `Mosaic` đang làm
+**đúng** nhiệm vụ của mình. Việc đánh giá **tính đúng đắn** thuộc module **`Score`**
+(`MODULES.md §1.3`: *"tính `V(r) ∈ [0,1]`"* là **trách nhiệm DUY NHẤT**). Chi tiết ranh
+giới module ở `Core §17.12`.
+
+#### Vì sao mục này dính thẳng tới `#71`
+
+Field-proof là **cách duy nhất** một trường dữ liệu thật được đối chiếu với thứ đã neo.
+Lỗ chung-tag cho phép cam kết một đằng rồi khai một nẻo mà proof **vẫn xanh** — tức phá
+đúng vế ✅ thứ ba ở trên. Và theo kiến trúc chốt ở `OriLife-Core#151`, `owner_did` đi
+**bằng chính đường đó**. Nói cách khác: `#71` không phải một lỗi mật mã trừu tượng — nó
+ngồi đúng dưới câu *"cây này của nông dân nào"*.
