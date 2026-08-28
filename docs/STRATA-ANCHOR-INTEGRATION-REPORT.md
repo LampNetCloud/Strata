@@ -1781,3 +1781,44 @@ Hôm nay vô hại (`genesis_nonce` do họ tính, Strata không tính lại), n
 khác thì thành **một tên, hai định nghĩa**, và chỗ lộ ra là `ref_id` lệch, không phải lỗi
 biên dịch. Không đề nghị đổi (đổi tag = đổi `ref_id`); hỏi có nên ghi nó vào bảng §2.1
 như một mục dành cho bên tiêu thụ.
+
+### 17.8 "Neo dữ liệu on-chain" — *dữ liệu* ở đây là gì
+
+Bản đầy đủ: `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md §17.12`. Mục này
+giữ phần một đội tích hợp cần, để đọc được mà không phải sang kho khác. Đã gửi
+`OriLifeTrace/OriLife-Core#450`.
+
+**Dữ liệu KHÔNG lên chuỗi.** Cái lên chuỗi là chuỗi **cam kết** — toàn hash. Một cây gói
+trong **104 byte**: `StrataAnchor = ref_id(32) ‖ head_version_hash(32) ‖ mmr_root(32) ‖ seq(8)`
+(`src/chain.rs:100`). Lô 08-25 mang 6 anchor ⇒ **624 byte** trên chuỗi. Không mã cây,
+không tên người, không ảnh — thứ công khai vĩnh viễn là **hash**, không phải nội dung.
+
+**Cái thang:**
+
+```
+một trường → fvh → state_root → version_hash (thứ được KÝ) → mmr_root
+           → StrataAnchor (104 B) → Cardano nhãn 1234 → checkpoint root
+```
+
+Mỗi bậc một chiều. Dữ liệu thật ở `strata-node` (nhật ký) và Mirage (`content_cid`).
+
+**Chứng minh được:** bản ghi **đã tồn tại trước** một slot · **chưa từng bị sửa** · một
+trường có **giá trị X** (field-proof, không phải lộ trường khác).
+**KHÔNG chứng minh:** giá trị đó **đúng sự thật**.
+
+🔺 **Ranh giới, và nó là ranh giới giữa các module.** Neo on-chain biến một lời khai
+thành lời khai **không chối được**, không biến nó thành lời khai **đúng** — và đó không
+phải thiếu sót:
+
+| | Là gì | Giữ việc gì |
+|---|---|---|
+| **Strata** | **hạ tầng LampNet**, KHÔNG phải module VeData (`MODULES.md §2.1`) | *"đã khai gì, thứ tự nào, ai ký"*; byte do Strata sinh, **Mosaic chỉ chở** |
+| **Mosaic** | module VeData | lên L1: bất biến + mốc thời gian. `§1.4`: **KHÔNG** biết record content, **KHÔNG** tính `V(r)` |
+| **Score** | module VeData | **Trách nhiệm DUY NHẤT: `V(r) ∈ [0,1]`** — đánh giá độ tin cậy |
+
+`Rada`/`Stamp`/`Mosaic`/`Query` **đều** ghi *"tính `V(r)`"* vào ô **KHÔNG làm**; chỉ
+`Score` nhận ⇒ ranh giới **có chủ đích trong spec**.
+
+**Dính thẳng tới `#71`:** field-proof là **cách duy nhất** dữ liệu thật được đối chiếu
+với thứ đã neo; lỗ chung-tag cho phép cam kết một đằng khai một nẻo mà proof vẫn xanh —
+và theo `OriLife-Core#151`, `owner_did` đi **bằng chính đường đó**.
