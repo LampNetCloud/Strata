@@ -1885,3 +1885,61 @@ Lỗ chung-tag cho phép cam kết một đằng rồi khai một nẻo mà proo
 đúng vế ✅ thứ ba ở trên. Và theo kiến trúc chốt ở `OriLife-Core#151`, `owner_did` đi
 **bằng chính đường đó**. Nói cách khác: `#71` không phải một lỗi mật mã trừu tượng — nó
 ngồi đúng dưới câu *"cây này của nông dân nào"*.
+
+### 17.9 Cột "Ở đâu" của tầng bản ghi — `strata-node` + nhật ký là MỘT TỆP TRÊN MỘT MÁY
+
+Bảng §17.8 ghi tầng bản ghi nằm ở *"`strata-node`, nhật ký trên đĩa"*. Câu đó đúng nhưng
+gọn quá, và phần bị gọn mất lại là phần một đội tích hợp sẽ hỏi ngay khi dữ liệu là của
+khách hàng họ. Ghi ra cho đủ.
+
+#### Theo nghĩa đen
+
+`strata-node` là **một binary Rust** chạy trên **một máy**, nghe HTTP ở `127.0.0.1:6690`
+— một trong ba tiến trình do VeData vận hành (§14.1). Nhật ký là **một tệp JSON-lines**,
+append-only, đường dẫn do `STRATA_NODE_JOURNAL` khai. Runbook §4 đặt nó ở
+`$HOME/vedata-node/strata-journal.jsonl`, nhưng đó là **khuyến nghị vận hành**, không phải
+hằng trong mã.
+
+Tệp mới sinh có đúng một dòng — chạy thật để lấy, không mô tả suông:
+
+```json
+{"op":"header","format":1}
+```
+
+Năm loại bản ghi: `header` · `create` · `append` · `audit` · `anchor`. Ba loại giữa mang
+**nguyên văn request** của client (`CreateReq` / `AppendReq` / `AuditEventReq`); `anchor`
+mang `ref_id ‖ seq ‖ txid ‖ backend`, ghi **sau** khi chuỗi trả biên nhận.
+
+Không phải cơ sở dữ liệu, không phải dịch vụ lưu trữ, không phải chuỗi.
+
+#### Cái nó ĐÃ chống được — đo trên mã, không nhớ
+
+| Ca | Chống được? | Bằng gì |
+|---|---|---|
+| tiến trình chết / restart | ✅ | replay chạy lại **đúng đường ghi** (`#69`) |
+| máy mất điện giữa lượt ghi | ✅ | `sync_data()` trước khi trả về (`journal.rs:134`, `:171`). Docstring nói thẳng lý do: thiếu nó thì *"đã ghi"* chỉ có nghĩa *"đã nằm trong cache của hệ điều hành"* — đúng thứ biến mất trong chính ca mà nhật ký sinh ra để sống sót |
+| tệp bị sửa (đĩa hỏng / tay người) | ✅ | chữ ký đỏ hoặc hash-link đứt ⇒ **daemon không khởi động**, chứ không phục vụ lịch sử giả |
+| một lượt ghi đĩa hỏng | ✅ | nhật ký **tự đầu độc** ⇒ đường ghi đóng, cửa trả `503`; đường đọc vẫn phục vụ |
+
+#### Cái nó CHƯA chống được
+
+Đo bằng grep có đối chứng dương (vùng tìm thật — `sync_data` khớp ở cùng vùng):
+
+| Thiếu | Đo | Hậu quả |
+|---|---|---|
+| **khoá tệp** | 0 dòng `flock` · `fcntl` · `lock_file` · `O_EXCL` trong `node/src/` `src/` (đã loại `Mutex`/`RwLock` là khoá trong-tiến-trình) | **hai daemon trên cùng một nhật ký thì cả hai đều sai**, và không có gì báo. Runbook §10 liệt vào mục "không được làm" — nhưng đó là kỷ luật người vận hành, không phải một gác |
+| **sao lưu / nhân bản** | 0 cơ chế trong mã | **ổ đĩa hỏng = mất hồ sơ cây**, và **không dựng lại được từ chuỗi**: on-chain chỉ có `StrataAnchor` 104 byte, `state_root` là hàm một chiều |
+| **nén / xoay vòng** | 0 cơ chế | nhật ký tăng tuyến tính không trần — ngưỡng phải hành động ở `Core: RUNBOOK §12` |
+
+#### Phát biểu cho đúng mức
+
+`#69` giải quyết *"restart thì mất dữ liệu"*. Nó **không** giải quyết *"ổ đĩa đó hỏng"* —
+và hai câu đó khác nhau ở chỗ câu sau **không có đường lui**.
+
+Nên hồ sơ cây hôm nay sống ở **một tệp trên một máy**, có `fsync` nhưng không có bản thứ
+hai. Với một lượt chạy thử trên Preprod thì chấp nhận được; với dữ liệu của khách hàng
+thật thì đây là câu phải trả lời **trước** khi nhận dữ liệu, không phải sau.
+
+Đo hiện trạng lúc viết (2026-08-28): **không có tiến trình `strata-node` nào đang chạy**,
+và `~/vedata-node/strata-journal.jsonl` **chưa tồn tại** — các lượt chạy thật trước đây
+dựng nhật ký theo từng lượt rồi kết thúc. Chưa có triển khai thường trực nào.
