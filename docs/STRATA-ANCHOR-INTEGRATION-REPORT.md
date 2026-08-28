@@ -1819,21 +1819,20 @@ công khai vĩnh viễn là **hash**, không phải nội dung.
 |---|---|---|
 | bản ghi (`StrataVersion`) | `seq · prev_hash · content_cid · state_root · author_did · policy_hash · ts` + chữ ký | `strata-node`, nhật ký trên đĩa |
 | trường có cấu trúc | *"đã phun thuốc: có"*, *"giai đoạn: ra hoa"*, `owner_did`… | cùng chỗ (sau đi Mirage) |
-| nội dung nặng | ảnh, tệp, hồ sơ | 🔺 **KHÔNG nằm trong Strata.** `content_cid` chỉ là con trỏ **mờ**; **bên gọi** tự đẩy blob lên **Mirage** — kho nội-dung-địa-chỉ của LampNet (`lamp://CID`, `MODULES.md §2.1`) |
+| nội dung nặng | ảnh, tệp, hồ sơ | Mirage (kho nội-dung-địa-chỉ của LampNet, `lamp://CID` — `MODULES.md §2.1`), bên gọi đẩy lên và trỏ tới bằng `content_cid` |
 
-⚠️ **Dòng thứ ba đáng đọc kỹ, vì nó là một giới hạn của phép neo.** Đo trên mã (đối chứng
-dương: vùng tìm có thật — 18 hit `content_cid` ở `src/version.rs`):
+Dòng thứ ba là một giới hạn của phép neo, nên ghi ra số đo (đối chứng dương: 18 hit
+`content_cid` ở `src/version.rs`):
 
 | Kiểm | Kết quả |
 |---|---|
-| Strata có **fetch / giải** `content_cid`? | **không** — 0 dòng `lamp://` · `resolve_cid` · `fetch_cid` trong `src/` `node/src/` `anchor-io/src/` |
-| Có **gác** nào trên `content_cid` ở đường ghi? | **không** — không kiểm độ dài, không kiểm dạng |
-| Ai đẩy blob lên Mirage? | `src/batch.rs:288`: *"blob + `content_cid` do **caller** đẩy Mirage"* |
+| Strata fetch/giải `content_cid`? | không — 0 dòng `lamp://` · `resolve_cid` · `fetch_cid` trong `src/` `node/src/` `anchor-io/src/` |
+| Gác nào trên `content_cid` ở đường ghi? | không — không kiểm độ dài, không kiểm dạng |
+| Ai đẩy blob lên Mirage? | `src/batch.rs:288`: *"blob + `content_cid` do caller đẩy Mirage"* |
 
-Với Strata, `content_cid` là **`Vec<u8>` mờ**: length-prefix rồi băm vào `canonical_core`,
-hết. ⇒ Một `content_cid` **trỏ vào hư không vẫn neo thành công** — tx lên chuỗi,
-`resolve()` khớp, mọi proof xanh, mà nội dung có thể không tồn tại ở đâu cả. **Giữ cho
-blob thật sự nằm ở Mirage là nghĩa vụ của bên gọi**, không phải của đường neo.
+Với Strata, `content_cid` là `Vec<u8>` mờ: length-prefix rồi băm vào `canonical_core`.
+Một CID trỏ vào chỗ trống vẫn neo được — tx lên chuỗi, `resolve()` khớp, proof xanh, mà
+nội dung có thể không tồn tại. Giữ blob thật sự nằm ở Mirage là nghĩa vụ của bên gọi.
 
 #### Thứ được KÝ — `148 + len(content_cid)` byte
 
@@ -1870,9 +1869,8 @@ Mỗi bậc là một hàm **một chiều**. Đi lên rẻ; đi xuống không 
   các trường khác.**
 - ❌ **Không** chứng minh giá trị đó **đúng sự thật**. Chuỗi chỉ chứng minh *"đã khai như
   vậy, từ lúc đó, và chưa sửa"*.
-- ❌ **Không** chứng minh **nội dung nặng còn tồn tại**. `content_cid` là byte mờ với
-  Strata — không kiểm, không fetch. Một `content_cid` trỏ vào hư không vẫn neo thành công
-  và mọi proof vẫn xanh.
+- ❌ **Không** chứng minh nội dung nặng còn tồn tại — `content_cid` là byte mờ với Strata,
+  không kiểm và không fetch.
 
 🔺 **Ranh giới đáng nhớ nhất:** neo on-chain biến một lời khai thành lời khai **KHÔNG CHỐI
 ĐƯỢC**, chứ không biến nó thành lời khai **ĐÚNG** — và `Strata` với `Mosaic` đang làm
