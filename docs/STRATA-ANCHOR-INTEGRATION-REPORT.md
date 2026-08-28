@@ -1955,9 +1955,23 @@ dựng nhật ký theo từng lượt rồi kết thúc. Chưa có triển khai 
 `§15.9` mục 3: `fields` chưa đi Mirage, nên tệp `.jsonl` chứa **giá trị trường thật**
 (*"đã phun thuốc: có"*, `owner_did`), không phải chỉ hash.
 
-Khung đúng: **Mirage đang được phát triển và sẽ ráp vào sau**, cùng hạng với PhoenixKey
-resolver cho `KeyRegistry` — đây là **một tích hợp chưa tới**, không phải một sơ suất.
-Đừng viết nó như một lỗi.
+Khung đúng, và nó rộng hơn một mình Mirage: **cả LampNet đang được phát triển và sẽ ráp
+vào sau**, cùng hạng với PhoenixKey — đây là **những tích hợp chưa tới**, không phải sơ
+suất. Đừng viết chúng như lỗi.
+
+`MODULES.md §2.1` liệt LampNet gồm bốn hệ con, và ghi thẳng *"Tham chiếu kỹ thuật:
+`Specs/LampNet-*.md` (**chưa viết**)"*:
+
+| Hệ con LampNet | Vai trò | Trạng thái |
+|---|---|---|
+| **Mirage** | kho nội-dung-địa-chỉ (`lamp://CID`) | chưa ráp |
+| **Cave** | TEE attestation | chưa ráp |
+| **Splash** | tính toán phân tán | chưa ráp |
+| **Strata** | chuỗi phiên bản có thứ tự | ✅ **đã chạy thật** — chính kho này |
+
+Đáng ghi ra vì nó đổi cách đọc cả chương: **Strata là hệ con LampNet duy nhất đang chạy**.
+Mọi chỗ tài liệu nói *"sau này đi Mirage"* là đang trỏ tới một hệ **chưa có spec**, chứ
+không phải một dịch vụ đã dựng mà ta chưa nối dây.
 
 Nhưng cũng đừng bỏ vế hiện trạng: từ nay tới lúc Mirage vào, dữ liệu riêng tư nằm nguyên
 văn trong một tệp text, một máy, chưa có bản thứ hai. Nên nó đổi câu trả lời cho hai câu
