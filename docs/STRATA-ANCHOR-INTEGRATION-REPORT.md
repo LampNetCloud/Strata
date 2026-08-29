@@ -306,9 +306,20 @@ Căn cứ, theo thứ tự sức nặng:
 
 | PR | Chặn bởi | Ghi chú |
 |---|---|---|
-| **#42** | anh Đức chưa đẩy 3 sửa đã hứa 13/08 | `resolve()` thay `on_chain_seq()` · nhánh `None` fail cứng · chặn `AnchorPriority` thưa ở constructor. Không tự đẩy thay vì anh nói rõ *"anh cập nhật vào nhánh này, em đợi bản cập nhật rồi hẵng bấm merge"* |
+| **#42** | **ĐÃ LAND 2026-08-29** (`c6b97c9`) | Đường GHI nay đi `resolve()`, `on_chain_seq` **gỡ khỏi trait** — không còn call-site nào trong mã. Chặn `AnchorPriority` thưa đặt ở cửa đầu `publish` (sink không nhận `priority` lúc dựng). **Nợ mở ghi lên PR:** mục 2 land khác câu chốt 13/08 — gác đặt trên `expected_token.is_none()`, còn nhánh *có pin token mà `resolve()` trả `None`* vẫn đi thẳng, tức indexer trễ vẫn bỏ qua cả ba gác kể cả no-op idempotent. Xem §9.5 |
 | **#40** | phải gộp 3 mục spec | `TimestampTooFarFuture` (lỗi cửa **thứ 7**, ngoài 6 biến thể #40 đang chốt thành danh sách đóng) · route `_canonical` (route **thứ 9**, #40 liệt 8) — **cả hai nay đã xác định vì #48 đã land**; mục thứ 3 là `SeqGap` của #42, **chờ #42** |
 | **#31** | secret `ANCHOR_DEPLOY_KEY` | Workflow tự báo lỗi đúng nguyên nhân và tự in 3 bước thêm khoá. **Cổng kêu to là hành vi đúng**, không phải CI hỏng — nhưng nó cần quyền admin repo mà `lrybi` không có |
+
+### 9.5 Nợ mở còn lại của đường Mosaic-A sau khi #42 land
+
+Đo trên cây đã ghép (`main` + `#42`): 268 test pass, clippy 0, `fmt` sạch. Bán kính hôm nay **bằng 0** trên đường thật — daemon chỉ dựng `SettlementSink` (`node/src/sink_config.rs`), `MosaicAnchorSink` không có call-site ngoài `tests/`, và `impl MosaicBackend for` vẫn đúng một kết quả (`MockMosaic`). Ba gác của #42 là gác cho **S11**.
+
+| Nợ | Chỗ | Vì sao còn |
+|---|---|---|
+| Nhánh genesis không có gác | `src/anchor_sink.rs` — `_ => {}` sau ba nhánh `Some(..)` | `resolve()` trả `Ok(None)` vì indexer trễ là một `Ok` hợp lệ. Retry sau `Network` timeout (tx đã lên chuỗi) rơi đúng cửa sổ này thì mất nhánh no-op idempotent — thứ `Strata-API.md:502` ghi là **bắt buộc** |
+| `SeqGap.on_chain_seq: Option<u64>` không có đường tạo `None` | cùng tệp | Trường dành sẵn cho luật fail-đóng chưa vào. `#40` đang chốt hình dạng enum này lên spec ⇒ chốt kiểu ở đó trước thì rẻ hơn |
+| Ai mint thread-NFT, mint ở tx nào | hợp đồng doc của `read_anchor` | Ba gác chỉ sống nếu sau `submit_anchor` thành công thì `read_anchor` trả ứng viên **mang đúng token đã pin**. Trong kho này không có gì mint hay gắn token — `publish` chỉ đưa `datum`. `MockMosaic::read_anchor` tự gắn `self.token` cho mọi thứ nó lưu, nên bài kiểm **giả định sẵn** câu trả lời. Backend thật không gắn ⇒ `resolve()` trả `None` mãi ⇒ ba gác không bao giờ chạy, hỏng im lặng |
+| Hai gác mới trả `502 AnchorRejected` | `node/src/error.rs` | Cả hai bắn **trước** khi chạm backend, mà 502 nói "backend neo từ chối". `priority` lại đến từ **client** (`node/src/routes.rs:661`, `node/src/dto.rs:373-383`), nên câu "dùng backend Settlement" nói với client một việc chỉ người vận hành làm được. Đề nghị `NotConfigured`/501 hoặc một dòng riêng ở bảng §3.1 — đã hỏi ở #42 |
 
 Thứ tự land đã tuân: **#31 cuối** (vì secret chưa có), **#40 cuối nhóm spec** (vì phải phản ánh #42 và #48).
 
