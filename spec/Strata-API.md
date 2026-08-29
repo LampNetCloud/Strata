@@ -65,7 +65,7 @@ pub enum StrataError { HashLinkBroken, SeqNotMonotonic, BadSignature, PolicyDeni
                        PolicyHashMismatch, UnknownAuthor, TimestampRegress, AnchorRollback, SeqOverflow }
 
 // state.rs
-pub struct FieldProof { pub key: Vec<u8>, pub value: Vec<u8>, pub fvh: Hash32,
+pub struct FieldProof { pub key: Vec<u8>, pub value: Vec<u8>, pub fvh: Hash32, pub salt: Vec<u8>,
                         pub siblings: Vec<(Hash32, bool)>, pub state_root: Hash32 }
 
 // mmr.rs (re-export qua lampnet_merkle_anchor::mmr)
@@ -151,10 +151,10 @@ let ok = StrataChain::verify_version(root, &vh, seq, size, &proof);   // root l�
 
 // Field-proof (INV-E6) — KHÔNG lộ trường khác (sibling chỉ là hash).
 let fp: FieldProof = lampnet_strata::prove_field(&fields, key)?;       // None nếu key vắng
-let ok = lampnet_strata::verify_field_proof(&fp);                      // tự kiểm fvh == H(value)
+let ok = lampnet_strata::verify_field_proof(&fp);                      // tự kiểm fvh — theo CHẾ ĐỘ mà `salt` chọn (§3)
 ```
 
-`verify_version` SUY chiều trái/phải từ `leaf_index`, KHÔNG tin cờ trong proof (bind chặt index↔hash). `verify_field_proof` tính lại root từ `value` + siblings rồi so `state_root`.
+`verify_version` SUY chiều trái/phải từ `leaf_index`, KHÔNG tin cờ trong proof (bind chặt index↔hash). `verify_field_proof` tính lại root từ `value` + `salt` + siblings rồi so `state_root` — `salt` rỗng hay khác rỗng chọn **hai domain-tag khác nhau**, xem bảng ở §3.
 
 ### §2.6 `append_event` — loại #2 (chuỗi-thêm) và audit-log
 
