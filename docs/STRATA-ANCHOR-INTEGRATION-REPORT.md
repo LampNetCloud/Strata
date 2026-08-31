@@ -1999,3 +1999,161 @@ không phải theo mức trưởng thành của chúng:
 | chỗ chạy thường trực + sao lưu | `VeDataIO/Core#129` |
 | nén / ảnh chụp | ngưỡng ở `Core: RUNBOOK §12` |
 | `fields` → Mirage | chờ Mirage, cùng nhịp PhoenixKey |
+
+---
+
+## 18. Phiên 2026-08-31 — hai mục đỏ đều bị chặn, và một bức tường thứ hai chưa ai đếm
+
+Phiên này mở ra để chạy **lượt nối thật đầu tiên**: một cây đi trọn `OriLife-Core` →
+`strata-node` → cửa neo → checkpoint, rồi dựng lại từ chuỗi. Cả hai điều kiện tiên quyết
+đo ra là **chưa đạt**, nên không lượt nối nào chạy. Chương này ghi cái đo được.
+
+### 18.1 Trạng thái đo hôm nay — đo, không nhớ
+
+| Mục | Đo được | Nguồn |
+|---|---|---|
+| `OriLife-Core#450` — họ chạy lượt 1/2 chưa | **chưa**; hai comment duy nhất trên issue đều của bên mình (08-28) | `gh api .../issues/450/comments` |
+| cặp `did:pubkey` nền tảng | **chưa gửi** ⇒ `STRATA_NODE_KEYS` không có gì để cắm | cùng trên |
+| `Specs#32` — `did_hash` ↔ `Did` | **chưa đóng**; comment cuối là của bên mình 08-27, anh Đức chưa trả lời | `gh api .../Specs/issues/32/comments` |
+| `Strata#64` — phần chữ | **chưa merge**; comment cuối 08-29 của bên mình | `gh api .../pulls/64` |
+| `Strata#73` — khoá tệp | mở, **0 comment** — chưa có hướng | `gh api .../issues/73/comments` |
+| `Core#129` — chỗ chạy + sao lưu | mở, **0 comment** — chưa ai nhận | `gh api .../Core/issues/129/comments` |
+| `OriLife#276` — `confirmed` sớm | **mở**; `anchor_queue.py` vẫn ghi `confirmed` ngay khi có `tx_hash`, không đếm xác nhận nào | `anchor_queue.py:588`; grep `confirmations\|block_height` = 0 |
+| `OriLife#423` — `khop` khống | ✅ **đã vá thật**, đóng 08-27 không comment | `strata_doi_chieu.py:185-190` |
+| CI kho này | **67/67 hỏng**, vẫn chưa từng xanh; kho có **0 secret** | `gh run list --limit 100` |
+
+⇒ `🔴 1` (cắm khoá) và `🔴 2` (lượt nối thật) **cùng bị chặn ở phía ngoài kho này**.
+Không có việc gì bên mình làm được để gỡ; phiên chuyển sang các mục còn lại.
+
+### 18.2 `#423` đã vá thật — đo chứ không tin nhãn "completed"
+
+Issue đóng `state_reason: completed`, **không một comment nào**. Theo lệ *"Đức trả lời bằng
+CODE không bằng chữ"*, đo bản vá thay vì tin nhãn:
+
+```
+strata_doi_chieu.py:47    KHOP = "khop"
+strata_doi_chieu.py:177   không lệch, có cặp CARDANO "khop"      → "khop"
+strata_doi_chieu.py:178   không lệch, chỉ có cặp strata_* "khop" → "khong_doi_chieu_duoc"
+strata_doi_chieu.py:185   "Chỉ chỗ này mới được nói 'khop': có ít nhất một số ĐỌC TỪ CHUỖI CARDANO…"
+```
+
+Có ô kết luận thứ ba (`khong_doi_chieu_duoc`) tách khỏi `khop`, và có test đông lạnh
+(`test_strata_doi_chieu.py:110`). Bản vá đúng chỗ đã báo. **Đóng đúng.**
+
+`#276` thì ngược lại: vẫn mở, và mã vẫn nguyên hình dạng đã báo — `confirmed` ghi khi có
+`tx_hash`, không có `confirmations`/`block_height` ở đâu trong `anchor_queue.py`.
+
+### 18.3 🔴 Bức tường thứ hai — cổng của OriLife từ chối đúng trường mà kiến trúc sở hữu đòi
+
+Đây là mục đáng kể nhất của phiên, và **công phát hiện không thuộc bên mình**: Lợi đã ghi
+va chạm này trên `OriLife-Core#151` từ **2026-08-16** (mục 1 trong khuyến nghị của bạn ấy).
+Phiên này đo lại độc lập để biết nó còn đúng trên `main` hôm nay, và để biết nó chạm gì
+trong kho này.
+
+Ba câu, cả ba đều đã được ghi thành chốt, và chúng **không cùng đúng được**:
+
+| Nguồn | Ngày | Câu |
+|---|---|---|
+| `OriLife-Core#151` — anh Đức | **08-07** | khoá ký ở mức nền tảng; **quyền sở hữu đi qua trường `owner_did`** |
+| `OriLife-Core#153` — INV-SP4 | **07-13** | mọi tên trường chứa token `did`/`owner`/`farmer`/`user` bị **từ chối**, *"kể cả dạng đã băm"* |
+| kho này | — | không có khái niệm PII nào; `owner_did` từng là **tên trường trong bài nghiệm thu 07-05** |
+
+Đo trên bản clone `OriLife-Core @ 0d27364` (2026-08-31), chạy chính hàm đó:
+
+```
+_is_pii_key("owner_did")   -> True      (khớp CẢ HAI token: "owner" và "did")
+validate_state_fields([{"key":"owner_did","value": <64 hex hợp lệ>}])
+   -> ValueError: key='owner_did' nằm trong deny-list PII — INV-SP4 cấm ghi PII
+                  (owner_did/GPS/tên/điện-thoại), kể cả dạng đã băm
+
+đối chứng nghịch: {"key":"giai_doan","value": <64 hex>}   -> LỌT
+```
+
+Hàng rào là thật, không phải chú thích: cổng bật **mặc định** (`enforce_state_fields=True`,
+`strata_client.py:771`), có nơi gọi thật ở biên `create`/`append_version`
+(`strata_client.py:1049-1053`), và **test của chính họ đông lạnh** việc từ chối
+(`test_strata_client.py:1309`). Lớp giá trị còn chặn một tầng nữa: `value` phải khớp
+`\A[0-9a-f]{64}\Z` (`:658`), nên một chuỗi DID thô không lọt dù đặt tên trường là gì.
+
+**Vì sao kho này phải quan tâm.** Không phải vì Strata chặn — Strata **không** chặn: grep
+`INV-SP4|PII` toàn kho (87 tệp) = **0 hit**, và `reports/ACCEPTANCE-2026-07-05.md:60` cho
+thấy bài nghiệm thu của chính kho này đã dùng `owner_did` làm một trong 5 tên trường. Bức
+tường nằm hoàn toàn ở phía tiêu thụ. Nhưng **hợp đồng tích hợp ở §14/§17.7 của chương này
+lại mô tả cơ chế đi qua bức tường đó**, nên câu chữ của kho này đang hứa một đường mà đầu
+kia không cho đi.
+
+### 18.4 Nó chưa cắn hôm nay, và cắn đúng lúc nào
+
+Đo tiếp để không báo động quá mức: đường shadow hôm nay **chưa bao giờ chạm**
+`create`/`append_version`. `shadow_write` gặp hasher chưa ghim thì ghi `skipped_unsigned`
+rồi thoát (`strata_client.py:1362-1382`), và tính năng còn tắt hẳn khi thiếu `STRATA_URL`.
+
+⇒ Va chạm là **tiềm ẩn**, và nó cắn đúng ở **lượt bật đường ký** — tức đúng mục `🔴 2` của
+phiên này. Nói chính xác phạm vi:
+
+| Việc | Bị chặn bởi va chạm này? |
+|---|---|
+| lượt bắt tay `#450` (so byte, `author_did`) | **không** — không đụng `state_fields` |
+| lượt nối thật với dữ liệu giả lập, không có trường sở hữu | **không** — bên mình chọn trường |
+| lời khai **sở hữu từng nông dân** qua field-proof | **có** — đây là chỗ chặn |
+
+Nên nó không thêm một nút chặn nào cho mục 2; nó lấy đi **lý do** của mục 2. Nối xong mà
+không có `owner_did` thì cái chứng minh được là *"bản ghi này tồn tại, chưa sửa"*, chưa
+phải *"cây này của người này"*.
+
+### 18.5 Sửa câu chữ của kho này — làm ngay, không chờ ai
+
+Ba chỗ trong chương này viết như thể cơ chế đã thông. Chúng thành **đúng** khi thêm một
+vế điều kiện, và bên mình không cần ai chốt để sửa câu của chính mình:
+
+| Dòng | Câu cũ hứa gì | Vế thiếu |
+|---|---|---|
+| `§17.7` mục 2 | *"quyền sở hữu đi qua `owner_did` = state-field CÓ KÝ"* | đúng về **ngữ nghĩa đã chốt**, chưa đúng về **thi hành** — cổng phía tiêu thụ đang từ chối |
+| `§17.7` mục 3 | *"field-proof trên `owner_did` **chính là** thứ chứng minh sở hữu"* | mệnh đề tương lai, không phải hiện trạng: hôm nay chưa trường nào tên đó ra khỏi `OriLife-Core` |
+| `§17.7` chỗ chặn lineage | *"`owner` chưa truyền xuống `try_shadow_write`"* | đó là **nửa rẻ**; nửa đắt là INV-SP4, và nửa đắt không sửa được bằng một tham số |
+
+Bản sửa nằm ở §18.6 dưới đây; ba dòng cũ giữ nguyên làm hồ sơ, đúng lệ §14.5.
+
+### 18.6 Câu đúng về `owner_did`, tính tới 2026-08-31
+
+> **Ngữ nghĩa** đã chốt (`#151`, 08-07): khoá ký ở mức nền tảng, quyền sở hữu đi qua
+> `owner_did`. **Thi hành** thì chưa: `OriLife-Core` có một bất biến fail-closed ra sau
+> quyết định 5 ngày (`#153`, 07-13) từ chối mọi tên trường chứa `owner`/`did`, kể cả dạng
+> đã băm, và ghim bằng test. Strata **không** chặn gì — bức tường ở phía tiêu thụ. Chỗ
+> chốt lại là `OriLife-Core#151`, thuộc anh Đức; bên mình không tự quyết và cũng không
+> đề nghị nới cổng, vì cổng đó bảo vệ thứ không sửa lại được.
+>
+> Hệ quả cho kho này: một `StrataVersion` bên `OriLife-Core` sinh ra hôm nay, kể cả khi
+> bật đường ký, **sẽ không mang trường sở hữu**. Chuỗi append-only nên bổ sung version
+> sau được; phần đã ký thì ở lại như vậy.
+
+Hướng Lợi đề xuất trên `#151` — đặt **tên trường trung tính**, giá trị là `content_cid`
+của một tài liệu riêng có chứa chủ sở hữu — chạy được với kho này **không cần đổi một dòng
+nào**: Strata không đọc `content_cid` (§17.8 — con trỏ mờ), và field-proof theo tên vẫn
+chứng minh được cam kết. Bên mình nêu ra như một dữ kiện tương thích, **không** phải một
+phiếu bầu; chốt vẫn là của anh Đức.
+
+### 18.7 CI kho này — 67/67, và bên mình không gỡ được
+
+| Đo | Giá trị |
+|---|---|
+| lượt CI hỏng | **67/67** kể từ 2026-07-30 — chưa từng xanh |
+| secret trong kho | **0** |
+| quyền của bên mình trên `LampNetCloud/Strata` | `push` — **không** `admin` |
+| quyền của bên mình trên `LampNetCloud/Anchor` | `push` — **không** `admin` |
+
+`ci.yml:48-57` đòi `ANCHOR_DEPLOY_KEY` vì `Cargo.toml` ghim `lampnet-merkle-anchor` qua
+SSH. Đặt secret cần `admin` ở kho `Strata`, và sinh deploy-key cần `admin` ở kho `Anchor`.
+Bên mình có `push` ở cả hai, `admin` ở **không kho nào** — nên `#24` không phải việc chưa
+làm, mà là việc **không làm được** ở mức quyền hiện tại. Đã ghi lại trên `#24`.
+
+### 18.8 Lưu vết phương pháp — bổ sung cho §17
+
+| Bẫy gặp trong phiên | Cách bắt |
+|---|---|
+| `gh issue view` chết vì GraphQL Projects-classic | chuyển sang `gh api repos/.../issues/N` |
+| `search/code` trả **0** cho `try_shadow_write` **và** cho `def` | đối chứng bằng một từ chắc chắn có; 0 ở cả hai ⇒ index không có, "0 hit" là **rỗng giả** ⇒ clone rồi `git grep` |
+| `ps -eo cmd \| grep -E "strata-node\|…"` bắt chính lệnh grep | loại dòng tự khớp rồi mới đọc kết quả |
+| mẫu `đối chiếu` khớp gần như mọi tệp `.py` | neo lại mẫu vào tên hàm thật (`strata_doi_chieu`) |
+| đọc deny-list bằng mắt rồi kết luận | **chạy** `_is_pii_key`, kèm **đối chứng nghịch** (`giai_doan` phải lọt) |
+| suýt ghi va chạm `owner_did` thành phát hiện của phiên | grep chính kho mình + đọc `#151` trước ⇒ Lợi đã ghi từ **08-16** |
