@@ -417,7 +417,7 @@ extend_mmr(mmr, version):
   vh = version_hash(&version)
   mmr.append(mmr_leaf_hash(vh))       // append-only — KHÔNG sửa leaf cũ (INV-E3)
   new_root = mmr_root(mmr.leaves)     // §3.4: commit u64_be(n) ‖ bag (CHỐT-3)
-  // INV-E3: mọi inclusion-proof cũ vẫn đúng dưới new_root (MMR chỉ MỞ RỘNG, peaks bag lại)
+  // INV-E3: đường-anh-em proof cũ giữ nguyên, verify LẠI dưới peak+n hiện hành (MMR chỉ MỞ RỘNG, peaks bag lại) — Math §4.5
   update StrataRef { head_version_hash: vh, head_seq: version.seq, mmr_root: new_root }
 ```
 
@@ -553,14 +553,14 @@ Chỉ neo `StrataAnchor` = `(ref_id, head_version_hash, mmr_root, seq)` = 104 by
 ### §5.2 Hai lựa chọn cơ chế
 
 **Lựa chọn A — Reference UTxO kiểu CIP-68 (inline datum, spend-recreate).**
-- Một UTxO mang inline datum `StrataAnchor`. Cập nhật anchor = **spend-recreate**: spend UTxO cũ, tạo UTxO mới với `seq' = seq+1` (validator kiểm `seq' == seq+1` — INV-E7).
+- Một UTxO mang inline datum `StrataAnchor`. Cập nhật anchor = **spend-recreate**: spend UTxO cũ, tạo UTxO mới với `seq'` tăng. Validator **đang chạy** ép `seq' == seq + 1` (KHÔNG cho gap) — xem §5.4, có lệch pha với tầng đẩy off-chain đang cho gap.
 - Ưu: trạng thái on-chain truy vấn trực tiếp (reference input cho dApp khác), finality kinh tế rõ.
 - Nhược: mỗi cập nhật = 1 tx spend-recreate + min-ADA khóa trong UTxO (~1.5 ADA, đối chiếu `MIN_LOVELACE_PER_OUTPUT = 1_500_000n` `settle.ts:374`). Đắt hơn nếu cập nhật dày.
 
 **Lựa chọn B — Tx metadata (đối chiếu `settle.ts` label 1234).**
-- Ghi `StrataAnchor` vào metadata. `settle.ts:358-364` đã dùng label **1234** cho `{ merkle_root, epoch, total_distributed, node_count }` — Strata tái dùng pattern: label 1234 `{ ref_id, head_version_hash, mmr_root, seq }` (hex). Label **674** (CIP-20, `settle.ts:344-347`) cho message người-đọc-được nếu cần.
+- Ghi `StrataAnchor` vào metadata. `settle.ts:358-364` đã dùng label **1234** cho `{ merkle_root, epoch, total_distributed, node_count }` — Strata tái dùng **label 1234**, nhưng KHÔNG dùng map hex đặt-tên: payload thật là record `{t,a}` raw-bytes, `t=1` anchor với `a=[ref_id, head_version_hash, mmr_root, seq]`. Byte-layout chuẩn tắc + luật chunk 64B: `API §8.1(a)` và test-vector `apis/settlement-metadata.json`. Label **674** (CIP-20, `settle.ts:344-347`) cho message người-đọc-được nếu cần.
 - Ưu: rẻ nhất (không khóa min-ADA, không UTxO state). Chống rollback bằng `seq` trong metadata + index off-chain (indexer từ chối anchor có seq ≤ seq đã thấy).
-- Nhược: metadata KHÔNG được validator on-chain enforce nội tại (không có script kiểm `seq'==seq+1` trên metadata thuần) — phải dựa indexer/đồng thuận off-chain cho INV-E7.
+- Nhược: metadata KHÔNG được validator on-chain enforce nội tại (không có script kiểm đơn điệu `seq` trên metadata thuần) — phải dựa indexer/đồng thuận off-chain cho INV-E7.
 
 ### §5.3 So sánh chi phí / riêng tư với nhúng cả metadata CIP-68
 
@@ -576,20 +576,33 @@ Chỉ neo `StrataAnchor` = `(ref_id, head_version_hash, mmr_root, seq)` = 104 by
 
 ### §5.4 Validator on-chain kiểm INV-E7 (chỉ Lựa chọn A)
 
+> **Validator này CÓ THẬT và đã chạy on-chain — không phải thiết kế.** Mã nguồn KHÔNG nằm ở repo Strata (đúng ranh giới "Mosaic giữ validator", `docs/STRATA-S1-REPORT.md §4`) mà ở **`VeDataIO/Code: mosaic/aiken/validators/strata_anchor.ak` + `lib/strata/anchor.ak`** (Plutus V3, blueprint `mosaic/aiken/plutus.json`). Đã chứng minh đầu-cuối trên Preview: happy `seq 1→2` và rollback `1→0` bị node từ chối phase-2 (`STRATA-S1-REPORT.md §4.1`). Tìm `.ak` trong repo Strata sẽ ra 0 file — đó là kỳ vọng, KHÔNG phải bằng chứng validator chưa tồn tại.
+
 ```
-validator spend StrataAnchor UTxO:
+validator spend StrataAnchor UTxO:                   // strata_anchor.ak — luật ĐANG CHẠY
   datum_in  : StrataAnchor   (đang spend)
   datum_out : StrataAnchor   (UTxO mới tạo cùng tx)
-  redeemer  : { new_head_version_hash, new_mmr_root, author_sig }
+  redeemer  : { expected_next_seq }
   REQUIRE:
-    datum_out.ref_id == datum_in.ref_id              // ref_id bất biến (INV-E5: định danh ổn định)
-    datum_out.seq    == datum_in.seq + 1             // INV-E7: đơn điệu, +1, KHÔNG lùi
-    datum_out.head_version_hash == redeemer.new_head_version_hash
-    datum_out.mmr_root          == redeemer.new_mmr_root
-    verify(genesis_author_pk, sig, datum_out)        // chỉ author (hoặc policy-delegate) cập nhật được
+    (T1) mọi output script continuing ở ĐÚNG hash validator này   // state-thread không thoát địa chỉ
+    (T2) đúng MỘT output kế nhiệm                                 // không fork state-thread
+    (T3) datum in/out parse + validate được (version=1, 3 hash đủ 32B, seq >= 0)
+    (T4) datum_out.seq == datum_in.seq + 1          // INV-E7: KHÔNG cho gap  (anchor.ak:55-57)
+         datum_out.ref_id == datum_in.ref_id        // ref_id bất biến (INV-E5)
+    (T5) value giữ nguyên (no siphon) + redeemer.expected_next_seq khớp datum_out.seq
 ```
 
-Không thể neo lại version cũ: `seq` chỉ tăng, validator từ chối `seq' <= seq`. Đây là on-chain enforce của INV-E7 (chống rollback). Với Lựa chọn B, INV-E7 do indexer enforce off-chain.
+Không thể neo lại version cũ: validator từ chối mọi `seq' <= seq`. Đây là on-chain enforce của INV-E7 (chống rollback), **độc lập khoá author** — kể cả kẻ chiếm được khoá publisher cũng không tụt được `seq`. Với Lựa chọn B, INV-E7 do indexer enforce off-chain (yếu hơn hẳn).
+
+> ⚠️ **Lệch pha off-chain ↔ on-chain — CHƯA giải, cần anh Đức chốt.** Tầng đẩy anchor off-chain **cho gap**: `chain.rs` `publish_anchor` chỉ từ chối `seq <= prev`, `settlement.rs` `publish_batch` chỉ chặn `on_chain.seq > a.seq`. Validator trên chain **cấm gap** (`anchor.ak:55-57`, property test `prop_seq_advances_rejects_skip` cấm nhảy bậc tường minh). Hệ quả trên đường Mosaic-A: anchor `seq=1` fail → head local nhảy tới 2 → retry neo `seq=2` bị validator từ chối **vĩnh viễn** vì `2 ≠ 0+1` ⇒ **chuỗi anchor wedge**. Mâu thuẫn nằm giữa HAI repo (Strata core ↔ VeDataIO/Core), nên sửa mình spec không gỡ được. Hai hướng, chi phí thật:
+> - **(A) Đổi validator sang `seq' > seq`.** Gỡ wedge, giữ neo-head-thưa (rẻ). Chi phí: rebuild ⇒ **đổi script hash ⇒ đổi địa chỉ script** ⇒ phải di trú thread-token + UTxO anchor đang nằm ở địa chỉ cũ. Có migration, không phải sửa một dòng.
+> - **(B) Giữ `== seq + 1` on-chain**, sửa tầng đẩy cho riêng đường Mosaic-A: neo **đúng từng seq / retry đúng seq đang kẹt** thay vì neo head hiện hành. Chi phí: 1 tx mỗi version (không neo thưa được) + ràng liveness của append vào finality của chain.
+>
+> Cho tới khi chốt, luật ghi ở đây là luật ĐANG CHẠY (`== seq + 1`); tầng đẩy Mosaic-A phải coi gap là điều kiện lỗi, không phải sparsity lành tính. Ở tầng **Settlement** (metadata, không validator) gap vẫn lành tính vì `mmr_root` tại `seq` neo đã cam kết trọn `0..=seq`. Contiguity `+1` giữa các *version* là INV-E2, tầng khác, không liên quan.
+>
+> ⚠️ **Thiếu vế inclusion so với `Strata-Math §7.1`.** Math §7.1:307-310 phát biểu hợp đồng validator gồm **ba** vế: `seq` tăng ∧ `head_version_hash` khớp version tại `seq` mới ∧ **inclusion-proof: lá của head cũ vẫn nằm dưới `mmr_root` mới** (chống *rewrite-then-re-anchor*). Validator đang chạy **KHÔNG có vế thứ ba** — `mmr_root` chỉ bị kiểm độ dài 32B. Hệ quả thật: `seq` đơn điệu chặn **tụt lùi** độc-lập-khoá, nhưng KHÔNG ràng `mmr_root'` phải là **mở rộng** của `mmr_root`; kẻ chiếm khoá author dựng được một nhánh lịch sử KHÁC rồi neo tiến lên với `seq` cao hơn và validator vẫn nhận. Chống rewrite hiện dựa vào **khoá author + ngưỡng operator**, KHÔNG dựa vào cấu trúc MMR. ⟹ Cần anh Đức chốt: lấy Math §7.1 làm chuẩn (thì validator phải thêm vế inclusion, kèm chi phí proof O(log n) trong redeemer), hay hạ mức có chủ ý (thì Math §7.1 phải sửa theo, và ngôn ngữ "độc-lập-khoá" ở `API §8.1(b)` phải tách rõ *chống-tụt-lùi* với *chống-rewrite*).
+>
+> **Chống datum-hijacking:** validator guard SPEND, KHÔNG guard CREATE — ai cũng tạo được UTxO datum `seq` cao tại địa chỉ script để đầu độc reader (T1/T2 chỉ ràng buộc *tx đang spend*, không ràng buộc ai tạo UTxO mới ở địa chỉ đó). Vì vậy resolve PHẢI ghim **thread-token** (one-shot NFT) định danh chuỗi anchor thật, không tin "UTxO mới nhất tại address" (adapter `anchor_sink.rs` đã lọc theo thread-token). Giả định còn treo: thread-token pinning chỉ sound khi NFT là one-shot thật — minting policy one-shot chưa thấy trong cây `.ak` đã đọc.
 
 ---
 
@@ -778,7 +791,7 @@ migrate_static(old_cid, owner_did) -> StrataRef:
 |---|---|---|
 | 1 | `version_hash_linked` | version seq=k có `prev_hash == version_hash(k-1)`; seq=0 → `prev_hash == 0^32` (INV-E1) |
 | 2 | `seq_monotonic_plus_one` | append cho seq = head+1; nhảy/lùi seq → Err (INV-E2) |
-| 3 | `mmr_append_only_old_proof_holds` | sau extend_mmr, mọi inclusion-proof cũ vẫn verify dưới root mới (INV-E3) |
+| 3 | `mmr_append_only_old_proof_holds` | sau extend_mmr, đường-anh-em của proof cũ vẫn verify dưới **tập peak hiện hành** (regenerate `(proof,size)` mới rồi verify dưới `root_new`; KHÔNG phải cùng byte-proof cũ) — Math §4.5 (INV-E3) |
 | 4 | `policy_denies_unauthorized_field` | author không được policy cho phép sửa field → Err(PolicyDenied) (INV-E4) |
 | 5 | `sig_required_and_verified` | sig sai khóa author → reject version (INV-E4) |
 | 6 | `ref_id_no_type_byte` | `gen_ref_id` output KHÔNG có byte class; 32B thuần; đổi class không đổi ref_id (INV-E5) |
@@ -813,7 +826,7 @@ migrate_static(old_cid, owner_did) -> StrataRef:
 |---|---|
 | P1 | `mmr_root_deterministic`: cùng dãy version (cùng thứ tự seq) → cùng mmr_root trên mọi máy |
 | P2 | `mmr_inclusion_complete`: ∀ seq ≤ head, `mmr_inclusion_proof(seq)` verify được dưới mmr_root |
-| P3 | `mmr_extend_monotone`: ∀ proof hợp lệ dưới root_n vẫn hợp lệ dưới root_{n+1} (INV-E3) |
+| P3 | `mmr_extend_monotone`: đường lá→đỉnh của proof cũ KHÔNG đổi khi MMR mở rộng; verifier xác thực LẠI dưới **tập peak + `n` hiện hành** (KHÔNG phải chuỗi byte-proof bất biến). Chuẩn hình thức + chứng minh: **Math §4.5** (INV-E3) |
 | P4 | `canonical_roundtrip`: `canonical_version_bytes` → parse → cùng StrataVersion (trừ sig); encode tất định byte-chính-xác |
 | P5 | `state_root_order_independent`: hoán vị thứ tự nhập field → cùng state_root (sort theo key §3.6) |
 | P6 | `ts_monotone_enables_version_at`: ts đơn điệu ⇒ `version_at(t)` đúng version (binary search) |

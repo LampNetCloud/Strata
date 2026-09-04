@@ -72,11 +72,11 @@ Ghi chú bắt buộc nêu trong cả 3 file:
 ## Invariant (đánh số INV-E*, cả 3 file phải dùng đúng số này)
 - **INV-E1** (hash-linked): version seq=k có `prev_hash == version_hash(seq=k-1)`. seq=0: `prev_hash = 0^32`.
 - **INV-E2** (đơn điệu seq): seq tăng đúng +1, không nhảy, không lùi.
-- **INV-E3** (append-only history): thêm version chỉ MỞ RỘNG mmr; mọi inclusion-proof cũ vẫn đúng dưới root mới.
+- **INV-E3** (append-only history): thêm version chỉ MỞ RỘNG mmr; đường lá→đỉnh của inclusion-proof cũ giữ nguyên, verify LẠI dưới tập peak hiện hành (KHÔNG phải byte-proof bất biến — chuẩn hình thức: `Strata-Math §4.5`).
 - **INV-E4** (quyền + chữ ký): `sig` hợp lệ bởi khóa của `author_did`, và `author_did` được `policy_hash` cho phép sửa phần tương ứng. Hai chế độ đã cài đặt: **V1 mức-chain** (`chain::Policy` cam kết tập author; mọi author sửa mọi trường — `check_auth`) và **V2 field-level** (`field_policy::FieldPolicy` cam kết cây các entry `(author_did, field_key)`; mỗi trường sửa cần một `FieldAuthProof` dưới `policy_hash` — `check_auth_fielded` / `append_version_fielded`).
 - **INV-E5** (CID không lộ loại): `ref_id`/`content_cid` là hash thuần; KHÔNG nhúng nhãn loại/độ nhạy (sửa lỗi leak Vault/Bulk hiện tại).
 - **INV-E6** (field-privacy): proof một trường từ `state_root` KHÔNG tiết lộ trường khác.
-- **INV-E7** (chống rollback): anchor on-chain đơn điệu theo `seq`; không thể neo lại version cũ.
+- **INV-E7** (chống rollback): anchor on-chain đơn điệu theo `seq`; không thể neo lại version cũ. Phạm vi hẹp — chỉ *chống tụt lùi*, KHÔNG bao gồm *chống rewrite-then-re-anchor* (vế inclusion ở `Strata-Math §7.1` chưa được validator đang chạy ép; mức đảm bảo theo từng backend: `Strata-API §8.1(b)`).
 - **INV-E8** (hashing an toàn): mọi cây dùng domain-sep + RFC6962 prefix + dup-leaf guard.
 - **INV-E9** (bảo mật nhạy cảm): nội dung + state nhạy cảm được mã hóa (AES-256-GCM, khóa qua Argon2id/threshold); chỉ commitment hash công khai. Tách bạch "mã hóa" và "tái phân tán" — Strata yêu cầu CẢ HAI cho dữ liệu nhạy cảm.
 
