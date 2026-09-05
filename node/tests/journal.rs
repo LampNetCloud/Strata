@@ -461,6 +461,44 @@ async fn ghi_hong_that_thi_dau_doc_va_cua_tra_503() {
     assert!(j.is_poisoned(), "một lượt ghi hỏng phải đầu độc nhật ký");
 }
 
+/// Issue #73 — hai daemon KHÔNG được cùng ghi một nhật ký.
+///
+/// `Mutex<File>` chỉ khoá trong tiến trình; khoá thật phải do hệ điều hành cấp. Bài này
+/// kiểm bằng **hai lần `open` trên cùng đường dẫn**, và điều đó tái hiện đúng ca thật vì
+/// `flock` cấp khoá theo *open-file-description*, không theo tiến trình: hai lượt `open()`
+/// tạo hai description khác nhau, nên chúng xung đột với nhau kể cả khi cùng một tiến
+/// trình. (Đây chính là chỗ `flock` khác `fcntl`: khoá `fcntl` là **theo tiến trình**, nên
+/// với nó lượt mở thứ hai sẽ *thành công im lặng* — và bài kiểm này sẽ xanh giả.)
+#[test]
+fn second_open_of_same_journal_is_refused() {
+    let path = tmp_path("khoa-doc-quyen");
+    let first = Journal::open(&path).expect("lượt mở đầu phải đạt");
+
+    let err = Journal::open(&path)
+        .expect_err("lượt mở THỨ HAI phải bị từ chối — nếu đạt thì không có khoá nào cả");
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::WouldBlock,
+        "phải là 'đang bị giữ', không phải một lỗi I/O chung: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&path.display().to_string()),
+        "thông điệp phải nêu ĐÚNG tệp nào đang bị giữ: {msg}"
+    );
+    assert!(
+        msg.contains("daemon"),
+        "phải nói thẳng nguyên nhân gần như luôn đúng, để người vận hành đi kiểm tiến \
+         trình thay vì đi xoá tệp: {msg}"
+    );
+
+    // Nhả khoá thì mở lại được. Không có vế này thì một bản vá khoá vĩnh viễn cũng xanh,
+    // và daemon sẽ không bao giờ khởi động lại được sau lần dừng đầu tiên.
+    drop(first);
+    let again = Journal::open(&path).expect("khoá đã nhả thì lượt mở sau phải đạt");
+    drop(again);
+}
+
 /// Đối chứng cho bài trên: kho **không** nhật ký thì ghi vẫn qua, và không sinh tệp nào.
 ///
 /// Thiếu vế này thì một bản vá làm mọi lượt ghi trả 503 cũng qua được bài `/dev/full`.
