@@ -49,7 +49,7 @@ pub struct AnchorReceipt {
     pub slot: Option<u64>,
 }
 
-/// Lỗi adapter (§8.1b — 7 biến thể phủ hết case biên).
+/// Lỗi adapter (§8.1b — 8 biến thể phủ hết case biên).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnchorError {
     /// Backend chưa cấu hình (thiếu key/URL).
@@ -86,6 +86,17 @@ pub enum AnchorError {
     DatumTooLarge { bytes: usize },
     /// Backend UTxO (Mosaic A): min-ADA không đủ (fail cứng).
     InsufficientAda { need: u64, have: u64 },
+    /// **Lô gửi đi có HAI (hoặc hơn) anchor cùng một `ref_id`.** Lỗi của bên DỰNG LÔ,
+    /// không phải của chuỗi — nên nó không phải `Rejected` (biến thể đó nói *"cửa/chuỗi
+    /// từ chối"*, và bên gọi cần phân biệt được hai chuyện đó để biết phải sửa ở đâu).
+    ///
+    /// Vì sao fail cứng chứ không lặng lẽ giữ lại một cái: một tx mang hai anchor cho cùng
+    /// một lineage là hai `seq` cùng lúc trên chuỗi, và `resolve()` sau đó chọn cái nào là
+    /// chuyện của thứ tự record trong metadatum — tức là **lịch sử của lineage đó do một
+    /// chi tiết mã hoá quyết định**. Không có cách nào sửa sau khi tx đã lên chuỗi.
+    ///
+    /// Fail cứng, KHÔNG retryable: bắn lại đúng lô ấy vẫn hỏng y hệt.
+    DuplicateRefIdInBatch { ref_id: Hash32 },
 }
 
 impl AnchorError {

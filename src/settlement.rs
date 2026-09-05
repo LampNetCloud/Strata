@@ -354,6 +354,21 @@ pub struct SubmitOutcome {
 pub trait Submitter {
     /// Submit tx với metadatum label 1234 = các record đã cho. Trả txid + địa chỉ ví ký.
     fn submit(&self, records: &[SettlementRecord]) -> Result<SubmitOutcome, AnchorError>;
+
+    /// Địa chỉ ví sẽ ký, **nếu biết được TRƯỚC khi submit**. `None` = không biết trước.
+    ///
+    /// Vì sao là `Option` chứ không bắt buộc: hai loại submitter có bản chất khác nhau.
+    /// Loại tự giữ khoá (mock, ví cục bộ) biết ví của mình ngay lúc dựng. Loại đẩy lô sang
+    /// một dịch vụ ngoài — `MosaicDoorSubmitter` — thì **không thể** biết: ví nằm ở phía
+    /// cửa Mosaic, và địa chỉ chỉ xuất hiện trong phản hồi, tức là sau khi tx đã đi.
+    /// Bắt trait trả `&str` sẽ ép loại thứ hai bịa một giá trị, và một giá trị bịa ở đúng
+    /// chỗ đối chiếu danh tính thì tệ hơn hẳn một `None` trung thực.
+    ///
+    /// `None` ⇒ [`SettlementSink::publish_batch`] GIỮ NGUYÊN phép kiểm hậu-submit làm lưới
+    /// cuối. `Some(addr)` khác publisher đã pin ⇒ fail **trước** khi tốn phí.
+    fn publisher_address(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Cấu hình sink Settlement.
@@ -425,11 +440,26 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
     /// Gộp NHIỀU anchor (nhiều chain) vào MỘT tx. Idempotency kiểm từng `ref_id`; anchor
     /// đã neo rồi bị loại khỏi lô; nếu lô rỗng sau lọc → `Ok(None)`. Bất kỳ anchor nào bị
     /// rollback → fail cả lô TRƯỚC khi build tx.
+    ///
+    /// **Khử trùng TRONG lô** (issue #41 mục 4): hai anchor cùng `ref_id` trong CÙNG một lô
+    /// bị từ chối cứng ([`AnchorError::DuplicateRefIdInBatch`]) trước cả lượt đọc on-chain.
+    /// Phép so `resolve_many` chỉ so lô với **chuỗi**, không so lô với **chính nó** — nên
+    /// hai phần tử trùng `ref_id` (khác `seq`) đều rơi vào nhánh "chưa có on-chain" và cùng
+    /// lên MỘT tx. Đó là hai `seq` cùng lúc cho một lineage, không sửa lại được sau khi tx
+    /// đã lên chuỗi.
     pub fn publish_batch(
         &self,
         anchors: &[StrataAnchor],
     ) -> Result<Option<AnchorReceipt>, AnchorError> {
         self.ensure_configured()?;
+        // Chặn TRƯỚC lượt đọc on-chain: lô hỏng thì không tốn cả lượt quét cửa sổ.
+        // O(n²) là cố ý — lô thực tế cỡ vài chục phần tử, và giữ được thứ tự báo lỗi
+        // (báo đúng phần tử TRÙNG đầu tiên theo thứ tự người gọi xếp).
+        for (i, a) in anchors.iter().enumerate() {
+            if anchors[..i].iter().any(|b| b.ref_id == a.ref_id) {
+                return Err(AnchorError::DuplicateRefIdInBatch { ref_id: a.ref_id });
+            }
+        }
         let ref_ids: Vec<Hash32> = anchors.iter().map(|a| a.ref_id).collect();
         let on_chain = self.resolve_many(&ref_ids)?;
         let mut fresh: Vec<SettlementRecord> = Vec::new();
@@ -454,7 +484,24 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
         if cbor.len() > self.cfg.max_metadatum_bytes {
             return Err(AnchorError::DatumTooLarge { bytes: cbor.len() });
         }
+        // ── Lưới THỨ NHẤT: hỏi ví TRƯỚC khi submit (issue #41 mục 5) ────────────────
+        // Submitter nào biết trước địa chỉ ví ký thì phải nói ra ở đây. Phát hiện sai ví
+        // sau khi submit là phát hiện muộn theo nghĩa đắt nhất: tx đã lên chuỗi, phí đã
+        // mất, và anchor đó sẽ bị chính `resolve()` bỏ qua (luật tin cậy §4.3 lọc theo
+        // input publisher) ⇒ tiền đi mà không neo được gì.
+        if let Some(addr) = self.submitter.publisher_address()
+            && addr != self.cfg.publisher_address
+        {
+            return Err(AnchorError::Rejected(format!(
+                "ví submitter ({}) != publisher pin trong config ({}) — chặn TRƯỚC khi submit",
+                addr, self.cfg.publisher_address
+            )));
+        }
         let outcome = self.submitter.submit(&fresh)?;
+        // ── Lưới THỨ HAI: giữ nguyên, KHÔNG gỡ ─────────────────────────────────────
+        // Lưới trên chỉ bắt được submitter *biết trước* ví mình. `MosaicDoorSubmitter`
+        // không biết — địa chỉ chỉ có trong phản hồi của cửa Mosaic. Với nó, đây vẫn là
+        // chỗ duy nhất bắt được, và bắt muộn còn hơn không bắt.
         if outcome.address != self.cfg.publisher_address {
             // Ví submitter KHÔNG phải publisher đã pin → anchor vừa đẩy sẽ bị chính
             // resolve() bỏ qua. Fail to hơn im lặng.
@@ -1480,6 +1527,165 @@ mod tests {
         let w = sink.scan_window(100, 200).unwrap();
         assert_eq!(w.anchors.len(), 2);
         assert_eq!(w.scanned_txs, 3);
+    }
+
+    // ---- issue #41 mục 4+5: lô tự mâu thuẫn, và ví sai phải chặn TRƯỚC khi tốn phí ----
+
+    /// Submitter **đếm số lần bị gọi**, và khai (hoặc cố tình không khai) trước ví của mình.
+    ///
+    /// Đếm là phần quan trọng nhất của mock này: cả hai bản vá đều nói về chỗ *"lỗi phải
+    /// bật ra TRƯỚC khi tx đi"*. Chỉ khẳng định "trả về `Err`" thì một bản vá đặt phép kiểm
+    /// SAU `submit` vẫn xanh — mà đó đúng là lỗi đang sửa.
+    struct CountingSubmitter {
+        /// Ví THẬT sẽ ký; cũng là thứ `submit` trả về ở `SubmitOutcome.address`.
+        wallet: String,
+        /// `true` = submitter biết trước ví mình (khai qua `publisher_address`).
+        knows_wallet_upfront: bool,
+        calls: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+    impl Submitter for CountingSubmitter {
+        fn submit(&self, _: &[SettlementRecord]) -> Result<SubmitOutcome, AnchorError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(SubmitOutcome {
+                txid: "tx_da_ton_phi".into(),
+                address: self.wallet.clone(),
+            })
+        }
+        fn publisher_address(&self) -> Option<&str> {
+            if self.knows_wallet_upfront {
+                Some(self.wallet.as_str())
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Sink với ví publisher đã pin = [`PUB`], chuỗi TRỐNG (chưa neo gì), submitter đếm được.
+    /// Trả thêm bộ đếm `submit` và store để đếm lượt quét on-chain.
+    #[allow(clippy::type_complexity)]
+    fn counting_sink(
+        wallet: &str,
+        knows_wallet_upfront: bool,
+    ) -> (
+        SettlementSink<std::rc::Rc<RefCell<MockQuery>>, CountingSubmitter>,
+        std::rc::Rc<std::cell::Cell<usize>>,
+        std::rc::Rc<RefCell<MockQuery>>,
+    ) {
+        let store = std::rc::Rc::new(RefCell::new(MockQuery {
+            publisher: PUB.to_string(),
+            ..Default::default()
+        }));
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let submitter = CountingSubmitter {
+            wallet: wallet.to_string(),
+            knows_wallet_upfront,
+            calls: calls.clone(),
+        };
+        let cfg = SinkConfig {
+            publisher_address: PUB.to_string(),
+            ..Default::default()
+        };
+        (
+            SettlementSink::new(cfg, store.clone(), submitter),
+            calls,
+            store,
+        )
+    }
+
+    /// Hai anchor cùng `ref_id` trong CÙNG một lô ⇒ từ chối cứng, và **không có tx nào**.
+    ///
+    /// `resolve_many` chỉ so lô với chuỗi, không so lô với chính nó — nên trước bản vá cả
+    /// hai phần tử đều rơi vào nhánh "chưa có on-chain" và cùng lên một tx. Kết quả là hai
+    /// `seq` cùng lúc cho một lineage, và `resolve()` chọn cái nào là do thứ tự record
+    /// trong metadatum quyết định. Không sửa lại được sau khi tx đã lên chuỗi.
+    #[test]
+    fn batch_with_two_anchors_for_same_ref_id_is_rejected_without_tx() {
+        let (sink, calls, _store) = counting_sink(PUB, true);
+        let err = sink
+            .publish_batch(&[
+                anchor_of(0xaa, 1),
+                anchor_of(0xbb, 1),
+                anchor_of(0xaa, 2), // trùng ref_id với phần tử đầu, khác seq
+            ])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AnchorError::DuplicateRefIdInBatch { ref_id: [0xaa; 32] },
+            "phải là biến thể RIÊNG, không nhét vào Rejected — bên gọi cần phân biệt \
+             lỗi dựng lô với lỗi cửa"
+        );
+        assert_eq!(calls.get(), 0, "lô hỏng mà vẫn submit = đã tốn phí");
+        assert!(!err.is_retryable(), "bắn lại đúng lô ấy vẫn hỏng y hệt");
+    }
+
+    /// Trùng `ref_id` bị bắt **trước cả lượt đọc on-chain** — lô đã hỏng thì không được
+    /// tốn một lượt quét cửa sổ nào (lượt quét là thứ đắt nhất của đường này).
+    #[test]
+    fn duplicate_ref_id_rejected_before_any_on_chain_scan() {
+        let (sink, calls, store) = counting_sink(PUB, true);
+        let err = sink
+            .publish_batch(&[anchor_of(0xcc, 1), anchor_of(0xcc, 1)])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AnchorError::DuplicateRefIdInBatch { ref_id: [0xcc; 32] }
+        );
+        assert_eq!(store.borrow().scans.get(), 0, "chưa được quét lượt nào");
+        assert_eq!(calls.get(), 0);
+    }
+
+    /// Ví sai + submitter BIẾT TRƯỚC ⇒ chặn trước `submit`, không tx nào ra đời.
+    #[test]
+    fn wrong_wallet_known_upfront_is_blocked_before_submit() {
+        let (sink, calls, _store) = counting_sink("addr_test1_vi_khac", true);
+        let err = sink.publish_batch(&[anchor_of(0xaa, 1)]).unwrap_err();
+        match &err {
+            AnchorError::Rejected(m) => {
+                assert!(m.contains("addr_test1_vi_khac"), "{m}");
+                assert!(m.contains("TRƯỚC khi submit"), "{m}");
+            }
+            other => panic!("phải là Rejected, gặp {other:?}"),
+        }
+        assert_eq!(
+            calls.get(),
+            0,
+            "đây là toàn bộ nội dung bản vá: phí không được mất trước khi biết ví sai"
+        );
+    }
+
+    /// Ví sai + submitter KHÔNG biết trước ⇒ lưới thứ hai (hậu-submit) vẫn phải bắt.
+    ///
+    /// Đây là đường của `MosaicDoorSubmitter` thật: địa chỉ chỉ có trong phản hồi của cửa.
+    /// Bản vá THÊM lưới trước, không DỜI lưới — gỡ lưới sau là mở lại đúng lỗ vừa bịt, cho
+    /// đúng backend duy nhất đang chạy thật.
+    #[test]
+    fn wrong_wallet_unknown_upfront_still_caught_by_second_net() {
+        let (sink, calls, _store) = counting_sink("addr_test1_vi_khac", false);
+        let err = sink.publish_batch(&[anchor_of(0xaa, 1)]).unwrap_err();
+        match &err {
+            AnchorError::Rejected(m) => {
+                assert!(m.contains("addr_test1_vi_khac"), "{m}");
+                assert!(
+                    !m.contains("TRƯỚC khi submit"),
+                    "ca này bắt ở lưới SAU; thông điệp không được nói dối là bắt trước: {m}"
+                );
+            }
+            other => panic!("phải là Rejected, gặp {other:?}"),
+        }
+        assert_eq!(
+            calls.get(),
+            1,
+            "lưới sau chỉ chạy được sau đúng một lượt submit"
+        );
+    }
+
+    /// Ví đúng ⇒ lô đi qua cả hai lưới. Không có ca này thì một bản vá chặn-tất-cả cũng xanh.
+    #[test]
+    fn correct_wallet_passes_both_nets() {
+        let (sink, calls, _store) = counting_sink(PUB, true);
+        let r = sink.publish_batch(&[anchor_of(0xaa, 1)]).unwrap();
+        assert_eq!(r.map(|x| x.txid), Some("tx_da_ton_phi".to_string()));
+        assert_eq!(calls.get(), 1);
     }
 
     // Hợp nhất AnchoredTable (resolve Settlement → verify_resolved dùng chung) — test
