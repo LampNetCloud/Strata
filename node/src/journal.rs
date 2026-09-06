@@ -133,9 +133,22 @@ pub struct Journal {
 /// toàn là không có cờ; việc có mở một cờ như vậy không hay là quyết định của chủ nhân,
 /// không phải của bản vá này.
 ///
-/// Khoá bám vào **open-file-description** của `file`, nên nó sống đúng bằng đời `File`
-/// trong [`Journal`]: đóng tệp (drop `Journal`, hoặc tiến trình chết bằng bất cứ cách nào,
-/// kể cả `SIGKILL`) là nhả khoá. Không có tệp `.lock` mồ côi phải dọn tay.
+/// Trên **hệ tệp cục bộ**, khoá bám vào **open-file-description** của `file`, nên nó sống
+/// đúng bằng đời `File` trong [`Journal`]: đóng tệp (drop `Journal`, hoặc tiến trình chết
+/// bằng bất cứ cách nào, kể cả `SIGKILL`) là nhả khoá. Không có tệp `.lock` mồ côi phải dọn.
+///
+/// **Ràng buộc đó KHÔNG phổ quát, và chỗ nó mất hiệu lực thì im lặng.** Trên NFS (và SMB),
+/// Linux mô phỏng `flock` bằng khoá POSIX toàn tệp trừ khi mount `-o local_lock`. Khoá POSIX
+/// gắn theo **TIẾN TRÌNH**, không theo open-file-description, nên nó bị nhả khi tiến trình
+/// đóng **bất kỳ** mô tả tệp nào trỏ tới cùng tệp đó — kể cả một mô tả do đoạn mã khác mở.
+/// `read_records` mở tệp thêm hai lượt rồi đóng, và ở `strata_node.rs` nó chạy ngay sau
+/// `Journal::open`; dưới ngữ nghĩa mô phỏng, hai lượt đóng ấy nhả đúng cái khoá vừa giành.
+///
+/// Nghĩa là bảo đảm của issue #73 phủ ca hay xảy ra nhất (hai tiến trình, một máy, đĩa cục
+/// bộ) và **KHÔNG** phủ ca hai bản chạy trên một volume dùng chung. Ca đó phải chặn ở tầng
+/// khác — ràng buộc triển khai một-daemon-một-volume, hoặc bầu chủ ở tầng điều phối. Bài
+/// kiểm `second_open_of_same_journal_is_refused` chạy trên `std::env::temp_dir()` nên nó
+/// **không đo được** vế này; đừng đọc màu xanh của nó thành đã phủ.
 #[cfg(unix)]
 fn lock_exclusive(file: &File, path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::io::AsRawFd;
@@ -194,15 +207,27 @@ impl Journal {
     /// [`ErrorKind::WouldBlock`](std::io::ErrorKind::WouldBlock) — xem [`lock_exclusive`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let path = path.as_ref().to_path_buf();
-        let fresh = !path.exists();
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .read(true)
             .open(&path)?;
         // Giành khoá TRƯỚC lượt ghi đầu tiên: header cũng là một lượt ghi, và hai tiến
-        // trình cùng thấy `fresh == true` sẽ cùng ghi hai header vào một tệp.
+        // trình cùng thấy tệp rỗng sẽ cùng ghi hai header vào một tệp.
         lock_exclusive(&file, &path)?;
+        // ĐO `fresh` SAU KHI ĐÃ CÓ KHOÁ, và đo bằng ĐỘ DÀI chứ không bằng `Path::exists()`.
+        // Hai lý do, cả hai đều đã dựng lại được:
+        //   1. Đo trước khoá thì khoá không loại được ca nó sinh ra để loại — hai tiến trình
+        //      cùng chạy qua phép đo lúc tệp chưa có, rồi lần lượt vào vùng khoá, và cả hai
+        //      vẫn mang `fresh == true` ⇒ header thứ hai nối vào cuối một tệp đã có nội dung.
+        //      Khoá chỉ nối tiếp hoá hai lượt ghi sai, không ngăn được lượt nào.
+        //   2. `Path::exists()` trả `false` cho MỌI lỗi `stat` (mất quyền trên thư mục cha,
+        //      handle mạng ôi, EIO) ⇒ một lượt `stat` hỏng thoáng qua trên nhật ký ĐANG SỐNG
+        //      cũng cho `fresh == true`. Không cần đua, không cần kẻ tấn công.
+        // Độ dài 0 là đúng điều kiện cần hỏi: tệp rỗng thì thiếu header, tệp có byte thì không.
+        // Không phép kiểm nào bắt được header thừa nếu lọt — `replay.rs` bỏ qua `Header` ở mọi
+        // vị trí, và `read_records` chỉ soi bản ghi ĐẦU.
+        let fresh = file.metadata()?.len() == 0;
         if fresh {
             let line = serde_json::to_string(&JournalRecord::Header {
                 format: FORMAT_VERSION,

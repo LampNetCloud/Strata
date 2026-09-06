@@ -502,6 +502,18 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
         // Lưới trên chỉ bắt được submitter *biết trước* ví mình. `MosaicDoorSubmitter`
         // không biết — địa chỉ chỉ có trong phản hồi của cửa Mosaic. Với nó, đây vẫn là
         // chỗ duy nhất bắt được, và bắt muộn còn hơn không bắt.
+        //
+        // PHẠM VI PHẢI NÓI THẲNG, vì hai lưới cộng lại nghe như một bảo đảm rộng hơn thứ
+        // chúng cấp: trên đường sản xuất duy nhất hôm nay (`MosaicDoorSubmitter`), lưới
+        // THỨ NHẤT **không chạy** (`publisher_address()` trả `None` có chủ ý), nên chỉ còn
+        // lưới này — và nó so với `outcome.address`, tức một giá trị **do chính cửa tự
+        // khai** trong phản hồi JSON. Nghĩa là cặp lưới này phát hiện **cấu hình sai**
+        // (pin nhầm ví, cửa trỏ nhầm môi trường), KHÔNG phát hiện **một cửa nói dối**:
+        // cửa bị chiếm chỉ cần trả đúng chuỗi địa chỉ đã pin trong khi ký bằng ví khác là
+        // qua cả hai. Ca đó chỉ lộ ra ở `resolve()` — nơi lọc theo input thật trên chuỗi —
+        // và lúc đó phí đã mất, còn gương `anchored` của daemon thì đã tiến.
+        // Bịt thật cần một nguồn địa chỉ độc lập với cửa (đọc input tx từ chain-index sau
+        // khi có `txid`); đó là việc riêng, không nằm trong bản vá này.
         if outcome.address != self.cfg.publisher_address {
             // Ví submitter KHÔNG phải publisher đã pin → anchor vừa đẩy sẽ bị chính
             // resolve() bỏ qua. Fail to hơn im lặng.

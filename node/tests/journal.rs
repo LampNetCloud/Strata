@@ -512,3 +512,66 @@ async fn khong_co_nhat_ky_thi_duong_ghi_van_chay_binh_thuong() {
     let (r, vh0) = create_ok(&app).await;
     append_ok(&app, &r, 0, vh0, 1_100).await;
 }
+
+/// Tệp nhật ký **đã tồn tại nhưng RỖNG** vẫn phải nhận header.
+///
+/// Đây là ca phân biệt hai cách đo `fresh`, và chúng cho kết quả NGƯỢC nhau:
+/// `!path.exists()` trả `false` (tệp có) ⇒ bỏ qua header ⇒ nhật ký sống cả đời mà không
+/// có bản ghi `Header`; `file.metadata()?.len() == 0` trả `true` ⇒ ghi header, đúng.
+///
+/// Tệp rỗng không phải ca hiếm: một lượt `create` chết giữa chừng, một `touch` của script
+/// khởi động, một volume vừa dựng đều để lại đúng hình dạng này. Và hỏng ở đây **im lặng**
+/// — `replay.rs` bỏ qua `Header` ở mọi vị trí, nên một nhật ký thiếu header vẫn replay
+/// xanh, chỉ là không còn gì khai báo `FORMAT_VERSION` khi định dạng đổi.
+///
+/// Kiểm ngược đã chạy: thay dòng đo bằng `!path.exists()` **tại đúng vị trí sau khoá** ⇒
+/// bài này đỏ ở `assert!` đầu tiên, và kéo theo 8/10 bài trong tệp cùng đỏ. Con số đó là
+/// dữ kiện chứ không phải nhiễu: sau `OpenOptions::create(true)` thì tệp LUÔN tồn tại, nên
+/// `exists()` ở vị trí ấy là hằng `true` ⇒ `fresh` hằng `false` ⇒ **không nhật ký nào còn
+/// header**. Nói cách khác phép đo cũ chỉ chạy đúng nhờ nó đứng TRƯỚC lượt mở — mà đứng
+/// trước lượt mở thì nó cũng đứng trước khoá, đúng cái thứ tự bản vá này phải bỏ.
+/// Hai ràng buộc ("đo sau khoá" và "đo bằng `exists()`") không cùng thoả được.
+#[test]
+fn tep_rong_da_ton_tai_van_duoc_ghi_header() {
+    let path = std::env::temp_dir().join(format!(
+        "strata-journal-rong-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"").expect("dựng một tệp RỖNG đã tồn tại");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        0,
+        "tiền đề của bài: tệp phải tồn tại và rỗng"
+    );
+
+    let j = Journal::open(&path).expect("mở nhật ký trên tệp rỗng phải đạt");
+    drop(j);
+
+    let noi_dung = std::fs::read_to_string(&path).expect("đọc lại nhật ký");
+    assert!(
+        !noi_dung.trim().is_empty(),
+        "tệp rỗng đã tồn tại phải được ghi header, nhưng nhật ký vẫn rỗng — \
+         phép đo `fresh` đang hỏi 'tệp có tồn tại không' thay vì 'tệp có nội dung không'"
+    );
+    assert!(
+        noi_dung.contains("format"),
+        "bản ghi đầu phải là Header mang `format`: {noi_dung}"
+    );
+
+    // Mở lại KHÔNG được sinh header thứ hai — vế đối xứng, chống một bản vá ghi header mù.
+    let j2 = Journal::open(&path).expect("mở lại phải đạt");
+    drop(j2);
+    let sau = std::fs::read_to_string(&path).expect("đọc lại lần hai");
+    assert_eq!(
+        sau.lines().filter(|l| l.contains("format")).count(),
+        1,
+        "chỉ được đúng MỘT header; header thừa không phép kiểm nào bắt được sau này: {sau}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
