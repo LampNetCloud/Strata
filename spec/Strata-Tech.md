@@ -197,8 +197,21 @@ Quan trọng (INV-E6): leaf của cây state KHÔNG phải value thô. Cấu tr�
 `fvh = H_dom(TAG_STATE_FVAL, field_value_bytes)` rồi `leaf = H_dom(TAG_STATE_LEAF, u32_be(len(key)) ‖ key ‖ fvh)`.
 Proof một trường lộ `value_cid + fvh + path`; KHÔNG lộ `key`/`value` của trường khác (chỉ lộ sibling hash đã băm).
 CHỐT-4 (ràng buộc cứng): `value_cid` công khai trong FieldProof PHẢI là content_cid thuần (`gen_content_cid`,
-§2) — nếu nhúng class byte/doc_type sẽ leak loại qua field-proof. Để giấu cả SỐ trường,
-state tree dùng leaf padding `TAG_STATE_PAD` — xem Strata-Math.
+§2) — nếu nhúng class byte/doc_type sẽ leak loại qua field-proof.
+
+Hai điều **CHƯA đúng hôm nay**, ghi ở thì tương lai để không bán thứ mã chưa giữ:
+- **Giấu SỐ trường bằng leaf padding `TAG_STATE_PAD`: chưa có mã.** `grep 'state/pad\|TAG_STATE_PAD'`
+  trên `src/`, `node/src/`, `tests/` trả về **0 dòng**. Cây trạng thái hôm nay để lộ số lá.
+- **CHỐT-4 không được lõi cưỡng chế.** `build_state_root` (`src/state.rs:207-209`) nhận
+  `&[(Vec<u8>, Vec<u8>)]` — độ dài tuỳ ý; biên HTTP giải hex bằng đường biến-độ-dài
+  (`node/src/dto.rs:31`). Thứ đang cưỡng chế CHỐT-4 là **cổng của bên tiêu thụ**, không phải
+  nguyên thuỷ. Cùng hình dạng với INV-E6: `find_duplicate_key` (`src/state.rs:135`) chỉ được
+  gọi ở cửa daemon (`node/src/dto.rs:63`), và `node/src/dto.rs:55` tự khai rằng người gọi
+  thẳng Rust API có quyền bỏ qua.
+
+Cơ chế **đã có mã** để hạ rủi ro dò tiền ảnh là làm mù theo trường: `fval_hash_salted` /
+`TAG_STATE_FVAL_SALTED` (`src/state.rs:89-98`). Nó che `fvh` của trường **anh em**; nó KHÔNG
+che trường đang được chứng minh — proof công khai cả `value` lẫn `salt` (`src/state.rs:236-243`).
 
 ### §1.6 `MmrProof` + `FieldProof`
 
@@ -753,6 +766,8 @@ migrate_static(old_cid, owner_did) -> StrataRef:
   // 1. content_cid mới = hash thuần của content (bỏ class byte leak — INV-E5)
   content_cid = strip_class(old_cid)     // parse_root_hash trả 32B; KHÔNG byte class
   // 2. data_class cũ (Vault/Bulk) chuyển vào STATE, không vào định danh
+  //    ⚠ trường này PHẢI làm mù (fval_hash_salted, salt ngẫu nhiên MỖI version) —
+  //    miền của old_class_label chỉ có 2 phần tử, xem cảnh báo ngay dưới khối này.
   state_fields = [ StateField { key: b"data_class", value_cid: cid_of(old_class_label) } ]
   // 3. genesis nonce ngẫu nhiên; ref_id THUẦN
   strata = create_strata(owner_did, random_nonce, content_cid, state_fields,
@@ -762,6 +777,10 @@ migrate_static(old_cid, owner_did) -> StrataRef:
 ```
 
 Điểm mấu chốt: loại (Vault/Bulk) **chuyển từ định danh sang state** — sửa leak INV-E5 ngay khi migrate. `old_cid` cũ vẫn decode được (giữ `gen_cid_v2`/`LampUri` deprecated cho backward-compat), nhưng định danh Strata mới (`lnref1…`) không lộ loại.
+
+⚠️ **Sửa INV-E5 không sửa INV-E6 — và công thức trên là phản ví dụ của chính CHỐT-4.** `cid_of(old_class_label)` là một content_cid thuần, đúng 32 byte, nên nó **qua** mọi phép kiểm hình dạng mà CHỐT-4 phát biểu. Nhưng field-proof công khai `value_cid` (§1.6), còn miền của `old_class_label` là `{Vault, Bulk}` — **hai phần tử**. Người cầm proof băm hai lần là ra loại. Tính chất bị mất ở đây là INV-E6 (field-proof không lộ), không phải INV-E5 (định danh sạch); `src/state.rs:363-375` đã dựng sẵn phép chứng minh cho đúng lớp lỗi này (*"không salt: hai lần đoán là ra"*).
+
+⇒ Đại lượng cần canh là **min-entropy của tiền ảnh `value`**, không phải độ dài của nó. Một ràng buộc "value phải đúng 32 byte" **không đóng được** ca này, vì ca này đã đúng 32 byte. Đường đóng thật là làm mù trường bằng `fval_hash_salted` (`src/state.rs:89-98`) với salt ngẫu nhiên mỗi version, hoặc đừng đặt giá trị miền nhỏ mang nghĩa-loại vào trường sẽ phát proof. Nâng điều này thành ràng buộc **normative** là siết một CHỐT ⇒ cần quyết định spec.
 
 ### §8.2 Tương thích ngược
 - Endpoint cũ (`/mirage/put`, `/v1/inspect/:cid`, `lampnet-node.rs:1163,1170`) vẫn chạy nguyên — Strata là tầng trên, không thay thế.
