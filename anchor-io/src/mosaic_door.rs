@@ -235,6 +235,12 @@ impl MosaicDoorSubmitter {
 }
 
 impl Submitter for MosaicDoorSubmitter {
+    // `publisher_address()` **cố ý KHÔNG ghi đè** ⇒ giữ `None`. Ví ký nằm ở phía cửa
+    // Mosaic; submitter này không giữ khoá nào và không có đường hỏi trước — địa chỉ chỉ
+    // xuất hiện ở trường `address` trong phản hồi, tức là sau khi tx đã đi. Trả một địa
+    // chỉ đoán ở đây sẽ biến phép đối chiếu publisher thành phép tự-xác-nhận. Với backend
+    // này, lưới hậu-submit trong `publish_batch` vẫn là chỗ DUY NHẤT bắt được sai ví.
+
     fn submit(&self, records: &[SettlementRecord]) -> Result<SubmitOutcome, AnchorError> {
         // Strata giữ ĐÚNG MỘT encoder. Cửa chỉ chở byte, không dựng lại.
         let payload = encode_records(records);
