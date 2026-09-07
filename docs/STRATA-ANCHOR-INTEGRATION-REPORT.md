@@ -2157,3 +2157,137 @@ làm, mà là việc **không làm được** ở mức quyền hiện tại. Đ
 | mẫu `đối chiếu` khớp gần như mọi tệp `.py` | neo lại mẫu vào tên hàm thật (`strata_doi_chieu`) |
 | đọc deny-list bằng mắt rồi kết luận | **chạy** `_is_pii_key`, kèm **đối chứng nghịch** (`giai_doan` phải lọt) |
 | suýt ghi va chạm `owner_did` thành phát hiện của phiên | grep chính kho mình + đọc `#151` trước ⇒ Lợi đã ghi từ **08-16** |
+
+---
+
+## 19. Phiên 2026-09-07 — lượt NỐI THẬT đầu tiên, và CI kho này xanh lần đầu
+
+> Nửa VeData ở `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md §19`.
+
+### 19.1 Điều kiện tiên quyết — một đạt, một chưa
+
+| Điều kiện (bảng `§18.1`) | 08-31 | **09-07** |
+|---|---|---|
+| `Specs#32` đóng `did_hash` ↔ `Did` | chưa | ✅ **đóng 08-31** — anh Đức: **(a) cùng đại lượng** |
+| `OriLife-Core` gửi `did:pubkey` | chưa | ⏳ chưa — `#450` có phản hồi 09-05, không kèm khoá |
+
+Ràng buộc *"chưa đóng thì không tạo lineage"* đã gỡ. Lượt này sinh `ref_id` thật với dữ
+liệu **giả lập**, Preprod, beacon **TẮT**.
+
+Trước khi dùng phép dẫn `author_did` cho bất cứ thứ gì, chạy lại ba vector anh Đức đưa
+bằng CPython thuần — khớp cả ba, kèm **đối chứng âm** (`alicE` → khác). Ba ca thuận đều
+đi một chiều nên không có đối chứng âm thì chúng không phân biệt được *"hàm đúng"* với
+*"hàm sai nhưng tất định và bảng vector chép cùng nguồn"*.
+
+### 19.2 ✅ Lượt nối — trọn đường, và đọc lại từ chuỗi thì khớp
+
+| | |
+|---|---|
+| `ref_id` | `lnref1hgt6h4mtspnlg9mg7gk8r5f9hfxm78rcgpu55rfhpkyhqd8tkhfqunknsm` |
+| `author_did` | `f9f25e45…4f98a443` (từ `did:phoenix:org:orilife-notary-simulated`) |
+| **txid** | `f5a067ee4a8861722c38455a1a728391bd6cb362392237bf8bc075ff42010942` |
+| block / slot | `5148289` / `133091346` |
+| phí / size | **0,199185 tADA** / 476 B |
+| cò | `flush_max_age` · `n=1` · 1 tác giả · ~110 B |
+
+`label 1234` đọc từ chuỗi so với `GET /head`: `head_version_hash`, `mmr_root`, `seq` —
+**khớp cả ba**; đối chứng âm (lật một nibble) **lệch**.
+
+Field-proof `giai_doan` → `value 6461755f717561` = `"dau_qua"`, `salt = ""` (chế độ không
+salt, đúng `#71`), 2 sibling cho 4 lá.
+
+🔺 **Chưa verify độc lập.** Dựng lại `state_root` từ `(value, siblings)` cần **blake3**;
+phía kiểm là Python. Câu đúng: *"daemon phát ra proof đúng khuôn"*, chưa phải *"một bên
+thứ hai đã kiểm"*.
+
+### 19.3 Ba dòng nghiệm thu `#450` — chạy hết, ĐẠT
+
+| Dòng | Kết quả |
+|---|---|
+| 1 — `state_fields` rỗng | `200` · `canonical_core` **đúng 148 B** · `state_root` = `0×32` |
+| 2 — có `state_fields` | `200` · `state_root` đổi |
+| 3 — `author_did` phân giải | `200` · `ref_id` dự kiến |
+
+Con số 148 B bàn giao ở `#450` nay có một lượt chạy đứng sau nó, không còn là số đo suông.
+
+### 19.4 🟠 `_canonical` gỡ hai chỗ mù, còn chỗ thứ ba — `policy_hash`
+
+Route trả `canonical_core` · `version_hash` · `state_root` · `ref_id`, **không** trả
+`policy_hash`. Client Python không có blake3 dựng được **toàn bộ** phần còn lại rồi kẹt
+đúng ở đó, vì `Policy::policy_hash()` tính bằng blake3 và không route nào phát ra.
+
+Đường lui dùng hôm nay: gửi `policy_hash` sai, đọc `expected` trong `403
+PolicyHashMismatch`. Nó chạy, nhưng đó là **một lỗi dùng làm API**. Với `policy_authors`
+vắng, policy là một-thành-viên `[author_did]` (`routes.rs:246-253`) nên `policy_hash` suy
+được hoàn toàn từ input của chính client. Mở ở **`#84`**.
+
+### 19.5 🪤 `state_fields[].value` là HEX — và không dòng nào nói cho trường chữ
+
+`dto.rs:30` gọi `decode_var(&self.value)`. Gửi `"ra_hoa"` ăn `400`; phải gửi
+`"72615f686f61"`. Chú thích sẵn có bên `OriLife-Core` chỉ nói về trường **mang CID**
+(*"VALUE = content_cid 32B hex"*), nên người tích hợp gửi một trường **chữ** không có
+dòng nào cảnh báo. Đã ghi vào `#450` mục 5(b).
+
+### 19.6 ✅ `#73` đóng — đo trên Linux ba mục `#76` tự khai chưa kiểm
+
+`#76` ghi rõ *"Chưa kiểm: hành vi trên Linux; hai tiến trình hệ điều hành thật; nhả khoá
+khi SIGKILL"*. Máy phiên này là Linux và đang có daemon thật, nên đo được cả ba. Hai bản
+`strata-node`, **cổng khác nhau** (6790/6791) — nếu cùng cổng thì một lượt chết vì bind
+port sẽ bị đọc thành chết vì khoá:
+
+| Ca | Kết quả |
+|---|---|
+| A giữ → B mở cùng nhật ký | exit 1 · `Resource temporarily unavailable (os error 11)` |
+| **`SIGKILL` A → B mở lại** | **lên xanh** — khoá nhả, không có khoá mồ côi |
+| B giữ → C mở (đối chứng nghịch) | exit 1 lại |
+| B thoát bình thường → C mở | lên xanh |
+
+Và vế mà chú thích của `#76` để ngỏ: A đã chạy xong `read_records` (nó in dòng replay rồi
+mới lên xanh) mà **vẫn** giữ khoá. Tức trên `ext4` đây là `flock` thật, không phải khoá
+POSIX mô phỏng.
+
+Đo thêm một hệ tệp ngoài bảng của `#76`: **`v9fs`** (WSL2 `/mnt/c`) — **cũng chặn**. Nên
+`v9fs` không rơi vào ca NFS/SMB. Ca NFS/SMB thật vẫn **không phủ**, đúng như `#76` nói.
+
+**Cờ `FORCE`: không thêm.** Lý do của anh Đức mạnh hơn lý do bên mình mang vào phiên: khoá
+bám vào file description nên "khoá mồ côi" không tồn tại — ca duy nhất biện minh được cho
+cờ ấy là ca không xảy ra. Ca `SIGKILL` ở trên là bằng chứng chạy thật cho đúng câu đó.
+
+### 19.7 ✅ `#24` đóng — CI kho này XANH lần đầu tiên
+
+| | Số đo |
+|---|---|
+| trước `#75` | **72 failure / 0 success** — kho chưa từng có một lượt xanh |
+| `main` sau merge `#75` | `34e73c5` @ 09-07 09:54Z — **success**, đủ 8 bước (`fmt` · `clippy` · `test`) |
+
+Cổng cũ đo **sự có mặt của một secret**; thứ nó cần biết là **kho phụ thuộc còn đọc được
+không**. Hai đại lượng trùng nhau lúc viết và tách nhau lúc `Anchor` chuyển public. Vì cổng
+vẫn đỏ đều đặn nên nó đọc thành *"chưa ai xử"* chứ không thành *"đo sai thứ"*.
+
+🔺 **Đính chính bên mình:** các bản báo cáo trước ghi `#24` cần **admin ở hai kho**. Đó là
+hệ quả đúng của một tiền đề đã hết đúng. Bên mình đo *"ai có quyền"* mà không đo lại *"còn
+cần quyền ấy không"*.
+
+### 19.8 🪤 Ba phép đo TỰ HỎNG trong phiên này — cả ba vẫn ra "kết quả"
+
+| Hỏng | Triệu chứng | Bắt bằng |
+|---|---|---|
+| `cargo build --release --bin strata-node` ở gốc workspace **thất bại** (`no bin target … in default-run packages`), nhưng pipe qua `tail` nên exit code là của `tail` | báo "build xong"; bin trên đĩa vẫn là bản **27/08** ⇒ phép đo `flock` đầu tiên cho kết quả **ngược** (B lên xanh) và suýt thành báo động "bản vá không tác dụng" | `stat -c %y` bin so với mtime `journal.rs`; và `-p lampnet-strata-node`, `set -o pipefail` |
+| `strings <bin> \| grep "ĐANG BỊ GIỮ"` → **0** | đọc thành "bin thiếu bản vá" | `strings` cắt ở byte >127 — chuỗi có dấu không bao giờ khớp. Dùng `LC_ALL=C grep -a` với **mẫu ASCII thuần** |
+| `pkill -f "target/release/strata-node"` | giết luôn **chính lệnh shell đang chạy nó** (`-f` khớp cả dòng lệnh của mình) | lọc theo `comm` (`ps -eo pid,comm`), không theo dòng lệnh đầy đủ |
+
+Cái thứ nhất đáng nhớ nhất: nó làm **một phép đo đúng cho một kết luận sai**, và kết luận
+sai ấy đi ngược hướng — nó nói một bản vá tốt là vô dụng.
+
+### 19.9 Bảng còn treo sau phiên này
+
+| Mục | Trạng thái 09-07 | Chờ ai |
+|---|---|---|
+| `#450` cặp `did:pubkey` | ⏳ chưa gửi | `OriLife-Core` |
+| `OriLife#151` — ngữ nghĩa sở hữu sau `#153` | mở; hướng "tên trung tính + CID" nay có **bằng chứng chạy thật** | anh Đức |
+| `OriLife#276` — `confirmed` sớm | mở; nay có **số đo dương ~40 s** đo trên đường thật | `OriLife-Core` |
+| `Core#129` — chỗ chạy + sao lưu | mở; nay nhật ký **đã mang lineage đã neo** | quyết định vận hành |
+| `#84` — `policy_hash` vào `CanonicalResp` | mới mở | anh Đức chốt hình dạng API |
+| `#64` — phần chữ `§3` | mở, CI **nay xanh** | anh Đức merge |
+| `#82` · `#83` — spec | mở, CI **nay xanh** | anh Đức merge (bên mình không tự merge phần chữ) |
+| `#41` mục còn lại | mở — `#76` chỉ vá mục 4 và 5 | bên mình |
