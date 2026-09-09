@@ -2291,3 +2291,196 @@ sai ấy đi ngược hướng — nó nói một bản vá tốt là vô dụng
 | `#64` — phần chữ `§3` | mở, CI **nay xanh** | anh Đức merge |
 | `#82` · `#83` — spec | mở, CI **nay xanh** | anh Đức merge (bên mình không tự merge phần chữ) |
 | `#41` mục còn lại | mở — `#76` chỉ vá mục 4 và 5 | bên mình |
+
+---
+
+## 20. Phiên 2026-09-09 — hai PR spec đứng chờ một lượt đẩy, và một codec không ai gọi
+
+Phiên này không viết mã. Việc là đọc năm mục anh Đức để lại (`#15` · `#64` · `#40` · `#73`
+· `#41`), đo lại từng cái trên `main` `200c213`, rồi gỡ đúng chỗ đang chặn.
+
+### 20.1 🔺 Đính chính `§19.9` — "`#64` CI nay xanh" là một suy luận, không phải một phép đo
+
+Bảng `§19.9` viết ngày 07/09 ghi `#64` và `#82`/`#83` đều *"CI **nay xanh**"*. Với `#82`/`#83`
+thì đúng; với `#64` thì **sai suốt hai ngày**.
+
+Câu đó dựng từ một suy luận hợp lý mà không kiểm: *`#75` đã sửa bước `Preflight` trên `main`
+⇒ mọi nhánh xanh*. Anh Đức cũng viết cùng ý ở `#64` và `#40` ngày 06/09 — *"khi `#75` vào,
+`UNSTABLE` ở đây tự gỡ"*.
+
+Nó không tự gỡ. GitHub chạy workflow lấy từ **head của PR**, không từ `main`:
+
+| PR | head sha | lượt CI cuối trước phiên này | vì sao |
+|---|---|---|---|
+| `#82` · `#83` | commit mới 07/09 | ✅ xanh 07/09 | có đẩy ⇒ chạy lại bằng workflow mới |
+| `#64` | `508e05a` | ❌ đỏ **29/08** | không đẩy gì ⇒ giữ kết quả cũ |
+| `#40` | `fcb8a14` | ❌ đỏ **07/08** | như trên |
+
+Ghép `main` vào nhánh `#64` (`3a2416a`) ⇒ lượt chạy mới **xanh**, `mergeable_state: clean`.
+Sau khi ghép, PR vẫn chỉ đụng `spec/Strata-API.md` (`+314/−7`, đúng một tệp) — lời hứa
+"spec-only" không bị lượt ghép làm hỏng.
+
+Bài học đúng khuôn `đo main, đừng tin comment cuối`, chỉ khác miền: **một điều kiện được vá
+ở nguồn không hồi tố cho những chỗ đã đo trước đó**. Cổng xanh trên `main` không nói gì về
+màu của một PR chưa chạy lại.
+
+### 20.2 Thứ tự land `#64` → `#40`: đề nghị cũ đã hết đúng vì chính `#64` mở rộng
+
+Anh Đức đề nghị `#40` land **cuối** (13/08) để nó gộp ba mục còn thiếu. `#64` mở rộng
+25/08 và ăn vào hai trong ba:
+
+| mục `#40` phải gộp | nhánh `#40` | nhánh `#64` |
+|---|---|---|
+| `TimestampTooFarFuture` — lỗi cửa thứ 7 | 0 hit | có, bảng `§3.1` |
+| route `_canonical` — route thứ 9 | 0 hit (chỉ `entry_bytes_canonical` `§8.3`) | có, `§3` |
+| `AnchorError::SeqGap` | 0 hit | 0 hit |
+
+`#64` vào trước ⇒ `#40` chỉ còn phần `AnchorError` (`Strata-API.md:496`, **6 biến thể → 8** — xem
+§20.5.2, con số 7 mà bản đầu mục này viết là đếm hụt). Ghép thử cả
+hai lên `main` bằng `git merge-tree`: **sạch cả hai chiều**, và ở `§2.5` hai bản vá bổ sung
+nhau (`#64` sửa câu "tự kiểm `fvh`" theo chế độ; `#40` thêm cảnh báo key-trùng). `#82`/`#83`
+không đụng `Strata-API.md`.
+
+Kiểm luôn `§3` của `#64` còn khớp `main` sau `#71`/`#72`/`#76`/`#85`:
+
+| chỗ | mã trên `main` | `§3` |
+|---|---|---|
+| `canonical_core` 8 trường | `src/version.rs:72-80` | khớp từng byte |
+| `author_did` | `:77` ghi nguyên 32 B, không tiền tố | khai đúng vậy |
+| `_canonical` trả 4 trường | `CanonicalResp` `node/src/dto.rs:235-244` | khớp |
+
+Dòng `author_did` là chỗ `#82` đang phải sửa ở `Math §3.1`; bảng `§3` không mang lỗi đó.
+`#84` không chạm `#64`: `policy_hash` là trường **request** trong `CanonicalReq`.
+
+### 20.3 `#41` mục 3 — rà xong, và kết quả không phải một trong hai vế của điều kiện đóng
+
+Điều kiện đóng tự đặt là *"rà encode/decode datum CIP-68 theo cùng chuẩn, hoặc ghi rõ mức
+bảo đảm"*. Rà rồi thì chưa vế nào áp được: **codec `PlutusData` không có đường sản xuất nào
+đi qua.** Vùng tìm đóng — toàn kho, `--include=*.rs`, không lọc:
+
+```
+$ grep -rn "from_cbor" --include=*.rs .
+tests/anchor_sink.rs:185:    assert_eq!(PlutusData::from_cbor(&cbor).unwrap(), datum);
+src/anchor_sink.rs:391:    pub fn from_cbor(...)
+```
+
+`to_cbor` cũng chỉ được gọi trong đúng bài test round-trip đó. Cùng lớp với `#79`
+(`verify_resolved`/`AnchoredTable` có mã và test, không có nơi gọi): bán kính hôm nay bằng
+0, rủi ro nằm ở ngày ai đó nối nó vào đường thật và tin rằng phần này đã rà.
+
+Ba chỗ đo được, ghi để ngày đó khỏi đo lại:
+
+| chỗ | đo được |
+|---|---|
+| `encode_field_list:436` vs `read_field_list:553` | encoder chỉ phát indefinite `0x9f…0xff`; decoder nhận **cả** `0x9f` lẫn definite major-4 (*"chấp nhận để robust"*) ⇒ hai byte-string cho cùng một datum đều xanh |
+| `from_cbor:391-395` | đọc một `PlutusData` rồi trả luôn, **không** so con trỏ với `bytes.len()`. Cùng tệp, `AnchoredTable::from_bytes:956` **có** đúng gác đó |
+| doc `:390` | khai *"Trả phần dư chưa đọc"* — chữ ký `Result<PlutusData, CborError>` không trả phần dư nào |
+
+`settlement.rs:49-51` đã hạ claim tường minh (canonical ở tầng **cấu trúc**, kèm câu *"KHÔNG
+đảm bảo canonical CBOR nguyên thuỷ"*). `anchor_sink.rs` chưa có câu tương đương.
+
+**Vá ở `#87`** — đúng ba chỗ không cần ai quyết: gác trailing-byte (`CborError::Trailing`),
+sửa dòng doc `:390`, và khối doc mức bảo đảm cùng khuôn `settlement.rs`. **Không** siết luật
+chấp nhận mảng và luật int non-minimal: siết khi chưa có đường thật nào chạy qua là chốt
+trước một quyết định thuộc bên dựng tx — và riêng luật definite array thì siết là **tự đóng
+cửa với chính đường sản xuất tương lai**, vì cardano-cli/Lucid phát definite.
+
+Bốn ca kiểm đi hai trục — hai ca đo vế **đã gác**, hai ca đo vế **khoan dung**; ca trailing
+có đối chứng dương ngay trên cùng input, vì một bộ toàn ca `Err` không phân biệt được "gác
+đúng" với "decoder hỏng". Ba lượt đảo mã, mỗi lượt đỏ **đúng một** ca:
+
+| đảo mã | ca đỏ |
+|---|---|
+| gỡ gác trailing trong `from_cbor` | `cbor_tu_choi_byte_thua_duoi` |
+| bỏ nhánh definite trong `read_field_list` | `cbor_nhan_ca_hai_dang_mang_constr` |
+| `read_arg` chỉ nhận minimal | `cbor_int_non_minimal_ra_cung_gia_tri` |
+
+🪤 Lượt thứ ba lúc đầu đỏ **hai** ca: bài *"cụt là `Eof`"* dùng input `0x1a…` nên phụ thuộc
+cùng luật `read_arg` với bài int non-minimal. Hai bài đo chung một luật thì một lượt đảo làm
+đỏ cả hai và **không chỉ ra được chỗ nào hỏng** — đảo mã mất đúng cái nó dùng để làm. Đổi
+input sang `0x41` (bytes(1) thiếu dữ liệu) để mỗi bài đo đúng một thứ. **279 pass** toàn
+workspace, clippy `-D warnings` sạch, `fmt --check` sạch.
+
+### 20.4 Trạng thái đo của năm mục anh Đức để lại
+
+| Mục | Đo trên `main` `200c213` | Còn chờ |
+|---|---|---|
+| `#73` khoá nhật ký | ✅ đóng 07/09, `flock` land ở `#76` (`3941141`) | — |
+| `#15` payload `{t,a}` | `#40` đã sửa cả ba chỗ mang lỗi (`§8.1(b)`, bảng `§4.2`, `Tech §5.2`) | đóng khi `#40` land |
+| `#64` | CI **xanh** sau `3a2416a`, `clean` | anh Đức merge |
+| `#40` | CI vẫn đỏ vì head `fcb8a14` chưa chạy lại; nội dung thiếu `SeqGap` **và** `DuplicateRefIdInBatch` | đẩy lại + chốt kiểu `on_chain_seq` |
+| `#41` | mục 4 · 5 ✅ land `3941141`; mục 2 → `#80`; **mục 3 vá ở `#87`**; mục 1 chờ `#40`; mục 6 chưa đo được | `#87` review |
+
+`#41` mục 6 (`[NEEDS-EVIDENCE]` kiểu `label` Blockfrost) **chưa đo** — điều kiện đóng tự đặt
+là log request/response thật, và ổ chứa `.env` Blockfrost mất mount giữa phiên (`/mnt/c`,
+kênh 9p `Input/output error`). Chỗ cần đo đã xác định: `anchor-io/src/lib.rs:248` so
+`it.get("label").and_then(|l| l.as_str())` với `label.to_string()` — mã **đang giả định
+string**; nếu Blockfrost trả số thì `as_str()` cho `None`, `tx_metadata_cbor` trả `Ok(None)`,
+và lượt resolve im lặng thành *"chưa neo"* chứ không báo lỗi. Txid để đo: `f5a067ee…`
+(`§19.2`) và `6cc6ab6e…` (`§13`).
+
+### 20.5 Vòng land 2026-09-09 — năm PR đóng, và bốn câu phải sửa ngay trước lúc bấm
+
+Hàng chờ mở đầu phiên có **sáu** PR, cái cũ nhất treo 39 ngày. Cả sáu `mergeable_state`
+`CLEAN`, cả sáu CI xanh trên đúng head sha đang mở. Năm cái land; cái thứ sáu là chính bản
+ghi này.
+
+| # | Nội dung | Tác giả | sha trên `main` |
+|---|---|---|---|
+| `#87` | gác byte thừa đuôi `from_cbor` + khai mức bảo đảm codec | mình | `9007cae` |
+| `#82` | chốt TLV cho `canonical_core`, `author_did` không length-prefix, thêm tag làm mù | anh Đức | `4934b18` |
+| `#83` | gỡ 3 chỗ bán cam kết mã không giữ (audit-log, `TAG_STATE_PAD`, `migrate_static`) | anh Đức | `0ef9f23` |
+| `#64` | `§3` bốn route `_`, 3 chỗ schema đã trôi, `§4.4` hợp đồng cửa | mình | `4f97a33` |
+| `#40` | đồng bộ spec↔code (7 mục P1–P7) | anh Đức | `f4a3ec6` |
+
+Thứ tự không tuỳ ý: `#87` là mã nên đi trước; `#82`/`#83` đụng `Math`/`_CONTRACT`/`Feat`/`Tech`
+mà không đụng `Strata-API.md`; `#64` phải trước `#40` vì nó đã ăn hai trong ba mục mà `#40`
+được giao gộp (`§20.2`); `#40` chạm cả bốn tệp nên land cuối.
+
+**Đo trước khi bấm, không tin `CLEAN`.** `git merge-tree` sạch chỉ nói *văn bản không giẫm
+nhau*, nó không nói *câu còn đúng không*.
+
+#### 20.5.1 Bốn câu trong `#40` đã hết đúng trong lúc nó chờ
+
+`#40` viết `2026-08-01`, land `2026-09-09`. Trong 39 ngày đó `main` đi tiếp, và bốn câu của
+chính nó thành sai — land nguyên văn là land câu sai.
+
+| # | Câu trong PR | Trạng thái lúc land | Vá |
+|---|---|---|---|
+| 1 | `pub enum AnchorError` liệt **6** biến thể | mã có **8** (`#42` thêm `SeqGap`, `#76` thêm `DuplicateRefIdInBatch`) | bù cả hai + cập nhật dòng phân tầng retryable |
+| 2 | `Tech §5.4`: lệch pha gap *"CHƯA giải, cần anh Đức chốt"* | anh Đức chốt hướng **(B)** `07/08`; bản vá land ở `#42` | ghi là đã chốt + đã vá; giữ hai hướng A/B vì chúng là *lý do* của lựa chọn |
+| 3 | `Tech §5.4`: *"cần chốt lấy `Math §7.1` làm chuẩn hay hạ mức"* | anh Đức chốt `13/08`: **chuẩn là §5.4**, `Math §7.1` sai | ghi quyết định + lý do (vế đúng là consistency-proof, không phải inclusion-proof) |
+| 4 | `VeDataIO/Code` (3 chỗ) | kho đổi tên `VeDataIO/Core` từ `2026-07-18` | sửa cả 3 |
+
+Kèm một chỗ cùng lớp với `một vị ngữ, MỘT định nghĩa`: `§8.0` liệt **6** tên lỗi cửa và đọc
+như danh sách đóng, trong khi `error.rs` có **8** biến thể mức-cửa (thiếu
+`TimestampTooFarFuture`, `JournalBroken`). Danh sách đóng nay nằm ở bảng `§3.1` vừa land cùng
+`#64`, nên `§8.0` trỏ sang đó thay vì khai lần thứ hai.
+
+Điều **không** làm: hình dạng `SeqGap.on_chain_seq` vẫn để là câu hỏi. `Option<u64>` mà nhánh
+`None` không có đường nào dựng ra (`anchor_sink.rs:755` chỉ dựng với `Some`); nếu luật fail-đóng
+nhánh genesis không vào thì kiểu đúng là `u64`. Đó là quyết định spec, ghi vào văn bản dưới dạng
+"còn chờ chốt" chứ không tự đóng.
+
+#### 20.5.2 🔺 Đính chính `§20.2` — con số "6 → 7" là đếm hụt
+
+`§20.2` viết sáng nay ghi `#40` *"chỉ còn `SeqGap`"*, `6 biến thể → 7`. Đo lại `src/anchor_sink.rs`
+trên `main` `4f97a33` thì là **6 → 8**: còn `DuplicateRefIdInBatch { ref_id: Hash32 }` nữa.
+
+Lý do sai không phải phép đo hỏng — mà là **không đo**. Con số 7 lấy từ comment của chính mình
+ngày `29/08`, còn `DuplicateRefIdInBatch` land ngày `08/09` cùng `#76`. Đúng lớp
+`đo main, đừng tin comment cuối`, chỉ khác chỗ: comment bị tin lần này là **của mình**, và nó
+sai vì thời gian trôi qua chứ không vì người viết nhầm. Một con số đúng lúc viết vẫn hết đúng
+lúc dùng, nếu quãng giữa có người land gì đó.
+
+#### 20.5.3 Còn lại sau vòng này
+
+| Mục | Trạng thái |
+|---|---|
+| `#15` payload `{t,a}` | đóng được — cả ba chỗ mang lỗi đã sửa trong `#40` |
+| `#41` mục 3 | đóng được — vá ở `#87` |
+| `#41` mục 1 | đóng được — `#40` đã land |
+| `#41` mục 6 | **chưa đo** — kiểu `label` Blockfrost, cần log request/response thật |
+| `Math §7.1:329-332` + `§10 Mệnh đề 2` | nợ mở, **thuộc anh Đức** — nêu `13/08`, chưa land |
+| `src/anchor_sink.rs:64` | còn `VeDataIO/Code` trong doc-comment (ngoài phạm vi PR spec) |
+| `SeqGap.on_chain_seq: Option<u64>` | chờ anh Đức chốt kiểu |
