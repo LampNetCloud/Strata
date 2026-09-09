@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use ed25519_dalek::SigningKey;
 use lampnet_strata::anchor_sink::{
     AnchorBackend, AnchorError, AnchorPriority, AnchorReceipt, AnchorSink, AnchoredTable,
-    AssetClass, MosaicAnchorSink, MosaicBackend, PlutusData, ResolvedAnchor, TableError,
+    AssetClass, CborError, MosaicAnchorSink, MosaicBackend, PlutusData, ResolvedAnchor, TableError,
     map_anchor_to_datum, parse_datum_to_anchor, verify_resolved,
 };
 use lampnet_strata::chain::{Policy, StrataAnchor, StrataChain};
@@ -166,6 +166,80 @@ fn sample_anchor(seq: u64) -> StrataAnchor {
         mmr_root: [9u8; 32],
         seq,
     }
+}
+
+// ── #0 mức bảo đảm của codec CBOR — đo cả vế GÁC lẫn vế KHÔNG gác ────────────
+//
+// Khối doc `anchor_sink.rs` khai codec này canonical ở tầng CẤU TRÚC, không phải
+// bijection byte↔giá trị. Bốn ca dưới ĐO đúng câu khai đó, hai chiều: chỗ nào từ chối
+// thì phải từ chối, chỗ nào cố ý khoan dung thì phải chứng minh là khoan dung thật —
+// một bộ toàn ca `Err` sẽ không phân biệt được "gác đúng" với "decoder hỏng".
+
+/// Vế ĐÃ gác: byte thừa đuôi bị từ chối, kèm đối chứng dương ngay trên cùng input.
+#[test]
+fn cbor_tu_choi_byte_thua_duoi() {
+    let datum = map_anchor_to_datum(&StrataAnchor {
+        ref_id: [1u8; 32],
+        head_version_hash: [2u8; 32],
+        mmr_root: [3u8; 32],
+        seq: 42,
+    });
+    let cbor = datum.to_cbor();
+
+    // Đối chứng DƯƠNG: đúng input đó, không rác ⇒ xanh. Không có ca này thì ca dưới
+    // vẫn đỏ kể cả khi decoder hỏng hoàn toàn.
+    assert_eq!(PlutusData::from_cbor(&cbor).unwrap(), datum);
+
+    let mut co_rac = cbor.clone();
+    co_rac.push(0x00);
+    assert_eq!(
+        PlutusData::from_cbor(&co_rac),
+        Err(CborError::Trailing {
+            read: cbor.len(),
+            len: cbor.len() + 1
+        })
+    );
+}
+
+/// Vế KHOAN DUNG có chủ ý #1: decoder nhận mảng definite, encoder chỉ phát indefinite.
+/// Datum thật do bên dựng tx sinh (cardano-cli/Lucid phát definite) nên đây là luật
+/// cần giữ — ca này ghim nó lại để không ai siết nhầm.
+#[test]
+fn cbor_nhan_ca_hai_dang_mang_constr() {
+    // Constr 0 [Int 7] — tag 121, rồi danh sách trường.
+    let indefinite = [0xd8, 0x79, 0x9f, 0x07, 0xff]; // 0x9f … 0xff
+    let definite = [0xd8, 0x79, 0x81, 0x07]; // array(1)
+    let mong_doi = PlutusData::Constr(0, vec![PlutusData::Int(7)]);
+
+    assert_eq!(PlutusData::from_cbor(&indefinite).unwrap(), mong_doi);
+    assert_eq!(PlutusData::from_cbor(&definite).unwrap(), mong_doi);
+    // Và encoder chỉ phát MỘT trong hai — nên round-trip không đủ để phát hiện vế kia.
+    assert_eq!(mong_doi.to_cbor(), indefinite);
+}
+
+/// Vế KHOAN DUNG có chủ ý #2: int non-minimal decode ra CÙNG giá trị.
+/// Đây chính là câu "không phải bijection byte↔giá trị" — đo, không phải khai suông.
+#[test]
+fn cbor_int_non_minimal_ra_cung_gia_tri() {
+    let minimal = [0x07u8]; // uint 7, minimal
+    let mot_byte = [0x18, 0x07]; // uint 7, ai=24
+    let bon_byte = [0x1a, 0x00, 0x00, 0x00, 0x07]; // uint 7, ai=26
+
+    for enc in [&minimal[..], &mot_byte[..], &bon_byte[..]] {
+        assert_eq!(PlutusData::from_cbor(enc).unwrap(), PlutusData::Int(7));
+    }
+    // Ba byte-string khác nhau, một giá trị ⇒ ai băm datum-bytes làm định danh sẽ sai.
+    assert_ne!(minimal.to_vec(), mot_byte.to_vec());
+}
+
+/// Đối chứng nghịch cho gác trailing: cụt thì phải là `Eof`, KHÔNG phải `Trailing`.
+/// Hai lỗi này cùng nói "độ dài không khớp" nên rất dễ gộp làm một.
+#[test]
+fn cbor_cut_la_eof_khong_phai_trailing() {
+    // `0x41` = bytes(1) mà thiếu đúng byte dữ liệu. Cố ý KHÔNG dùng int nhiều byte
+    // (`0x1a…`): ca đó phụ thuộc luật `read_arg` mà ca int non-minimal đang đo, và hai
+    // ca đo chung một luật thì một lượt đảo mã làm đỏ cả hai, không chỉ ra được chỗ nào.
+    assert_eq!(PlutusData::from_cbor(&[0x41]), Err(CborError::Eof));
 }
 
 // ── #1 map round-trip (datum + CBOR) ─────────────────────────────────────────
