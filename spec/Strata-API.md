@@ -569,7 +569,7 @@ pub enum AnchorError { NotConfigured, Rejected(String), Network(String) }
 | Backend | Cơ chế | Khi nào | Nguồn pattern |
 |---|---|---|---|
 | **Settlement** (LampNet) | tx metadata **label 1234**, record `{t,a}` raw-bytes (`t=1` anchor, `a=[ref_id, head_version_hash, mmr_root, seq]`) — byte-layout ở §8.1(a), test-vector `apis/settlement-metadata.json`; message người-đọc label **674** CIP-20 | Strata cập nhật dày, gộp lô (priority `batch_daily`/`milestone`) — rẻ nhất | `lampnet-settlement/src/settle.ts:344-391` |
-| **Mosaic** (VeData/GreenSun) | reference UTxO CIP-68 spend-recreate, validator Plutus V3 enforce `seq' == seq + 1` on-chain (INV-E7) — **đã build + chạy Preview**; mã ở `VeDataIO/Code: mosaic/aiken/validators/strata_anchor.ak` (KHÔNG ở repo này) | giá trị cao cần on-chain state + finality (priority `immediate`) | `Strata-Tech.md §5.2 Lựa chọn A` + `§5.4`, `Stamp-Strata-Mapping §4` |
+| **Mosaic** (VeData/GreenSun) | reference UTxO CIP-68 spend-recreate, validator Plutus V3 enforce `seq' == seq + 1` on-chain (INV-E7) — **đã build + chạy Preview**; mã ở `VeDataIO/Core: mosaic/aiken/validators/strata_anchor.ak` (KHÔNG ở repo này) | giá trị cao cần on-chain state + finality (priority `immediate`) | `Strata-Tech.md §5.2 Lựa chọn A` + `§5.4`, `Stamp-Strata-Mapping §4` |
 
 Cadence đẩy theo `AnchorPriority` (Stamp-Strata-Mapping §4): `immediate` → đẩy mỗi version (Mosaic A); `milestone` → mốc/epoch; `batch_daily` → gom ngày (settlement metadata); `no_anchor` → KHÔNG đẩy, sống tầng (a)/(b).
 
@@ -769,7 +769,7 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
 - **Case biên bắt buộc xử lý ở daemon (không phải `StrataError` core, nhưng phải trả lỗi rõ, KHÔNG panic):**
   - `ref`/`seq`/`key` không tồn tại (core trả `None` từ `version`/`prove_version`/`prove_field`/`version_at`) → 404 `{ "error":"NotFound", "detail":{ "what": "ref"|"seq"|"field key"|"version tại t" } }`. (Daemon phân biệt bằng `detail.what`, KHÔNG bằng tên biến thể riêng — code `node/src/error.rs` KHÔNG có `RefNotFound`.)
   - `version_at(t)` với `t < ts(genesis)` → core trả `None` → 404 (KHÔNG 500).
-  - Body sai schema / hex sai độ dài (H32 ≠ 64 hex char, sig ≠ 128 hex char) → 400 `{ "error":"MalformedRequest", "detail":{...} }` TRƯỚC khi vào core. (Tên biến thể cửa theo `error.rs`: `MalformedRequest`, `NotFound`, `RefExists`, `AnchorNotConfigured`, `AnchorRejected`, `AnchorNetwork` — KHÔNG phải `BadRequest`.)
+  - Body sai schema / hex sai độ dài (H32 ≠ 64 hex char, sig ≠ 128 hex char) → 400 `{ "error":"MalformedRequest", "detail":{...} }` TRƯỚC khi vào core. (Tên biến thể cửa lấy theo `node/src/error.rs`; danh sách đóng nằm ở **bảng §3.1** — không liệt lại ở đây để một sự thật chỉ có một chỗ khai. Điểm cần nhớ tại chỗ này: tên là `MalformedRequest`, **KHÔNG** phải `BadRequest`.)
   - `state_fields` có `key` trùng → daemon từ chối 400 (core `prove_field` chỉ trả lần xuất hiện đầu sau sort; trùng key = ngữ nghĩa mơ hồ). **Chốt INV key-duy-nhất:** key trong một version PHẢI duy nhất. ⚠️ **Không được chỉ chặn ở daemon** — `build_state_root` (`state.rs`) hiện nhận dup key thản nhiên, nên caller gọi thẳng Rust API ký được version "field X = v1" VÀ "X = v2" cùng sinh proof hợp lệ (equivocation). Core PHẢI enforce: `build_state_root`/`prove_field` reject dup key bằng biến thể lỗi mới `DuplicateFieldKey { field_key }` (E6) — reject KỂ CẢ khi value giống hệt (fail-closed, đơn giản). Phạm vi: chỉ `state_fields`/`build_state_root`; **KHÔNG** áp cho `field_policy::grant()` (dedupe-idempotent ở đó là đúng — ngữ nghĩa QUYỀN khác GIÁ TRỊ). Issue riêng (#39) giao Thịnh — tách khỏi S1/S2/S3.
 
 ### §8.1 S1 — `AnchorSink → Mosaic` (CIP-68): byte-layout datum + resolve
@@ -814,19 +814,24 @@ pub enum AnchorError {
     Rejected(String),              // backend/validator từ chối (VD seq' ≤ seq on-chain)
     Network(String),               // lỗi mạng/timeout — RETRYABLE
     RollbackAttempt { on_chain_seq: u64, attempted: u64 },  // INV-E7 backend phát hiện anchor cũ hơn
+    SeqGap { on_chain_seq: Option<u64>, expected: u64, attempted: u64 },  // Mosaic-A: nhảy bậc seq
     DatumTooLarge { bytes: usize }, // datum vượt maxTxSize/protocol param
     InsufficientAda { need: u64, have: u64 }, // backend UTxO (Mosaic A), min-ADA không đủ
+    DuplicateRefIdInBatch { ref_id: Hash32 }, // lô gửi đi có ≥2 anchor cùng một ref_id
 }
 ```
 
 - **Idempotency (bắt buộc):** `publish` cùng một anchor `seq` hai lần (retry sau `Network`) KHÔNG được tạo hai tx spend-recreate. Adapter phải: query on-chain seq hiện tại TRƯỚC khi build tx; nếu `on_chain_seq >= anchor.seq` → trả `Ok(None)` (đã neo) HOẶC `Err(RollbackAttempt)` nếu `on_chain_seq > anchor.seq`. Chốt: `on_chain_seq == anchor.seq` → `Ok(None)` (idempotent no-op); `on_chain_seq > anchor.seq` → `RollbackAttempt`.
-- **Phân tầng retryable:** chỉ `Network(_)` retry (backoff). `Rejected`/`RollbackAttempt`/`DatumTooLarge`/`InsufficientAda` là fail cứng — KHÔNG retry, trả lên daemon.
+- **Phân tầng retryable:** chỉ `Network(_)` retry (backoff). `Rejected`/`RollbackAttempt`/`SeqGap`/`DatumTooLarge`/`InsufficientAda`/`DuplicateRefIdInBatch` là fail cứng — KHÔNG retry, trả lên daemon.
+- **`SeqGap` — Mosaic-A nhảy bậc `seq`** (`src/anchor_sink.rs:76`). Validator đang chạy ép `datum_out.seq == datum_in.seq + 1` (`Strata-Tech §5.4`), nên neo một `seq` cao hơn `on_chain_seq + 1` bị chuỗi từ chối trong khi head local đã tiến ⇒ mọi lần neo sau kẹt vĩnh viễn. Sink chặn TẠI CHỖ, trước khi dựng tx (hướng B — giữ luật on-chain, sửa tầng đẩy — anh Đức chốt 2026-08-07). `expected` = `seq` DUY NHẤT được phép neo tiếp theo. KHÔNG áp cho lần neo ĐẦU TIÊN của một lineage: validator chỉ guard SPEND nên UTxO anchor đầu mang `seq` bất kỳ — đó là đường hợp lệ để đưa một chuỗi đã sống off-chain lên neo giữa chừng.
+  ⚠️ Hình dạng còn một chỗ chờ chốt: `on_chain_seq` khai `Option<u64>` nhưng nhánh `None` hiện **không có đường nào dựng ra** (`anchor_sink.rs:755` chỉ dựng với `Some`) — trường để dành cho luật fail-đóng nhánh genesis. Nếu luật đó không vào thì kiểu đúng là `u64`.
+- **`DuplicateRefIdInBatch` — lô gửi đi có ≥2 anchor cùng một `ref_id`.** Lỗi của bên DỰNG LÔ, không phải của chuỗi, nên tách khỏi `Rejected` (biến thể đó nói *cửa/chuỗi từ chối*) để bên gọi biết phải sửa ở đâu. Fail cứng: một tx mang hai `seq` cho cùng một lineage thì `resolve()` chọn cái nào là do thứ tự record trong metadatum quyết định — tức lịch sử của lineage do một chi tiết mã hoá quyết định, và không sửa được sau khi tx đã lên chuỗi.
 - **INV-E7 hai lớp — mức cross-process KHÁC theo backend (chốt rõ để reader bên-3 không tin quá):**
   - Lớp trong-tiến-trình: core `publish_anchor()` chặn rollback (mọi backend).
   - Lớp cross-process, theo backend:
     - **Settlement legacy (`beacon_policy=None`, quét địa chỉ):** *best-effort*. Bị flood-eviction làm mù (#14) — mù CẢ guard bên GHI (`publish_batch` dùng `resolve`) lẫn bên đọc. Đủ cho publisher-1-ref_id / reader tin daemon; **KHÔNG** đủ cho reader bên-3 không tin publisher.
     - **Settlement + beacon_mode (§8.1(d)):** chống flood (resolve theo asset). Đủ cho bên-3 về **chống-flood**; nhưng đơn-điệu **vẫn dựa khoá publisher** — KHÔNG chống publisher-tự-rollback / key-compromise.
-    - **Mosaic A (Plutus validator, `seq' == seq + 1`):** **đã build + chạy Preview** — mã ở `VeDataIO/Code: mosaic/aiken/validators/strata_anchor.ak`, KHÔNG ở repo này (ranh giới "Mosaic giữ validator"). Đây là tier duy nhất **chống-tụt-lùi độc-lập-khoá**: kẻ chiếm khoá publisher cũng không hạ được `seq` on-chain. **Giới hạn phải nói thật:** validator KHÔNG kiểm `mmr_root'` là mở rộng của `mmr_root` (thiếu vế inclusion mà `Strata-Math §7.1` đòi) ⟹ **không** chống *rewrite-then-re-anchor*: kẻ chiếm khoá dựng nhánh lịch sử khác rồi neo tiến lên vẫn qua. Chống rewrite hiện dựa khoá author + ngưỡng operator. Xem `Strata-Tech §5.4` (kèm lệch pha gap off-chain↔on-chain, chưa giải).
+    - **Mosaic A (Plutus validator, `seq' == seq + 1`):** **đã build + chạy Preview** — mã ở `VeDataIO/Core: mosaic/aiken/validators/strata_anchor.ak`, KHÔNG ở repo này (ranh giới "Mosaic giữ validator"). Đây là tier duy nhất **chống-tụt-lùi độc-lập-khoá**: kẻ chiếm khoá publisher cũng không hạ được `seq` on-chain. **Giới hạn phải nói thật:** validator KHÔNG kiểm `mmr_root'` là mở rộng của `mmr_root` (thiếu vế inclusion mà `Strata-Math §7.1` đòi) ⟹ **không** chống *rewrite-then-re-anchor*: kẻ chiếm khoá dựng nhánh lịch sử khác rồi neo tiến lên vẫn qua. Chống rewrite hiện dựa khoá author + ngưỡng operator. Xem `Strata-Tech §5.4` (lệch pha gap off-chain↔on-chain: anh Đức chốt hướng (B) ngày 2026-08-07, vá ở `#42` bằng `SeqGap`).
   - Cả ba lớp đều phải test riêng.
 
 **(c) Resolve ngược `anchor on-chain → verify mmr_root khớp chain`.** THÊM method vào trait (S1 DoD yêu cầu "proof resolvable on-chain"):
