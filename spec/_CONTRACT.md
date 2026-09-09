@@ -43,7 +43,8 @@
 | MMR leaf | `LN/STRATA/mmr/leaf/v1` |
 | MMR internal node | `LN/STRATA/mmr/node/v1` |
 | MMR root (bag + n) | `LN/STRATA/mmr/root/v1` |
-| State: băm giá trị trường | `LN/STRATA/state/fval/v1` |
+| State: băm giá trị trường, dạng **thường** (không làm mù) | `LN/STRATA/state/fval/v1` |
+| State: băm giá trị trường, dạng **LÀM MÙ** (§6.3) | `LN/STRATA/state/fval/salted/v1` |
 | State: leaf (key+fval) | `LN/STRATA/state/leaf/v1` |
 | State: internal node | `LN/STRATA/state/node/v1` |
 | State: padding (giấu số trường) | `LN/STRATA/state/pad/v1` |
@@ -53,11 +54,25 @@
 
 ### Mã hóa state leaf (CHỐT-4 — Math & Tech giống hệt)
 ```
+// salt_i RỖNG — dạng thường:
 fvh_i  = H_dom("LN/STRATA/state/fval/v1", field_value_bytes)   // field_value_bytes = giá trị inline HOẶC content_cid thuần (32B)
+// salt_i KHÁC RỖNG — dạng làm mù (§6.3):
+fvh_i  = H_dom("LN/STRATA/state/fval/salted/v1", u32_be(len(salt_i)) ‖ salt_i ‖ field_value_bytes)
+
 leaf_i = H_dom("LN/STRATA/state/leaf/v1", u32_be(len(field_key)) ‖ field_key ‖ fvh_i)
 node   = H_dom("LN/STRATA/state/node/v1", left ‖ right)
 state_root = node-root trên các leaf_i đã sắp theo field_key tăng dần
 ```
+
+⚠️ **Hai chế độ PHẢI ở hai miền băm khác nhau.** Dùng chung một tag cho cả hai là một lỗ có thể khai thác: với cùng một tag, `V = u32_be(|S|) ‖ S ‖ M` (không salt) cho **cùng** `fvh` với cặp `(salt = S, value = M)` — tức một bên dựng được proof khai sai giá trị mà vẫn verify xanh dưới `state_root` đã ký. Đó là lý do tồn tại của `state/fval/salted/v1`; nó không phải một biến thể tuỳ chọn.
+
+### Cây rỗng — quy ước, vì ba cây KHÔNG giống nhau
+```
+state_root(∅)  = 0^32   (giá trị canh, KHÔNG phải hash của chuỗi rỗng)
+policy_hash(∅) = 0^32   (cùng quy ước)
+mmr_root(n=0)  = H_dom("LN/STRATA/mmr/root/v1", u64_be(0))   — KHÔNG có bag; verify(n=0) LUÔN false
+```
+`0^32` trùng đúng giá trị `prev_hash` của genesis, nên một `state_root` rỗng và một "chưa có phiên bản trước" đọc giống hệt nhau ở lớp byte. Không so hai thứ đó bằng byte trần — phân biệt bằng kiểu ở chỗ gọi.
 
 ## 4 loại dữ liệu (MECE — theo quan hệ định danh↔nội dung qua thời gian)
 1. **Tĩnh** (Static/write-once): 1 ID ↔ 1 nội dung cố định. VD: video, ảnh, PDF, release.

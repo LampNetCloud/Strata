@@ -110,7 +110,7 @@ Vì vậy Strata thỏa: số lá khác nhau ⇒ tập đỉnh khác nhau ⇒ ro
 
 ### §3.1 Định nghĩa `version_hash`
 
-Gọi `core(v)` là mã hóa tất định (deterministic, ví dụ TLV độ-dài-có-tiền-tố hoặc CBOR canonical) của **tất cả** trường phiên bản **trừ** `sig`, theo đúng thứ tự canonical ở §1:
+Gọi `core(v)` là mã hóa tất định của **tất cả** trường phiên bản **trừ** `sig`, theo đúng thứ tự canonical ở §1. Mã hóa **đã CHỐT là TLV độ-dài-có-tiền-tố**, **KHÔNG** phải CBOR canonical — quy tắc byte đầy đủ ở `Strata-Tech.md §1.7`, vector đối chiếu ở `apis/canonical-core-vectors.json`. (Nêu hai lựa chọn ở đây là để ngỏ một quyết định đã chốt: hai bên cài hai kiểu sẽ ra hai `version_hash` khác nhau cho cùng một phiên bản, mà cả hai đều "đúng spec".)
 
 ```
 core(v) = canonical( seq, prev_hash, content_cid, state_root, author_did, policy_hash, ts )
@@ -128,7 +128,13 @@ Tức là: phần lõi được băm thẳng ra `version_hash`; tác giả ký *
 - `version_hash` định danh duy nhất phần **nội dung** phiên bản (không phụ thuộc chữ ký). Vì `prev_hash` của phiên bản kế trỏ vào `version_hash` này, liên kết chuỗi (§3.2) khóa chặt nội dung.
 - `sig` **bắt buộc là chữ ký Ed25519 canonical (low-S)**: với một cặp `(pk, version_hash)` chỉ tồn tại **một** chữ ký canonical hợp lệ. Điều này chặn malleability ở tầng chữ ký (không thể tạo một `sig'` khác cùng hợp lệ cho cùng nội dung) — chứng minh ở §10 Mệnh đề 6. Verifier kiểm `Ed25519_verify(pk(author_did), version_hash(v), sig(v))` **và** kiểm dạng canonical (low-S) rồi mới chấp nhận; cột chặt nội dung ↔ tác giả (phục vụ INV-E4).
 
-> Lưu ý mã hóa: `canonical` phải là **song ánh** trên miền trường (mỗi bộ trường ↔ đúng một chuỗi byte). Dùng độ-dài-có-tiền-tố cho mọi trường biến độ dài (`content_cid`, `author_did`) để tránh nhập nhằng ranh giới — nếu không, hai bộ trường khác nhau có thể cho cùng `core` và cùng `version_hash` (va chạm cấu trúc, không phải va chạm BLAKE3). Đây là điều kiện để mọi mệnh đề an toàn ở §10 quy được về độ khó BLAKE3.
+> Lưu ý mã hóa: `canonical` phải là **song ánh** trên miền trường (mỗi bộ trường ↔ đúng một chuỗi byte), nếu không hai bộ trường khác nhau có thể cho cùng `core` và cùng `version_hash` — va chạm **cấu trúc**, không phải va chạm BLAKE3. Đây là điều kiện để mọi mệnh đề an toàn ở §10 quy được về độ khó BLAKE3.
+>
+> Song ánh đạt được bằng **hai luật khác nhau cho hai loại trường**, và trộn hai luật là hỏng:
+> - **Trường biến độ dài** — trong `core(v)` **chỉ có `content_cid`** — ghi `u32_be(len)` rồi tới byte.
+> - **Trường cố định** (`prev_hash`, `state_root`, `author_did`, `policy_hash`, đều đúng 32 byte theo §2.1) — ghi **nguyên byte, KHÔNG tiền tố độ dài**.
+>
+> ⚠️ `author_did` là trường **cố định** (`Did = [u8;32]`, CHỐT-5), **không** phải trường biến độ dài. Thêm `u32_be(32)` trước nó là **đổi byte** ⇒ đổi `version_hash` ⇒ **hỏng mọi chữ ký đã ký**, và hỏng theo kiểu không chỉ ra được nguyên nhân: chữ ký Ed25519 sai không nói nó sai ở byte nào, nên một bên cài như vậy sẽ nhận `BadSignature` cho **mọi** phiên bản mà không log nào giải thích. Quy tắc byte đầy đủ: `Strata-Tech.md §1.7` quy tắc 4.
 
 ### §3.2 Liên kết chuỗi và chứng minh INV-E1, INV-E2
 
