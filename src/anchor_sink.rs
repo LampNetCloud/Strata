@@ -340,6 +340,26 @@ pub fn parse_datum_to_anchor(d: &PlutusData) -> Result<StrataAnchor, DatumError>
 // ────────────────────────────────────────────────────────────────────────────
 // CBOR (ledger Cardano `Data`) — đặc tả byte + size-guard. Round-trip nội bộ.
 // ────────────────────────────────────────────────────────────────────────────
+//
+// MỨC BẢO ĐẢM (cùng khuôn khai báo với `settlement.rs`, xem khối doc đầu tệp đó).
+//
+// Codec này canonical ở tầng CẤU TRÚC, KHÔNG phải bijection byte↔giá trị:
+// - `read_arg` nhận mọi additional-info 24/25/26/27, nên `seq = 1` decode được từ `0x01`,
+//   `0x1801`, `0x190001`, `0x1a00000001`, `0x1b…` — **int non-minimal không bị từ chối**;
+// - `read_field_list` nhận CẢ indefinite `0x9f…0xff` LẪN definite major-4, trong khi
+//   `encode_field_list` chỉ phát indefinite. Chấp nhận definite là **có chủ ý**: datum thật
+//   do bên dựng tx (Mosaic/cardano-cli/Lucid) sinh ra, và các bộ đó phát definite;
+// - `Map` không kiểm thứ tự khoá và không chặn khoá trùng.
+//
+// ⟹ Hai byte-string khác nhau decode ra CÙNG một `PlutusData`. Vô hại chừng nào không ai
+// dùng **byte datum** làm định danh: `resolve` so `StrataAnchor` đã parse, không so byte
+// (`grep "to_cbor()"` toàn kho: chỉ round-trip trong test). Nếu ngày nào có consumer băm
+// datum-bytes làm khoá, mức bảo đảm này KHÔNG đủ và phải thêm kiểm minimal-encoding.
+//
+// Vế ĐÃ gác: [`PlutusData::from_cbor`] từ chối **byte thừa đuôi** ([`CborError::Trailing`]),
+// cùng phép đo mà `AnchoredTable::from_bytes` đã có. Không có gác đó thì một datum hợp lệ
+// nối thêm rác vẫn parse xanh, và cái đuôi ấy đi qua mọi so sánh ở tầng giá trị mà không
+// ai thấy.
 
 impl PlutusData {
     /// Encode CBOR theo quy ước `Data` của ledger Cardano:
@@ -387,10 +407,17 @@ impl PlutusData {
         }
     }
 
-    /// Decode một `PlutusData` từ CBOR (nghịch của [`to_cbor`]). Trả phần dư chưa đọc.
+    /// Decode một `PlutusData` từ CBOR (nghịch của [`to_cbor`]). Đòi input chứa **đúng
+    /// một** giá trị: còn byte chưa đọc ⇒ [`CborError::Trailing`], KHÔNG trả phần dư.
     pub fn from_cbor(bytes: &[u8]) -> Result<PlutusData, CborError> {
         let mut c = Cursor { b: bytes, i: 0 };
         let d = c.read_data()?;
+        if c.i != bytes.len() {
+            return Err(CborError::Trailing {
+                read: c.i,
+                len: bytes.len(),
+            });
+        }
         Ok(d)
     }
 
@@ -471,6 +498,12 @@ pub enum CborError {
     Eof,
     Unsupported(u8),
     BadTag(u64),
+    /// Còn byte chưa đọc sau khi đã lấy trọn một `PlutusData` — `read` = đã đọc,
+    /// `len` = tổng. Từ chối để một datum hợp lệ nối rác không parse xanh.
+    Trailing {
+        read: usize,
+        len: usize,
+    },
 }
 
 struct Cursor<'a> {
