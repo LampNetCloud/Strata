@@ -74,6 +74,7 @@ H_dom(tag, x) = BLAKE3( tag ‖ 0x00 ‖ x )
 | MMR internal node | `LN/STRATA/mmr/node/v1` |
 | MMR root (bag + n) | `LN/STRATA/mmr/root/v1` |
 | State: băm giá trị trường | `LN/STRATA/state/fval/v1` |
+| State: băm giá trị trường, dạng **làm mù** | `LN/STRATA/state/fval/salted/v1` |
 | State: leaf (key+fval) | `LN/STRATA/state/leaf/v1` |
 | State: internal node | `LN/STRATA/state/node/v1` |
 | State: padding (giấu số trường) | `LN/STRATA/state/pad/v1` |
@@ -289,7 +290,21 @@ Field-proof là **ZK-lite**, không phải zero-knowledge đầy đủ. Nó *có
 
 *Giải pháp khi cần giấu cả số trường và chống so-khớp*:
 - **Đệm (padding)** số lá lên lũy thừa 2 cố định bằng các lá giả `H_dom("LN/STRATA/state/pad/v1", nonce)` — che số trường thật.
-- **Làm mù (blinding)**: `fvh_i = H_dom("LN/STRATA/state/fval/v1", salt_i ‖ field_value_bytes)` với `salt_i` ngẫu nhiên mỗi phiên bản — khiến hash anh em đổi mỗi lần, chặn so-khớp liên-proof và tấn công từ điển trên giá trị ít entropy (ví dụ trường boolean).
+- **Làm mù (blinding)**: `fvh_i = H_dom("LN/STRATA/state/fval/salted/v1", u32_be(len(salt_i)) ‖ salt_i ‖ field_value_bytes)` với `salt_i` ngẫu nhiên mỗi phiên bản — khiến hash anh em đổi mỗi lần, chặn so-khớp liên-proof và tấn công từ điển trên giá trị ít entropy (ví dụ trường boolean).
+
+  **Hai chi tiết dưới đây là điều kiện đúng đắn, không phải tuỳ chọn hiện thực.**
+
+  1. **Tag RIÊNG cho dạng làm mù.** Dùng chung `.../fval/v1` cho cả hai dạng thì với salt `S`
+     và giá trị `M` bất kỳ, giá trị **không làm mù** `V = u32_be(|S|) ‖ S ‖ M` cho **đúng cùng
+     một `fvh`**. Người ghi cam kết `V` rồi xuất proof khai `(salt = S, value = M)` — verifier
+     băm lại khớp, `state_root` khớp, **xanh**. Tức đổi được lời khai về giá trị SAU KHI
+     `state_root` đã nằm trong `version_hash` đã ký. Không cần va chạm băm nào.
+  2. **Length-prefix cho `salt_i`.** Nối trần `salt_i ‖ value` cho `(salt="ab", value="c")` và
+     `(salt="a", value="bc")` cùng một `fvh`, mà cả hai đều do người ghi chọn — cùng một lớp lỗi,
+     lùi xuống một bậc.
+
+  Cả hai đều là lỗi **phân tách miền**, không phải rủi ro mật mã: chúng không phụ thuộc kích thước
+  không gian giá trị, nên rào "trường này chỉ có 3–4 giá trị nên không lo" không áp được.
 - Khi cần ẩn hoàn toàn (chứng minh thuộc tính mà không lộ cả hash), nâng lên cam kết đại số + bằng chứng ZK (ngoài phạm vi V hiện tại; ghi chú để backlog).
 
 Đây là sự đánh đổi có chủ đích: ZK-lite rẻ (chỉ băm), đủ cho phần lớn ca dùng; khi cần kín hơn thì bật padding + blinding.

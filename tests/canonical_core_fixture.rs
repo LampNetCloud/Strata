@@ -9,7 +9,10 @@
 //! encoder lẫn decoder.
 
 use lampnet_strata::hash::h_dom;
-use lampnet_strata::state::{TAG_STATE_NODE, build_state_root, fval_hash, leaf_hash};
+use lampnet_strata::state::{
+    TAG_STATE_FVAL, TAG_STATE_FVAL_SALTED, TAG_STATE_NODE, build_state_root, fval_hash,
+    fval_hash_salted, leaf_hash,
+};
 use lampnet_strata::version::{CanonicalError, StrataVersion, TAG_VER, parse_canonical_core};
 use serde_json::Value;
 
@@ -20,6 +23,8 @@ const FIXTURE: &str = include_str!("../apis/canonical-core-vectors.json");
 const MIN_VECTORS: usize = 5;
 const MIN_NEGATIVE_CONTROLS: usize = 3;
 const MIN_STATE_VECTORS: usize = 6;
+const MIN_MODE_VECTORS: usize = 4;
+const MIN_MODE_NEGATIVE_CONTROLS: usize = 2;
 
 fn unhex(s: &str) -> Vec<u8> {
     assert!(s.len().is_multiple_of(2), "hex phải chẵn ký tự: {s}");
@@ -253,4 +258,157 @@ fn leaf_va_node_khong_dung_chung_mien_bam() {
         "lá và nút băm ra CÙNG giá trị trên cùng 64 byte tiền ảnh — domain separation đã mất, \
          một nút trong khai được thành một lá"
     );
+}
+
+/// Vector CHẾ ĐỘ `fvh` (`Strata#71`) — hai chế độ, hai domain-tag.
+///
+/// Bên phải-khớp (`strata_client.py`) hôm nay chỉ cài đường **không salt**. Vector này là thứ
+/// **duy nhất** nói cho họ biết chế độ làm mù tồn tại, nó chọn miền băm bằng `salt` rỗng hay
+/// không, và byte-layout của nó là gì. Thiếu nó thì họ không cài sai — họ **không cài**, rồi
+/// mọi proof có salt đỏ ở phía client trong khi server nhìn không có gì sai.
+#[test]
+fn fval_mode_vectors_khop_lo() {
+    let fx = fixture();
+    let vs = fx["fval_mode_vectors"]
+        .as_array()
+        .expect("fval_mode_vectors");
+    assert!(
+        vs.len() >= MIN_MODE_VECTORS,
+        "còn {} mode vector (tối thiểu {MIN_MODE_VECTORS})",
+        vs.len()
+    );
+
+    let h = &fx["fval_mode_hash"];
+    assert_eq!(
+        h["tag_fval"].as_str().expect("tag_fval"),
+        TAG_STATE_FVAL,
+        "tag không-salt trong file lệch hằng của lõi"
+    );
+    assert_eq!(
+        h["tag_fval_salted"].as_str().expect("tag_fval_salted"),
+        TAG_STATE_FVAL_SALTED,
+        "tag làm mù trong file lệch hằng của lõi"
+    );
+    assert_ne!(
+        TAG_STATE_FVAL, TAG_STATE_FVAL_SALTED,
+        "hai chế độ dùng CHUNG tag — đây chính là lỗ P0 Strata#71"
+    );
+
+    for v in vs {
+        let name = v["name"].as_str().expect("name");
+        let salt = unhex(v["salt"].as_str().expect("salt"));
+        let value = unhex(v["value"].as_str().expect("value"));
+
+        assert_eq!(
+            salt.len(),
+            v["salt_len"].as_u64().expect("salt_len") as usize,
+            "[{name}] salt_len trong file không khớp salt"
+        );
+
+        // Chế độ do salt QUYẾT, không phải một nhãn ghi tay cạnh nó.
+        let (want_mode, want_tag) = if salt.is_empty() {
+            ("khong_salt", TAG_STATE_FVAL)
+        } else {
+            ("salted", TAG_STATE_FVAL_SALTED)
+        };
+        assert_eq!(
+            v["mode"].as_str().expect("mode"),
+            want_mode,
+            "[{name}] nhãn mode lệch với salt thật"
+        );
+        assert_eq!(
+            v["tag"].as_str().expect("tag"),
+            want_tag,
+            "[{name}] tag lệch với chế độ"
+        );
+
+        assert_eq!(
+            hexs(&fval_hash_salted(&salt, &value)),
+            v["fvh"].as_str().expect("fvh"),
+            "[{name}] fvh lệch"
+        );
+
+        // salt RỖNG phải rơi về ĐÚNG đường cũ — điều kiện "không lịch sử nào phải tính lại".
+        if salt.is_empty() {
+            assert_eq!(
+                fval_hash_salted(&salt, &value),
+                fval_hash(&value),
+                "[{name}] salt rỗng KHÔNG còn trùng bit với fval_hash — state_root đã ký sẽ đổi"
+            );
+        }
+    }
+}
+
+/// Đối chứng âm cho `fval_mode_vectors` — dựng lại đúng khai thác của `Strata#71`.
+///
+/// Không có mục này thì một bản cài dùng **chung** một tag cho hai chế độ vẫn khớp toàn bộ
+/// `fval_mode_vectors` ở trên: mọi vector đều đi một chiều (tính `fvh` từ `(salt, value)`),
+/// nên không vector thuận nào phát hiện được rằng hai miền đã chồng lên nhau.
+#[test]
+fn fval_mode_negative_controls_phai_khac_mien() {
+    let fx = fixture();
+    let ncs = fx["fval_mode_negative_controls"]
+        .as_array()
+        .expect("fval_mode_negative_controls");
+    assert!(
+        ncs.len() >= MIN_MODE_NEGATIVE_CONTROLS,
+        "còn {} đối chứng âm (tối thiểu {MIN_MODE_NEGATIVE_CONTROLS})",
+        ncs.len()
+    );
+
+    // NC1 — hai CHẾ ĐỘ.
+    let nc1 = &ncs[0];
+    let salt = unhex(nc1["salt"].as_str().expect("salt"));
+    let value_salted = unhex(nc1["value_salted"].as_str().expect("value_salted"));
+
+    // `V` được DỰNG LẠI ở đây, không đọc từ file: nếu file ghi một `V` khác thì nó không còn
+    // là khai thác nữa và đối chứng này thành trang trí.
+    let mut v = Vec::new();
+    v.extend_from_slice(&(salt.len() as u32).to_be_bytes());
+    v.extend_from_slice(&salt);
+    v.extend_from_slice(&value_salted);
+    assert_eq!(
+        hexs(&v),
+        nc1["value_khong_salt"].as_str().expect("value_khong_salt"),
+        "NC1: value_khong_salt trong file KHÔNG phải u32_be(|S|) ‖ S ‖ M — đối chứng đã hỏng"
+    );
+
+    let a = fval_hash_salted(&salt, &value_salted);
+    let b = fval_hash(&v);
+    assert_eq!(hexs(&a), nc1["fvh_salted"].as_str().expect("fvh_salted"));
+    assert_eq!(
+        hexs(&b),
+        nc1["fvh_khong_salt_cua_V"]
+            .as_str()
+            .expect("fvh_khong_salt_cua_V")
+    );
+    assert_ne!(
+        a, b,
+        "NC1: hai CHẾ ĐỘ cho cùng một fvh ⇒ người ghi đổi được lời khai về giá trị SAU KHI ký"
+    );
+
+    // NC2 — biên salt/value bên trong nhánh có salt.
+    let nc2 = &ncs[1];
+    let (sa, va) = (
+        unhex(nc2["a"]["salt"].as_str().expect("a.salt")),
+        unhex(nc2["a"]["value"].as_str().expect("a.value")),
+    );
+    let (sb, vb) = (
+        unhex(nc2["b"]["salt"].as_str().expect("b.salt")),
+        unhex(nc2["b"]["value"].as_str().expect("b.value")),
+    );
+    let mut cat_a = sa.clone();
+    cat_a.extend_from_slice(&va);
+    let mut cat_b = sb.clone();
+    cat_b.extend_from_slice(&vb);
+    assert_eq!(
+        cat_a, cat_b,
+        "NC2 chỉ có nghĩa khi hai cặp nối trần ra CÙNG một chuỗi"
+    );
+
+    let fa = fval_hash_salted(&sa, &va);
+    let fb = fval_hash_salted(&sb, &vb);
+    assert_eq!(hexs(&fa), nc2["a"]["fvh"].as_str().expect("a.fvh"));
+    assert_eq!(hexs(&fb), nc2["b"]["fvh"].as_str().expect("b.fvh"));
+    assert_ne!(fa, fb, "NC2: thiếu length-prefix cho salt — biên dịch được");
 }

@@ -53,6 +53,16 @@ use lampnet_merkle_anchor::hash::{Hash32, h_dom};
 
 /// Tag băm giá trị trường (CHỐT-2).
 pub const TAG_STATE_FVAL: &str = "LN/STRATA/state/fval/v1";
+
+/// Tag cho `fvh` dạng **làm mù** — miền RIÊNG, không dùng chung với [`TAG_STATE_FVAL`].
+///
+/// Dùng chung một tag cho cả hai chế độ là một lỗ **P0**: length-prefix phân tách được
+/// `salt` với `value` bên trong nhánh có salt, nhưng không phân tách nhánh-có-salt với
+/// nhánh-không-salt. Với salt `S` và giá trị `M` bất kỳ, giá trị KHÔNG salt
+/// `V = u32_be(|S|) ‖ S ‖ M` cho đúng cùng một `fvh` ⇒ người ghi cam kết `V` rồi xuất
+/// proof khai `(S, M)`, verifier xanh. Không cần va chạm băm nào.
+/// PoC: `poc_hai_che_do_khong_duoc_phan_tach_mien`, `poc_proof_khai_sai_van_xanh`.
+pub const TAG_STATE_FVAL_SALTED: &str = "LN/STRATA/state/fval/salted/v1";
 /// Tag state leaf (key + fval).
 pub const TAG_STATE_LEAF: &str = "LN/STRATA/state/leaf/v1";
 /// Tag state internal node.
@@ -66,7 +76,7 @@ pub fn fval_hash(field_value_bytes: &[u8]) -> Hash32 {
     h_dom(TAG_STATE_FVAL, field_value_bytes)
 }
 
-/// `fvh` có **làm mù** (§6.3): `H_dom(TAG_STATE_FVAL, u32_be(len(salt)) ‖ salt ‖ value)`.
+/// `fvh` có **làm mù** (§6.3): `H_dom(TAG_STATE_FVAL_SALTED, u32_be(len(salt)) ‖ salt ‖ value)`.
 ///
 /// - `salt` **rỗng** ⇒ trả về đúng [`fval_hash`] — không có nhánh nào đổi lịch sử.
 /// - `salt` khác rỗng ⇒ length-prefix, **không** nối trần như câu chữ §6.3: nối trần
@@ -84,7 +94,7 @@ pub fn fval_hash_salted(salt: &[u8], field_value_bytes: &[u8]) -> Hash32 {
     buf.extend_from_slice(&u32_be(salt.len()));
     buf.extend_from_slice(salt);
     buf.extend_from_slice(field_value_bytes);
-    h_dom(TAG_STATE_FVAL, &buf)
+    h_dom(TAG_STATE_FVAL_SALTED, &buf)
 }
 
 /// `leaf = H_dom(TAG_STATE_LEAF, u32_be(len(key)) ‖ key ‖ fvh)`.
@@ -508,6 +518,66 @@ mod blinding_tests {
             fval_hash_salted(b"ab", b"c"),
             fval_hash_salted(b"a", b"bc"),
             "nối trần sẽ cho hai cặp này CÙNG một fvh — và cả hai đều do người ghi chọn"
+        );
+    }
+
+    /// **PoC lỗ P0 — cùng một `fvh` cho hai LỜI KHAI khác nhau, không cần va chạm băm.**
+    ///
+    /// `fval_hash` và `fval_hash_salted` dùng CHUNG `TAG_STATE_FVAL`. Length-prefix phân
+    /// tách được `salt` với `value` **bên trong** nhánh có salt, nhưng KHÔNG phân tách
+    /// nhánh-có-salt với nhánh-không-salt. Nên với salt `S` và giá trị `M` bất kỳ, giá trị
+    /// KHÔNG salt `V = u32_be(|S|) ‖ S ‖ M` cho **đúng cùng một `fvh`**.
+    ///
+    /// Hệ quả: người ghi cam kết trường dưới dạng không-salt `V`, rồi sau đó xuất một
+    /// `FieldProof` khai `salt = S, value = M` — verifier băm lại ra đúng `fvh`, đúng
+    /// `state_root`, **xanh**. Hoặc ngược lại. Tức người ghi đổi được lời khai về giá trị
+    /// SAU KHI `state_root` đã nằm trong `version_hash` đã ký — đúng thứ field-proof sinh
+    /// ra để chặn.
+    ///
+    /// Đây là cùng một lỗi phân tách miền mà `nhap_nhang_bien_salt_value_bi_chan` đã chặn,
+    /// chỉ lùi lên một bậc: chặn giữa hai trường thì được, giữa hai CHẾ ĐỘ thì chưa.
+    #[test]
+    fn poc_hai_che_do_khong_duoc_phan_tach_mien() {
+        let s: &[u8] = b"SALT";
+        let m: &[u8] = b"YES";
+
+        // Giá trị không-salt mà người ghi tự dựng — không cần biết gì ngoài `S` và `M`.
+        let mut v = Vec::new();
+        v.extend_from_slice(&u32_be(s.len()));
+        v.extend_from_slice(s);
+        v.extend_from_slice(m);
+
+        assert_ne!(
+            fval_hash(&v),
+            fval_hash_salted(s, m),
+            "cùng fvh cho hai lời khai khác nhau ⇒ người ghi đổi được lời khai sau khi đã ký"
+        );
+    }
+
+    /// Vế hệ quả: lỗ trên đi thẳng tới `verify_field_proof` — một proof KHAI SAI vẫn xanh.
+    ///
+    /// Trường thật được cam kết là `v` (không salt). Kẻ xuất proof khai `salt=S, value=M`.
+    /// Không đụng tới `siblings`, không đụng `state_root`.
+    #[test]
+    fn poc_proof_khai_sai_van_xanh() {
+        let s: &[u8] = b"SALT";
+        let m: &[u8] = b"YES";
+        let mut v = Vec::new();
+        v.extend_from_slice(&u32_be(s.len()));
+        v.extend_from_slice(s);
+        v.extend_from_slice(m);
+
+        // Cam kết THẬT: một trường duy nhất, không salt, giá trị `v`.
+        let that = vec![(b"chandoan".to_vec(), v.clone())];
+        let mut proof = prove_field(&that, b"chandoan").expect("có key");
+
+        // Đổi LỜI KHAI, giữ nguyên fvh/siblings/state_root.
+        proof.value = m.to_vec();
+        proof.salt = s.to_vec();
+
+        assert!(
+            !verify_field_proof(&proof),
+            "proof khai sai giá trị mà vẫn verify xanh"
         );
     }
 

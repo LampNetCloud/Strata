@@ -306,9 +306,20 @@ Căn cứ, theo thứ tự sức nặng:
 
 | PR | Chặn bởi | Ghi chú |
 |---|---|---|
-| **#42** | anh Đức chưa đẩy 3 sửa đã hứa 13/08 | `resolve()` thay `on_chain_seq()` · nhánh `None` fail cứng · chặn `AnchorPriority` thưa ở constructor. Không tự đẩy thay vì anh nói rõ *"anh cập nhật vào nhánh này, em đợi bản cập nhật rồi hẵng bấm merge"* |
+| **#42** | **ĐÃ LAND 2026-08-29** (`c6b97c9`) | Đường GHI nay đi `resolve()`, `on_chain_seq` **gỡ khỏi trait** — không còn call-site nào trong mã. Chặn `AnchorPriority` thưa đặt ở cửa đầu `publish` (sink không nhận `priority` lúc dựng). **Nợ mở ghi lên PR:** mục 2 land khác câu chốt 13/08 — gác đặt trên `expected_token.is_none()`, còn nhánh *có pin token mà `resolve()` trả `None`* vẫn đi thẳng, tức indexer trễ vẫn bỏ qua cả ba gác kể cả no-op idempotent. Xem §9.5 |
 | **#40** | phải gộp 3 mục spec | `TimestampTooFarFuture` (lỗi cửa **thứ 7**, ngoài 6 biến thể #40 đang chốt thành danh sách đóng) · route `_canonical` (route **thứ 9**, #40 liệt 8) — **cả hai nay đã xác định vì #48 đã land**; mục thứ 3 là `SeqGap` của #42, **chờ #42** |
 | **#31** | secret `ANCHOR_DEPLOY_KEY` | Workflow tự báo lỗi đúng nguyên nhân và tự in 3 bước thêm khoá. **Cổng kêu to là hành vi đúng**, không phải CI hỏng — nhưng nó cần quyền admin repo mà `lrybi` không có |
+
+### 9.5 Nợ mở còn lại của đường Mosaic-A sau khi #42 land
+
+Đo trên cây đã ghép (`main` + `#42`): 268 test pass, clippy 0, `fmt` sạch. Bán kính hôm nay **bằng 0** trên đường thật — daemon chỉ dựng `SettlementSink` (`node/src/sink_config.rs`), `MosaicAnchorSink` không có call-site ngoài `tests/`, và `impl MosaicBackend for` vẫn đúng một kết quả (`MockMosaic`). Ba gác của #42 là gác cho **S11**.
+
+| Nợ | Chỗ | Vì sao còn |
+|---|---|---|
+| Nhánh genesis không có gác | `src/anchor_sink.rs` — `_ => {}` sau ba nhánh `Some(..)` | `resolve()` trả `Ok(None)` vì indexer trễ là một `Ok` hợp lệ. Retry sau `Network` timeout (tx đã lên chuỗi) rơi đúng cửa sổ này thì mất nhánh no-op idempotent — thứ `Strata-API.md:502` ghi là **bắt buộc** |
+| `SeqGap.on_chain_seq: Option<u64>` không có đường tạo `None` | cùng tệp | Trường dành sẵn cho luật fail-đóng chưa vào. `#40` đang chốt hình dạng enum này lên spec ⇒ chốt kiểu ở đó trước thì rẻ hơn |
+| Ai mint thread-NFT, mint ở tx nào | hợp đồng doc của `read_anchor` | Ba gác chỉ sống nếu sau `submit_anchor` thành công thì `read_anchor` trả ứng viên **mang đúng token đã pin**. Trong kho này không có gì mint hay gắn token — `publish` chỉ đưa `datum`. `MockMosaic::read_anchor` tự gắn `self.token` cho mọi thứ nó lưu, nên bài kiểm **giả định sẵn** câu trả lời. Backend thật không gắn ⇒ `resolve()` trả `None` mãi ⇒ ba gác không bao giờ chạy, hỏng im lặng |
+| Hai gác mới trả `502 AnchorRejected` | `node/src/error.rs` | Cả hai bắn **trước** khi chạm backend, mà 502 nói "backend neo từ chối". `priority` lại đến từ **client** (`node/src/routes.rs:661`, `node/src/dto.rs:373-383`), nên câu "dùng backend Settlement" nói với client một việc chỉ người vận hành làm được. Đề nghị `NotConfigured`/501 hoặc một dòng riêng ở bảng §3.1 — đã hỏi ở #42 |
 
 Thứ tự land đã tuân: **#31 cuối** (vì secret chưa có), **#40 cuối nhóm spec** (vì phải phản ánh #42 và #48).
 
@@ -1114,7 +1125,15 @@ tra; hai bên giữ chung một bảng `did_hex : pubkey_hex` trao tay.* Bảng 
 nó có tên: điều kiện thu hồi của nó chính là PhoenixKey resolver cắm vào trait
 `KeyRegistry`.
 
-### 14.5 🔴 `strata-node` hôm nay là IN-MEMORY — và đó là dữ kiện của hợp đồng, không phải chi tiết cài đặt
+### 14.5 ~~🔴 `strata-node` hôm nay là IN-MEMORY~~ — **ĐÃ VÁ ở `#69`**, giữ lại làm hồ sơ
+
+> ⚠️ **Mục này mô tả trạng thái tới 2026-08-25 và KHÔNG còn đúng.** `#69` thay `ChainStore`
+> RAM thuần bằng **nhật ký ghi REQUEST** + replay qua đúng đường ghi — xem `§15`. Bảng
+> "cái mất khi tiến trình dừng" dưới đây vẫn đúng **về lý do** (on-chain chỉ có
+> `StrataAnchor` 104 byte, `state_root` một chiều), và chính lý do đó là thứ buộc `#69`
+> phải ghi **request** chứ không ghi **trạng thái**. Giữ lại vì nó là lập luận, không
+> phải một dòng trạng thái.
+
 
 `node/src/store.rs`: `ChainStore { refs: RwLock<HashMap<Hash32, Arc<Mutex<ChainEntry>>>> }`.
 Không có đường ghi xuống đĩa nào. Docstring của chính tệp ghi *"Bền vững (đĩa/Mirage) là
@@ -1202,12 +1221,12 @@ giữa một lỗi gõ và một lineage chết vĩnh viễn.
 | # | Mảnh | Trạng thái đo được | Hậu quả nếu đội OriLife không biết |
 |---|---|---|---|
 | 1 | `KeyRegistry` → PhoenixKey | 🔴 **stub** — `InMemoryRegistry` + env `STRATA_NODE_KEYS`, không route đăng ký | lượt gọi đầu tiên ăn `424`, và không ai đoán ra vì sao |
-| 2 | `ChainStore` → đĩa | 🔴 **stub** — RAM thuần | restart = mất hồ sơ cây |
-| 3 | `fields` → Mirage | 🟠 **stub** — byte nằm thẳng trong RAM (§8.4 nói bản thật giữ CID) | `prove_field` mất cùng lúc với (2) |
-| 4 | `canonicalize(DID)` | 🔴 **chưa có văn bản** — §14.4 | hai bên băm ra hai `Did` khác nhau ⇒ `424` hoặc, tệ hơn, hai `ref_id` cho một chủ |
-| 5 | 4 route `_canonical` `_dirty` `_anchor_batch` `_settlement_window` | 🔴 **không có chương nào trong `spec/Strata-API.md`** | đội tích hợp đọc spec sẽ **không thấy** đường đối chiếu byte tồn tại |
-| 6 | trường `salt` của field-proof | 🔴 **không có trong spec §3** | verifier bỏ qua ⇒ mọi proof đỏ khi bật blinding |
-| 7 | `Strata-Math §6.3` length-prefix | 🟠 mã **length-prefix**, spec `:292` viết **nối trần** | ai cài theo spec sẽ verify đỏ |
+| 2 | `ChainStore` → đĩa | ✅ **ĐÃ VÁ** (`#69`) — nhật ký ghi REQUEST, replay qua lõi | restart dựng lại đúng. Nợ còn lại: **nén/ảnh chụp**, có ngưỡng số ở `SEAM §17.6` |
+| 3 | `fields` → Mirage | 🟠 **stub** — byte nằm thẳng trong RAM (§8.4 nói bản thật giữ CID) | ~~mất cùng lúc với (2)~~ — nay dựng lại được qua replay; nợ còn lại là **kích thước**, không phải mất mát |
+| 4 | `canonicalize(DID)` | 🟡 **2/3 đã chốt** (`Specs#32` 2026-08-27): `blake2b_256(UTF-8(did))` không salt không domain-tag; xoay khoá **không** đổi `Did`. Câu 3 còn treo nhưng **không quan sát được** trong khuôn PhoenixKey — §17.2 | hai bên băm ra hai `Did` khác nhau ⇒ `424`; Strata bọc thêm `H_dom` là ra `Did` KHÁC |
+| 5 | 4 route `_canonical` `_dirty` `_anchor_batch` `_settlement_window` | 🟠 `#64` **mở**, chờ anh Đức merge phần chữ | đội tích hợp đọc spec **không thấy** `_canonical` tồn tại. Đường vòng: `scripts/orilife_handshake.py` |
+| 6 | trường `salt` của field-proof | 🟠 `#64` §3 **đã viết**, kèm vế CHẾ ĐỘ; chờ merge | verifier bỏ qua ⇒ không chỉ thiếu đầu vào mà **băm nhầm miền** (`#71`) |
+| 7 | `Strata-Math §6.3` | ✅ **ĐÃ VÁ** (`#71`, MERGED) — sai **hai** chỗ chứ không một: nối trần **và** chung tag | ai cài theo spec cũ thì verify đỏ; chung tag thì proof **khai sai vẫn xanh** |
 | 8 | beacon | 🟠 **TẮT** (`Specs#32`) — không ảnh hưởng OriLife | — |
 | 9 | `N-1` nhịp neo | 🟠 chưa ghim (chờ `Mosaic-Math`) — hồ sơ sản xuất `epoch 8 h / tuổi 24 h`, **24 h là trần cứng** | SLA neo chưa cam kết được bằng số |
 | 10 | mainnet | ⛔ **đóng** — `K-1`, chỉ Preprod | — |
@@ -1403,3 +1422,872 @@ fail** · fmt + clippy `-D warnings` sạch.
 | 3 | `fields` vẫn nằm **trong nhật ký**, chưa đi Mirage | §8.4 nói bản thật giữ CID. Hôm nay byte nằm cùng request đã ký ⇒ nhật ký mang cả dữ liệu riêng tư |
 | 4 | **Một tệp, một tiến trình** | không có khoá tệp: hai daemon cùng trỏ một nhật ký sẽ ghi xen kẽ và cả hai đều sai. Chưa gác |
 | 5 | Xoay khoá vẫn **phá** | §15.2 — nối vào nợ PhoenixKey của §14.4 |
+
+---
+
+## 16. Đường neo sản xuất đã **401 suốt 4 ngày** — và vì sao không ai thấy (`#70`)
+
+Phát hiện trong lúc dựng lượt chạy đầu-cuối *có lá* (`SEAM §16`). Không phải một lỗi
+mới viết ra: nó **đã sống trên `main` của cả hai kho** từ 2026-08-21.
+
+### 16.1 Mốc thời gian — đo bằng `git`, không bằng trí nhớ
+
+| Ngày | Việc | Cửa có gác chữ ký operator? |
+|---|---|---|
+| 08-15 | cửa `strata-anchor-batch` dựng (`Core#58`) | **không** |
+| 08-17 | `dfd242a` thêm gác — trên **nhánh** | không (chưa vào `main`) |
+| **08-20 17:02** | ✅ lượt chạy thật **lô LIÊN HỘ**, 3 tx Preprod (§12.8) | **không** |
+| **08-21 08:48** | `Core#96` merge ⇒ gác **vào `main`** | **có** |
+| 08-24 | hai đợt chạy thật — nhưng là luồng **checkpoint** | *(không đi qua cửa neo)* |
+| **08-25** | lượt chạy này | 🔴 **401** |
+
+⇒ Giữa mốc gác land và hôm nay, **không lượt chạy nào đi qua đường
+`Strata → cửa Mosaic`.** Hai đợt 08-24 đều đi đường Plutus của coordinator, một seam
+khác hẳn. Đường neo — đường **chính** của cả MB-6 — nằm hỏng bốn ngày.
+
+### 16.2 Hai lỗi, và lỗi THỨ HAI mới là lý do lỗi thứ nhất vô hình
+
+**Lỗi 1 — bên gửi không ký.** `MosaicDoorSubmitter::submit` gửi
+`{label, payload_cbor, ref_ids, beacon, network}`. Cửa đòi thêm `operator_vkey` +
+`operator_sig`, và `check_operator_signature` **từ chối `401`** khi thiếu — không có
+nhánh "coi như hợp lệ". Đo thẳng vào cửa, có đối chứng:
+
+```
+gửi lô KHÔNG chữ ký  → HTTP 401 {"error_kind":"Unauthorized",
+                                 "error":"thiếu hoặc sai chữ ký operator …"}
+gửi KHÔNG token      → HTTP 401 {"error_kind":"Unauthorized",
+                                 "error":"thiếu hoặc sai `Authorization: Bearer …`"}
+```
+
+*(Đối chứng thứ hai là phần bắt buộc: không có nó thì dòng đầu cũng đúng với một cửa
+từ chối mọi thứ vì lý do khác.)*
+
+**🪤 Lỗi 2 — `Unauthorized` bị gộp vào `NotConfigured`.** Bảng ánh xạ của bên gửi có:
+
+```rust
+Some("NotConfigured") | Some("Unauthorized") => AnchorError::NotConfigured,
+```
+
+Nên một cửa **401** hiện ra ở đầu Strata là:
+
+```
+HTTP 501  {"error":"AnchorNotConfigured","detail":{"detail":"daemon chưa cắm AnchorSink"}}
+```
+
+> Người vận hành đọc câu đó sẽ đi kiểm cấu hình sink — **đúng chỗ không có lỗi**. Còn
+> chỗ có lỗi thì không được nhắc tới một chữ.
+
+Hai trạng thái này khác hẳn nhau: `NotConfigured` là *ta chưa cắm gì*; `Unauthorized`
+là *ta đã cắm, đã gọi tới nơi, và bị **từ chối***. Gộp chúng làm mất đúng thông tin
+phân biệt được hai việc phải làm khác nhau.
+
+Và nó cộng dồn với một tính chất **cố ý** của cửa: cửa trả **một thông điệp chung** cho
+mọi đường hỏng của chữ ký (phân biệt "khoá lạ" với "chữ ký sai" biến cửa thành **máy dò
+allow-list**). Bên cửa im lặng có chủ ý là đúng — nhưng khi bên gửi cũng bóp méo nốt
+`error_kind` thì tín hiệu **mất cả hai chặng**.
+
+### 16.3 Bản vá — và ba chỗ suýt dựng sai
+
+| Vá | Nội dung |
+|---|---|
+| ký lô | `MOSAIC_DOOR_OPERATOR_SK` (hex 32 B seed ed25519); ký **sau** `encode_records`, trên **đúng byte gửi đi** |
+| fail-closed | có `MOSAIC_DOOR_URL` mà thiếu khoá ký ⇒ **không khởi động** (cùng khuôn gác token đã có) |
+| ánh xạ lỗi | `Unauthorized` ⇒ `Rejected` **giữ nguyên văn lời cửa nói**, kèm tên hai env phải kiểm |
+| chẩn đoán | in **`operator_vkey=…`** lúc khởi động — nó là khoá **công khai**, chính là thứ phải nằm trong allow-list của cửa |
+
+**Chỗ suýt sai thứ nhất — hai nguồn sự thật cho `network`.** Bản nháp đầu đọc
+`MOSAIC_DOOR_NETWORK` làm env **bắt buộc**. Nhưng `sink_config` **đã** phân giải mạng từ
+`STRATA_ANCHOR_NETWORK` để chọn endpoint Blockfrost. Mạng nằm **trong thông điệp được
+ký**, nên hai nguồn cho cùng giá trị = hai thông điệp cho cùng một lô, và triệu chứng là
+`401` không nói lý do. ⇒ Mạng thành **tham số** truyền xuống, env thứ hai bị bỏ đọc.
+
+**Chỗ suýt sai thứ hai — ký ở sai tầng.** Thông điệp phủ `payload`, mà `payload` chỉ tồn
+tại **sau** `encode_records`. Ký ở tầng trên là ký một byte khác byte gửi đi.
+
+**Chỗ suýt sai thứ ba — in khoá.** In `operator_vkey` nghe như rò rỉ. Nó là khoá **công
+khai**; thứ đắt ở đây là *không in* — người vận hành mất đường đối chiếu một chuỗi hex
+trước lượt neo đầu, và đường duy nhất còn lại là đọc một `401` cố ý câm.
+
+### 16.4 🔺 `operator_sig_message` là **bản sao của một định nghĩa sống ở kho khác**
+
+Đây là chỗ nguy hiểm nhất của bản vá, nên nó được ghi ra thay vì để ngầm: hàm này phải
+khớp **từng byte** với `Core: mosaic/l1/src/door.rs::operator_sig_message`.
+
+```text
+blake2b-256( "MOSAIC-STRATA-BATCH-v1" ‖ u8(len(net)) ‖ net
+             ‖ u64be(label) ‖ u8(beacon) ‖ u64be(len(payload)) ‖ payload )
+```
+
+Một bài kiểm chỉ so bản này với **chính nó** sẽ xanh vĩnh viễn kể cả khi hai bên đã
+lệch — **xanh giả**, và triệu chứng ngoài đời đúng là cái vừa xảy ra. Nên bộ kiểm ghim
+**5 vector sinh từ chính cửa**, cộng hai bài mà thiếu chúng thì vector cũng vô dụng:
+
+| Bài | Nó chặn |
+|---|---|
+| `thong_diep_ky_khop_tung_byte_voi_cua_mosaic` (5 vector) | hai bản lệch nhau |
+| `moi_dai_luong_deu_doi_thong_diep` | một bản **bỏ quên** `beacon`/`label`/`network` vẫn khớp 5/5 vector đã ghim |
+| `bien_giua_network_va_payload_khong_nhap_nhang` | mất length-prefix ⇒ `net="ab"‖payload="c"` = `net="a"‖payload="bc"` |
+
+**Bộ kiểm:** anchor-io 8 → **12** · node **19** (sink_config + ca âm thiếu khoá ký) ·
+workspace **260 pass / 0 fail** · fmt + clippy `-D warnings` sạch.
+
+### 16.5 Luật rút ra
+
+> **Một gác mới ở phía nhận là một thay đổi phá vỡ hợp đồng của phía gửi — kể cả khi
+> hai phía nằm ở hai kho và CI của cả hai đều xanh.**
+
+Cùng lớp với *"soát PR bằng cách GHÉP"*: chỗ hỏng nặng nhất nằm ở **mối nối**, và mối
+nối không thuộc bộ kiểm của bên nào. Ở đây nó còn thêm một tầng: bên gửi **bóp méo mã
+lỗi** của bên nhận, nên ngay cả một lượt chạy thật cũng chỉ ra một câu sai.
+
+Cái đã bắt được nó không phải một bài kiểm mới — mà là **chạy thật đường đó một lần**.
+
+---
+
+## 17. Phiên 2026-08-27 — miền băm `fvh`, và hợp đồng DID sau phản hồi của anh Đức
+
+> Nửa VeData của chương này (vận hành · runbook · ngưỡng) nằm ở
+> `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` **§17**. Chương này giữ phần
+> thuộc kho Strata: miền băm, schema dây, vector chung, và kịch bản bàn giao.
+
+### 17.1 🔴 `#71` — hai chế độ `fvh` đổ chung một miền
+
+`fval_hash` và `fval_hash_salted` dùng **chung** `TAG_STATE_FVAL`. Length-prefix của
+`#63` phân tách `salt` với `value` **bên trong** nhánh có salt; nó không phân tách
+**nhánh có salt với nhánh không salt**.
+
+```
+V = u32_be(|S|) ‖ S ‖ M        (không làm mù)
+fval_hash(V)  ==  fval_hash_salted(S, M)      ← trùng cả 32 byte
+```
+
+Người ghi cam kết `V`, rồi xuất `FieldProof` khai `salt = S, value = M`. `verify_field_proof`
+băm lại khớp, `state_root` khớp, đường anh em không đụng — **xanh**. Tức **đổi được lời
+khai về giá trị sau khi `state_root` đã nằm trong `version_hash` đã ký**, không cần va
+chạm băm, không cần khoá nào.
+
+Cùng lớp lỗi mà `nhap_nhang_bien_salt_value_bi_chan` đã chặn, lùi lên một bậc: chặn giữa
+hai **trường** thì được, giữa hai **chế độ** thì chưa.
+
+**Vá:** tag riêng `LN/STRATA/state/fval/salted/v1`. Nhánh không salt giữ tag cũ ⇒ trùng
+từng bit, không `state_root` đã ký nào phải tính lại.
+
+**Soát trước khi merge** — dựng lại lỗ độc lập (tự nối `V`, không gọi `fval_hash_salted`
+để sinh nó): trùng `2f4ddaa3b1b3a497…`. Đảo mã một dòng: cả hai PoC **đỏ**. Ba gác CI
+chạy tại máy — `262 pass` (workspace) · `fmt` sạch · `clippy` 0.
+
+**Bán kính vụ nổ = 0 trên ba kho** (câu anh Đức để ngỏ trong `#71`):
+
+| Kho | Kết quả |
+|---|---|
+| `Strata` đường **ghi** | `node/` chưa bao giờ dựng `SaltedField`; không route nào nhận `salt` |
+| `VeDataIO/Core` | 0 chỗ tính `fvh` |
+| `OriLifeTrace/OriLife-Core` `strata_client.py` | chỉ cài đường **không salt** |
+
+🪤 Lần grep đầu trỏ vào `src/node/` — **thư mục không tồn tại**, nên "0 hit" là **rỗng
+giả**. Vùng đúng là `node/` + `anchor-io/`. Kết luận không đổi; đường tới nó thì suýt sai.
+
+### 17.2 🔴 `§3` của `#64` lệch mã ba chỗ — và một trong ba là an toàn
+
+| | `§3` viết | Mã | Hỏng kiểu gì |
+|---|---|---|---|
+| tag | một | **hai**, chọn theo `salt` rỗng hay không | băm **nhầm miền** |
+| prefix `salt` | `len(salt)` | `u32_be(len(salt))` 4 byte BE | lệch byte nếu cài 1-byte/varint |
+| prefix `value` | `len(value)` | **không có** | thêm vào là **đổi byte** |
+
+Anh Đức xếp chỗ thứ ba là *"không phải lỗi an toàn — `value` là phần còn lại nên biên
+vẫn xác định duy nhất"*. Đúng, nhưng nó vẫn làm **mọi proof có salt đỏ** ở phía client
+trong khi nhìn từ server không có gì sai — nên hậu quả vận hành giống hệt hai chỗ kia.
+
+`§3` nay là bảng hai dòng + ba chi tiết dễ chép sai. Đoạn *"`salt` LUÔN có mặt"* cũng
+sửa: `salt` không phải một **đầu vào** của một phép băm — nó **chọn chế độ**.
+
+### 17.3 🟠 `#72` — chế độ phải NHÌN THẤY ĐƯỢC từ ngoài
+
+`#71` vá lõi; `OriLife-Core` không đọc lõi. Hai chỗ họ **thật sự** đọc vẫn dạy công thức cũ:
+
+| Chỗ | Vấn đề |
+|---|---|
+| `node/src/dto.rs:324` — chú thích `salt` của `FieldProofResp` | viết *"băm `salt ‖ value`"* — sai **hai lần** sau `#71` |
+| `apis/canonical-core-vectors.json` | không có `tag_fval_salted`, không có quy tắc chọn chế độ |
+
+🔺 **Vì sao vector thuận không đủ.** Mọi vector thuận đi **một chiều**: tính `fvh` từ
+`(salt, value)`. Một bản cài dùng **chung** một tag vẫn khớp **toàn bộ** vector thuận —
+không ca nào phát hiện hai miền đã chồng lên nhau. Phải có **đối chứng âm**:
+
+```
+NC1  fvh_salted(S, M) ≠ fvh_khong_salt(u32_be(|S|) ‖ S ‖ M)   ← khai thác của #71
+NC2  fvh_salted("ab","c") ≠ fvh_salted("a","bc")              ← biên salt/value
+```
+
+Hai chi tiết cố ý:
+
+- **`V` dựng lại trong test**, không đọc từ file — đọc từ file thì ai sửa `V` trong JSON
+  là biến đối chứng thành trang trí mà vẫn xanh;
+- `NC2` kèm khẳng định phụ rằng hai cặp **nối trần ra cùng một chuỗi** — thiếu nó thì
+  `NC2` xanh vì hai cặp vốn khác nhau, chứ không phải vì length-prefix có tác dụng.
+
+Bốn ca thuận: `M1` salt rỗng (phải trùng **bit** đường cũ) · `M2` salt 30 B · `M3` salt
+**1 byte** (bắt bản cài dùng 1-byte length thay `u32_be`) · `M4` value **rỗng** (bắt bản
+cài tự thêm `len(value)` cho "đối xứng").
+
+Đảo mã hai mũi, cả hai làm cả hai test mới **đỏ**. Diff tệp vector **+16/−0** — bằng
+chứng đường cũ không đổi một byte. `264 pass` · `fmt` sạch · `clippy` 0.
+
+### 17.4 🟠 Hợp đồng `Did` — ba điều đã chốt
+
+**(1)** `Did = blake2b_256(UTF-8(did))` — **không** salt, **không** domain-tag
+(`PhoenixKey-Anchorme-Tech.md:68` → `phoenix_address.rs:52`). Khác quy ước `H_dom` của
+Strata **có lý do**: khớp quy ước gốc bên PhoenixKey.
+
+⚠️ **Strata bọc thêm `H_dom` là ra một `Did` KHÁC** cho cùng một người — và không lỗi nào
+bật ra, chỉ `424 UnknownAuthor` mãi mãi.
+
+**(2)** Xoay khoá **không** đổi `Did` (`:147` — `Rotate` đổi `new_controller_pkh` /
+`new_hw_pubkey`, không đụng chuỗi DID). Lineage cũ **không đóng băng**.
+
+⇒ **Ràng buộc lên trait `KeyRegistry`**, ghi ngay dù resolver chưa cắm:
+
+> `resolve(did, at_ts)` **PHẢI** trả khoá công khai **có hiệu lực tại `at_ts`**, không
+> phải khoá hiện hành. Bản cài chỉ giữ khoá mới nhất là **không hợp lệ** — nó chạy đúng
+> tới đúng lần xoay đầu tiên, rồi **mọi version ký bằng khoá cũ verify hỏng**, và hỏng
+> lúc có người đi kiểm một proof cũ chứ không lúc xoay.
+
+`InMemoryRegistry` hôm nay giữ **một** khoá mỗi `Did` và **không** nhận `at_ts`. Stub đó
+hợp lệ trong giai đoạn này vì chưa có lượt xoay nào; điều kiện thu hồi gắn với **lượt
+xoay đầu tiên**, không gắn với lịch.
+
+**(3)** Proof/field phải cho verifier biết **chế độ** — đã dựng ở §17.3.
+
+### 17.5 ❓ Câu 3 của `canonicalize(DID)` — thư PhoenixKey ĐÃ VỀ
+
+Thư về từ **2026-07-30**:
+`OriLifeTrace/OriLife-Core: _Agents/inbox/_done/Phoenix-reply-did-canonical-158-2026-07-30.md`,
+ghim trong `MassTreeIdentify/core/test_strata_client.py` (`#159`).
+
+- PhoenixKey grep `author_did`/`authorDid` **toàn kho** = **0 hit** ⇒ bên đó **không có
+  khái niệm `author_did`** để cấp vector;
+- phần 64-hex của `did:phoenix` sinh từ `random256` ⇒ **không tất định**, không có bảng
+  *"input → DID"*;
+- thứ thư **có** cấp: 2 DID thật + **khuôn chặt** + xác nhận **không tầng nào
+  normalize/hạ-case** DID.
+
+```
+^did:phoenix:[a-z2-7]{13}:[0-9a-f]{64}$
+```
+
+🔺 **Trong khuôn đó, cả bốn câu treo KHÔNG quan sát được.** Đo: **20 000** DID sinh ngẫu
+nhiên đúng khuôn qua `NFC`/`NFKC`/`NFD`/`NFKD` + hạ-thường ⇒ **0 chuỗi lệch byte**; `%`
+và `#` **không lọt** khuôn. Đối chứng để phép đo không rỗng: DID **ngoài** khuôn
+(`did:phoenix:nông-dân:sầu-riêng`) thì `NFC` vs `NFD` **lệch byte thật**.
+
+⇒ Đề xuất (**không** phải chốt của kho này): thay quyết định chuẩn-hoá bằng một **cổng
+khuôn**. Trong khuôn thì chốt thế nào cũng ra cùng `Did`; ngoài khuôn thì lệch quan sát
+được ngay, và `ref_id = H_dom(author_did ‖ genesis_nonce)` một chiều nên **không có đường
+lui**.
+
+⚠️ **Chỗ không tự hoà giải:** anh Đức dẫn `did_hash` từ `phoenix_address.rs:52`; thư
+PhoenixKey nói bên đó **không có** khái niệm `author_did`. Có thể `did_hash` là hàm nội
+bộ dẫn **địa chỉ**, không phải đại lượng Strata gọi là `Did`. Nếu **cùng tên khác nghĩa**
+thì chỗ nó lộ ra là `424`, không phải lỗi build. Câu cần đóng: **`did_hash` ở
+`phoenix_address.rs:52` có cùng đại lượng với `Did` của Strata không?**
+
+### 17.6 🟡 Gói bàn giao — `scripts/orilife_handshake.py`
+
+Python 3.9+ **stdlib thuần**, ba bước, dừng ở bước đầu tiên hỏng.
+
+```
+python3 scripts/orilife_handshake.py --did did:phoenix:… --pubkey <hex64> \
+    [--url http://127.0.0.1:6690] [--canonical-core <hex bản mình dựng>]
+```
+
+| Bước | Làm gì |
+|---|---|
+| 1 | **cổng khuôn** DID + báo đúng dạng chuẩn-hoá nào đổi byte |
+| 2 | dẫn `author_did`, in sẵn dòng `STRATA_NODE_KEYS` (`did_hex32:pubkey_hex32`) |
+| 3 | `POST /_canonical`, so **BYTE** với bản bên gọi tự dựng; lệch thì chỉ **offset đầu tiên** + cửa sổ ±16 B |
+
+Đã chạy thật cả bốn nhánh trong phiên: đúng khuôn (sạch) · ngoài khuôn (kêu đúng
+`NFD`/`NFKD`) · `canonical_core` khớp (**148 B**, đúng `148 + len(content_cid)`) · lệch
+**1 nibble** (chỉ ra **offset 50**).
+
+🪤 Lượt thử đầu của nhánh *"khớp"* lại báo **LỆCH**, dài `155 B` thay vì `148 B` — không
+phải kịch bản sai mà **mẫu trích quá rộng** (`grep canonical_core` bắt luôn dòng tiêu đề).
+Neo mẫu thì đúng ngay. Cùng họ với chỗ grep vào thư mục không tồn tại ở §17.1; luật ở
+`Core: docs/VEDATA-ANCHOR-RUNBOOK.md §11.3`.
+
+🔺 **Dữ kiện xếp thứ tự, đo được:** `_canonical` **không** tra key-registry — daemon với
+**0 khoá** vẫn trả `200`. Nên hai mảnh bàn giao **độc lập**: OriLife khớp byte layout
+**trước khi** bảng khoá trao xong. Xếp nối đuôi là tự thêm một tuần chờ.
+
+🔺 **Xin chuỗi DID, KHÔNG xin băm.** `STRATA_NODE_KEYS` nhận `did_hex32`, nhưng nếu
+OriLife gửi thẳng băm thì phép dẫn xuất **không kiểm được** — hàm một chiều, sai thì nằm
+im tới `424`. Xin cả hai ⇒ băm thành **tổng kiểm** cho chuỗi.
+
+| Cột | Ai điền | Vì sao |
+|---|---|---|
+| `did` chuỗi đầy đủ | OriLife | thứ **duy nhất** kiểm được; qua cổng khuôn §17.5 |
+| `pubkey_hex` Ed25519 32 B | OriLife | vào registry |
+| `author_did_hex` | OriLife | **tổng kiểm** — VeData dẫn lại và so, lệch ⇒ dừng |
+| ghi chú | OriLife | người/thiết bị giữ khoá, để lượt xoay sau truy được |
+
+**Một đối chiếu ngoài dự tính:** `author_did` kịch bản dẫn ra cho
+`did:phoenix:nông-dân:sầu-riêng` (NFC) là `cd70bf3c01bc4f7ba3ceb09513938ae4067d2942…` —
+**trùng khít** vector `V3` đông lạnh trong `test_strata_client.py` của `OriLife-Core`.
+Hai bản cài độc lập, hai ngôn ngữ, cùng một số. Đường dẫn xuất `Did` đã khớp trước khi
+ai nối dây.
+
+### 17.7 ✅ Lượt bắt tay kỹ thuật ĐÃ MỞ — `OriLife-Core#450`
+
+`#72` **MERGED** vào `main` (`3dc0d68`) trước khi mở thư, để `scripts/orilife_handshake.py`
+và `apis/canonical-core-vectors.json` lấy được từ `main` chứ không từ một nhánh có thể
+biến mất. Gác trên `main` sau merge: **264 pass / 0 fail** · `fmt` sạch · `clippy` **0**.
+
+**Luận điểm của thư:** lượt này **không đốt một quyết định một chiều nào** — không tạo
+`ref_id`, không ký, không ghi lineage. Sai thì chạy lại. Nên nó **không phải chờ** hai
+chỗ còn treo.
+
+**Thứ tự chạy hai lượt, và vì sao thứ tự đó có lý do:**
+
+| Lượt | `state_fields` | Đo cái gì | Cần gì |
+|---|---|---|---|
+| 1 | **RỖNG** | thuần **byte-layout TLV** — `state_root` = 32 byte `00` (`S1-empty`), **không phép băm nào** | không `blake3`, không `PinnedHasher` |
+| 2 | có trường | tới `state_root` | `blake3` |
+
+Tách được *"layout của mình sai"* khỏi *"`state_root` của mình sai"* — **hai lỗi cho cùng
+một triệu chứng `403 BadSignature`**, và `403` không nhắc một chữ nào tới `state_root`.
+
+**Ba phát hiện gửi kèm, đều đo được:**
+
+1. 🔺 **Thứ họ đang xin thì đã có.** Header `strata_client.py` còn ghi *"đang xin Strata
+   một vector `state_root`"* để khoá cách mã hoá `content_cid`. Vector `S6-cid-value-32B`
+   vào fixture từ **2026-08-13** (`0be9452`), ghi thẳng *"câu trả lời cho `OriLife-Core#161"*;
+   `#161` cũng đã đóng **08-15**. Chú thích của họ **cũ hơn** thứ họ cần.
+2. 🔺 **Bảng khoá chỉ cần MỘT dòng.** Anh Đức chốt ở `OriLife-Core#151` (**08-07**): server
+   **không giữ khoá nông dân** (PhoenixKey sinh trắc, on-device) ⇒ **khoá ký = nền tảng
+   (notary)**, `author_did` mức platform; quyền sở hữu đi qua **`owner_did` = state-field
+   CÓ KÝ**. Đây là chỗ em suýt báo nhầm thành "đang chặn" — nó đã chốt từ 7 tuần trước.
+3. 🔺 **`#71` không trừu tượng — nó ngồi đúng dưới lời khai sở hữu.** `owner_did` là
+   state-field ⇒ **field-proof trên `owner_did` chính là thứ chứng minh quyền sở hữu từng
+   nông dân với bên thứ ba**. Với tag dùng chung, người ghi cam kết `V` rồi khai một
+   `owner_did` **khác** mà proof vẫn xanh. Vá xong **trước** khi tồn tại lineage thật nào.
+
+**Nghiệm thu đề nghị — ba dòng:** `canonical_core` rỗng trùng byte · `canonical_core` có
+trường trùng byte · `author_did` hai bên trùng. Dòng thứ ba **đã có sẵn một điểm đối
+chiếu**: `cd70bf3c…` khớp vector `V3` đông lạnh của họ.
+
+**Hai chỗ chặn `lineage` thật, nói thẳng trong thư:** `did_hash` ↔ `Did` chưa đóng
+(§17.5) · `owner` chưa truyền xuống `try_shadow_write` ⇒ `owner_did` **chưa tồn tại trong
+bản ghi**, nối bây giờ thì các version đầu không mang chủ sở hữu.
+
+**Nêu kèm, không thuộc phạm vi thư:** `OriLife-Core#276` (ghi `confirmed` ngay lúc node
+nhận tx — đo lệch **108 giây**) và `#423` (`strata_doi_chieu` kết luận `khop` khi **không
+có mảnh bằng chứng Cardano nào**). Cả hai làm **lời khai đầu ra** mạnh hơn bằng chứng —
+chúng quyết *"nối xong thì mình nói được câu gì"*.
+
+**Một câu hỏi mở gửi họ:** `genesis_nonce` bên họ dùng tag `LN/STRATA/extkey/v1`. Grep
+toàn kho Strata (`spec/` `src/` `node/` `anchor-io/`) hôm nay: **tag đó không tồn tại**.
+Hôm nay vô hại (`genesis_nonce` do họ tính, Strata không tính lại), nhưng nó là một tag
+đặt trong **namespace của người khác** — ngày Strata định nghĩa đúng chuỗi ấy theo nghĩa
+khác thì thành **một tên, hai định nghĩa**, và chỗ lộ ra là `ref_id` lệch, không phải lỗi
+biên dịch. Không đề nghị đổi (đổi tag = đổi `ref_id`); hỏi có nên ghi nó vào bảng §2.1
+như một mục dành cho bên tiêu thụ.
+
+### 17.8 "Neo dữ liệu on-chain" — *dữ liệu* ở đây là gì
+
+> Bản đầy đủ nằm ở **chương này** (cùng quy ước với §14: bản đầy đủ ở kho Strata, kho
+> `Core` giữ nửa của nó). Nửa VeData — việc phán đúng-sai thuộc module nào — ở
+> `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md` **§17.12**.
+>
+> Đã gửi `OriLifeTrace/OriLife-Core#450`. Viết ra vì nó quyết hai thứ rất thực tế cho đội
+> tích hợp: **cái gì lộ ra công khai vĩnh viễn**, và **nối xong thì nói được câu gì với
+> người mua**.
+
+#### Câu ngắn: dữ liệu KHÔNG lên chuỗi
+
+Cái lên chuỗi là một chuỗi **cam kết** — mỗi cái 32 byte băm. Với một cây, tất cả gói
+trong **104 byte**.
+
+#### Thứ thật sự nằm trong giao dịch
+
+`StrataAnchor` — 4 trường, đúng **104 byte** (`src/chain.rs:100`):
+
+| Trường | Byte | Là gì |
+|---|---|---|
+| `ref_id` | 32 | định danh ổn định của **một cây** |
+| `head_version_hash` | 32 | băm của **bản ghi mới nhất** |
+| `mmr_root` | 32 | cam kết **toàn bộ lịch sử** bản ghi của cây đó |
+| `seq` | 8 | số thứ tự bản ghi — chống tụt lùi |
+
+Lô liên hộ 08-25 (`35a0bb44…`) mang **6 anchor** ⇒ tổng **624 byte** trên chuỗi, phí
+`0,223385` tADA. Không mã cây, không tên nông dân, không ảnh, không ngày phun thuốc —
+**không một byte dữ liệu thật nào**. Đây cũng là câu trả lời cho lo ngại lộ dữ liệu: thứ
+công khai vĩnh viễn là **hash**, không phải nội dung.
+
+#### Dữ liệu thật nằm ở đâu — ba tầng, tất cả NGOÀI chuỗi
+
+| Tầng | Chứa gì | Ở đâu |
+|---|---|---|
+| bản ghi (`StrataVersion`) | `seq · prev_hash · content_cid · state_root · author_did · policy_hash · ts` + chữ ký | `strata-node`, nhật ký trên đĩa |
+| trường có cấu trúc | *"đã phun thuốc: có"*, *"giai đoạn: ra hoa"*, `owner_did`… | cùng chỗ (sau đi Mirage) |
+| nội dung nặng | ảnh, tệp, hồ sơ | Mirage (kho nội-dung-địa-chỉ của LampNet, `lamp://CID` — `MODULES.md §2.1`), bên gọi đẩy lên và trỏ tới bằng `content_cid` |
+
+Dòng thứ ba là một giới hạn của phép neo, nên ghi ra số đo (đối chứng dương: 18 hit
+`content_cid` ở `src/version.rs`):
+
+| Kiểm | Kết quả |
+|---|---|
+| Strata fetch/giải `content_cid`? | không — 0 dòng `lamp://` · `resolve_cid` · `fetch_cid` trong `src/` `node/src/` `anchor-io/src/` |
+| Gác nào trên `content_cid` ở đường ghi? | không — không kiểm độ dài, không kiểm dạng |
+| Ai đẩy blob lên Mirage? | `src/batch.rs:288`: *"blob + `content_cid` do caller đẩy Mirage"* |
+
+Với Strata, `content_cid` là `Vec<u8>` mờ: length-prefix rồi băm vào `canonical_core`.
+Một CID trỏ vào chỗ trống vẫn neo được — tx lên chuỗi, `resolve()` khớp, proof xanh, mà
+nội dung có thể không tồn tại. Giữ blob thật sự nằm ở Mirage là nghĩa vụ của bên gọi.
+
+#### Thứ được KÝ — `148 + len(content_cid)` byte
+
+```
+seq(8) ‖ prev_hash(32) ‖ len(content_cid)(4) ‖ content_cid(n)
+       ‖ state_root(32) ‖ author_did(32) ‖ policy_hash(32) ‖ ts(8)
+```
+
+Cũng **không** phải dữ liệu — là bảng tóm tắt bằng hash. `state_root` là gốc cây Merkle
+**trên các trường**: mỗi trường thành `fvh = H_dom(tag, giá_trị)` rồi gộp lên ⇒ **mọi
+trường của cây tại một thời điểm nén thành 32 byte**.
+
+#### Cái thang, từ một trường lên tới chuỗi
+
+```
+"đã phun thuốc: có"
+   → fvh             (băm một trường)
+   → state_root      (cây Merkle trên mọi trường của bản ghi)
+   → version_hash    (băm cả bản ghi — thứ OriLife KÝ)
+   → mmr_root        (cây trên toàn bộ lịch sử bản ghi của cây đó)
+   → StrataAnchor    (104 byte) → Cardano, nhãn 1234
+   → checkpoint root (cây trên mọi anchor trong một cửa sổ slot)
+```
+
+Mỗi bậc là một hàm **một chiều**. Đi lên rẻ; đi xuống không đi được.
+
+#### Neo chứng minh được gì — và KHÔNG chứng minh gì
+
+- ✅ *"Bản ghi này đã tồn tại **trước** slot 131977151"* — chuỗi Cardano làm chứng.
+- ✅ *"Nội dung nó **chưa từng bị sửa**"* — đổi một byte thì `version_hash` đổi, không
+  khớp thứ đã neo.
+- ✅ *"Trường `đã phun thuốc` có giá trị **X**"* — bằng **field-proof**: đưa giá trị +
+  đường anh em, người kiểm dựng lại `state_root` rồi so với thứ đã neo. **Không phải lộ
+  các trường khác.**
+- ❌ **Không** chứng minh giá trị đó **đúng sự thật**. Chuỗi chỉ chứng minh *"đã khai như
+  vậy, từ lúc đó, và chưa sửa"*.
+- ❌ **Không** chứng minh nội dung nặng còn tồn tại — `content_cid` là byte mờ với Strata,
+  không kiểm và không fetch.
+
+🔺 **Ranh giới đáng nhớ nhất:** neo on-chain biến một lời khai thành lời khai **KHÔNG CHỐI
+ĐƯỢC**, chứ không biến nó thành lời khai **ĐÚNG** — và `Strata` với `Mosaic` đang làm
+**đúng** nhiệm vụ của mình. Việc đánh giá **tính đúng đắn** thuộc module **`Score`**
+(`MODULES.md §1.3`: *"tính `V(r) ∈ [0,1]`"* là **trách nhiệm DUY NHẤT**). Chi tiết ranh
+giới module ở `Core §17.12`.
+
+#### Vì sao mục này dính thẳng tới `#71`
+
+Field-proof là **cách duy nhất** một trường dữ liệu thật được đối chiếu với thứ đã neo.
+Lỗ chung-tag cho phép cam kết một đằng rồi khai một nẻo mà proof **vẫn xanh** — tức phá
+đúng vế ✅ thứ ba ở trên. Và theo kiến trúc chốt ở `OriLife-Core#151`, `owner_did` đi
+**bằng chính đường đó**. Nói cách khác: `#71` không phải một lỗi mật mã trừu tượng — nó
+ngồi đúng dưới câu *"cây này của nông dân nào"*.
+
+### 17.9 Cột "Ở đâu" của tầng bản ghi — `strata-node` + nhật ký là MỘT TỆP TRÊN MỘT MÁY
+
+Bảng §17.8 ghi tầng bản ghi nằm ở *"`strata-node`, nhật ký trên đĩa"*. Câu đó đúng nhưng
+gọn quá, và phần bị gọn mất lại là phần một đội tích hợp sẽ hỏi ngay khi dữ liệu là của
+khách hàng họ. Ghi ra cho đủ.
+
+> **Chồng lấn có chủ ý với §15.9.** §15.9 đã liệt các chỗ hở của chính cài đặt nhật ký
+> (mục 2 nén/ảnh chụp · mục 3 `fields` còn nằm trong nhật ký · mục 4 một-tệp-một-tiến-trình,
+> *"chưa gác"*). Mục này **không** thay nó — nó trả lời một câu khác: **cột "Ở đâu" nghĩa
+> là gì trên thực địa**, và cái đó đã chống được / chưa chống được những ca nào. Sửa một
+> bên thì soát bên kia.
+
+#### Theo nghĩa đen
+
+`strata-node` là **một binary Rust** chạy trên **một máy**, nghe HTTP ở `127.0.0.1:6690`
+— một trong ba tiến trình do VeData vận hành (§14.1). Nhật ký là **một tệp JSON-lines**,
+append-only, đường dẫn do `STRATA_NODE_JOURNAL` khai. Runbook §4 đặt nó ở
+`$HOME/vedata-node/strata-journal.jsonl`, nhưng đó là **khuyến nghị vận hành**, không phải
+hằng trong mã.
+
+Tệp mới sinh có đúng một dòng — chạy thật để lấy, không mô tả suông:
+
+```json
+{"op":"header","format":1}
+```
+
+Năm loại bản ghi: `header` · `create` · `append` · `audit` · `anchor`. Ba loại giữa mang
+**nguyên văn request** của client (`CreateReq` / `AppendReq` / `AuditEventReq`); `anchor`
+mang `ref_id ‖ seq ‖ txid ‖ backend`, ghi **sau** khi chuỗi trả biên nhận.
+
+Không phải cơ sở dữ liệu, không phải dịch vụ lưu trữ, không phải chuỗi.
+
+#### Cái nó ĐÃ chống được — đo trên mã, không nhớ
+
+| Ca | Chống được? | Bằng gì |
+|---|---|---|
+| tiến trình chết / restart | ✅ | replay chạy lại **đúng đường ghi** (`#69`) |
+| máy mất điện giữa lượt ghi | ✅ | `sync_data()` trước khi trả về (`journal.rs:134`, `:171`). Docstring nói thẳng lý do: thiếu nó thì *"đã ghi"* chỉ có nghĩa *"đã nằm trong cache của hệ điều hành"* — đúng thứ biến mất trong chính ca mà nhật ký sinh ra để sống sót |
+| tệp bị sửa (đĩa hỏng / tay người) | ✅ | chữ ký đỏ hoặc hash-link đứt ⇒ **daemon không khởi động**, chứ không phục vụ lịch sử giả |
+| một lượt ghi đĩa hỏng | ✅ | nhật ký **tự đầu độc** ⇒ đường ghi đóng, cửa trả `503`; đường đọc vẫn phục vụ |
+
+#### Cái nó CHƯA chống được
+
+Đo bằng grep có đối chứng dương (vùng tìm thật — `sync_data` khớp ở cùng vùng):
+
+| Thiếu | Đo | Hậu quả |
+|---|---|---|
+| **khoá tệp** | 0 dòng `flock` · `fcntl` · `lock_file` · `O_EXCL` trong `node/src/` `src/` (đã loại `Mutex`/`RwLock` là khoá trong-tiến-trình) | **hai daemon trên cùng một nhật ký thì cả hai đều sai**, và không có gì báo. Runbook §10 liệt vào mục "không được làm" — nhưng đó là kỷ luật người vận hành, không phải một gác |
+| **sao lưu / nhân bản** | 0 cơ chế trong mã | **ổ đĩa hỏng = mất hồ sơ cây**, và **không dựng lại được từ chuỗi**: on-chain chỉ có `StrataAnchor` 104 byte, `state_root` là hàm một chiều |
+| **nén / xoay vòng** | 0 cơ chế | nhật ký tăng tuyến tính không trần — ngưỡng phải hành động ở `Core: RUNBOOK §12` |
+
+#### Phát biểu cho đúng mức
+
+`#69` giải quyết *"restart thì mất dữ liệu"*. Nó **không** giải quyết *"ổ đĩa đó hỏng"* —
+và hai câu đó khác nhau ở chỗ câu sau **không có đường lui**.
+
+Nên hồ sơ cây hôm nay sống ở **một tệp trên một máy**, có `fsync` nhưng không có bản thứ
+hai. Với một lượt chạy thử trên Preprod thì chấp nhận được; với dữ liệu của khách hàng
+thật thì đây là câu phải trả lời **trước** khi nhận dữ liệu, không phải sau.
+
+Đo hiện trạng lúc viết (2026-08-28): **không có tiến trình `strata-node` nào đang chạy**,
+và `~/vedata-node/strata-journal.jsonl` **chưa tồn tại** — các lượt chạy thật trước đây
+dựng nhật ký theo từng lượt rồi kết thúc. Chưa có triển khai thường trực nào.
+
+#### `fields` còn trong nhật ký — và khung đúng để nói về nó
+
+`§15.9` mục 3: `fields` chưa đi Mirage, nên tệp `.jsonl` chứa **giá trị trường thật**
+(*"đã phun thuốc: có"*, `owner_did`), không phải chỉ hash.
+
+Khung đúng, và nó rộng hơn một mình Mirage: **LampNet (Đạt) và PhoenixKey (anh Tuân) đều
+là nền của đội khác, đã phát triển tương đối, và phần còn lại là VeData ráp vào sau.**
+Đây là **tích hợp chưa tới ở phía mình**, không phải sơ suất và cũng không phải bên kia
+chậm. Đừng viết chúng như lỗi.
+
+🪤 **Một chỗ chương này từng viết SAI, giữ lại làm bài học.** Bản trước ghi *"LampNet chưa
+có cả spec kỹ thuật"*, suy từ dòng `MODULES.md §2.1`: *"Tham chiếu kỹ thuật:
+`Specs/LampNet-*.md` (chưa viết)"*. Suy vậy là **sai vùng**: dòng đó chỉ nói **kho `Specs`
+của VeData** chưa có tài liệu tham chiếu về LampNet. Nó **không nói gì** về mức phát triển
+của chính LampNet — thứ nằm ngoài tầm nhìn của kho này (org `LampNetCloud` lộ ra với
+VeData chỉ gồm `Strata` · `Spectra` · `Anchor` · `Cnode` · `lampnet-sdk`).
+
+*Vắng một tài liệu trong kho CỦA MÌNH không phải bằng chứng về trạng thái của hệ NGƯỜI
+KHÁC.* Cùng họ với luật vùng-tìm-phải-đóng ở `Core: RUNBOOK §11.3`.
+
+Trạng thái đúng của bốn hệ con LampNet, xét theo **đã ráp vào đường neo hay chưa** —
+không phải theo mức trưởng thành của chúng:
+
+| Hệ con LampNet | Vai trò | Đã ráp vào đường neo? |
+|---|---|---|
+| **Mirage** | kho nội-dung-địa-chỉ (`lamp://CID`) | chưa — `fields` còn nằm trong nhật ký |
+| **Cave** | TEE attestation | chưa |
+| **Splash** | tính toán phân tán | chưa |
+| **Strata** | chuỗi phiên bản có thứ tự | ✅ đã — chính kho này |
+
+#### Chỗ theo dõi
+
+| Chỗ hở | Issue |
+|---|---|
+| khoá tệp | `LampNetCloud/Strata#73` |
+| chỗ chạy thường trực + sao lưu | `VeDataIO/Core#129` |
+| nén / ảnh chụp | ngưỡng ở `Core: RUNBOOK §12` |
+| `fields` → Mirage | chờ Mirage, cùng nhịp PhoenixKey |
+
+---
+
+## 18. Phiên 2026-08-31 — hai mục đỏ đều bị chặn, và một bức tường thứ hai chưa ai đếm
+
+Phiên này mở ra để chạy **lượt nối thật đầu tiên**: một cây đi trọn `OriLife-Core` →
+`strata-node` → cửa neo → checkpoint, rồi dựng lại từ chuỗi. Cả hai điều kiện tiên quyết
+đo ra là **chưa đạt**, nên không lượt nối nào chạy. Chương này ghi cái đo được.
+
+### 18.1 Trạng thái đo hôm nay — đo, không nhớ
+
+| Mục | Đo được | Nguồn |
+|---|---|---|
+| `OriLife-Core#450` — họ chạy lượt 1/2 chưa | **chưa**; hai comment duy nhất trên issue đều của bên mình (08-28) | `gh api .../issues/450/comments` |
+| cặp `did:pubkey` nền tảng | **chưa gửi** ⇒ `STRATA_NODE_KEYS` không có gì để cắm | cùng trên |
+| `Specs#32` — `did_hash` ↔ `Did` | **chưa đóng**; comment cuối là của bên mình 08-27, anh Đức chưa trả lời | `gh api .../Specs/issues/32/comments` |
+| `Strata#64` — phần chữ | **chưa merge**; comment cuối 08-29 của bên mình | `gh api .../pulls/64` |
+| `Strata#73` — khoá tệp | mở, **0 comment** — chưa có hướng | `gh api .../issues/73/comments` |
+| `Core#129` — chỗ chạy + sao lưu | mở, **0 comment** — chưa ai nhận | `gh api .../Core/issues/129/comments` |
+| `OriLife#276` — `confirmed` sớm | **mở**; `anchor_queue.py` vẫn ghi `confirmed` ngay khi có `tx_hash`, không đếm xác nhận nào | `anchor_queue.py:588`; grep `confirmations\|block_height` = 0 |
+| `OriLife#423` — `khop` khống | ✅ **đã vá thật**, đóng 08-27 không comment | `strata_doi_chieu.py:185-190` |
+| CI kho này | **67/67 hỏng**, vẫn chưa từng xanh; kho có **0 secret** | `gh run list --limit 100` |
+
+⇒ `🔴 1` (cắm khoá) và `🔴 2` (lượt nối thật) **cùng bị chặn ở phía ngoài kho này**.
+Không có việc gì bên mình làm được để gỡ; phiên chuyển sang các mục còn lại.
+
+### 18.2 `#423` đã vá thật — đo chứ không tin nhãn "completed"
+
+Issue đóng `state_reason: completed`, **không một comment nào**. Theo lệ *"Đức trả lời bằng
+CODE không bằng chữ"*, đo bản vá thay vì tin nhãn:
+
+```
+strata_doi_chieu.py:47    KHOP = "khop"
+strata_doi_chieu.py:177   không lệch, có cặp CARDANO "khop"      → "khop"
+strata_doi_chieu.py:178   không lệch, chỉ có cặp strata_* "khop" → "khong_doi_chieu_duoc"
+strata_doi_chieu.py:185   "Chỉ chỗ này mới được nói 'khop': có ít nhất một số ĐỌC TỪ CHUỖI CARDANO…"
+```
+
+Có ô kết luận thứ ba (`khong_doi_chieu_duoc`) tách khỏi `khop`, và có test đông lạnh
+(`test_strata_doi_chieu.py:110`). Bản vá đúng chỗ đã báo. **Đóng đúng.**
+
+`#276` thì ngược lại: vẫn mở, và mã vẫn nguyên hình dạng đã báo — `confirmed` ghi khi có
+`tx_hash`, không có `confirmations`/`block_height` ở đâu trong `anchor_queue.py`.
+
+### 18.3 🔴 Bức tường thứ hai — cổng của OriLife từ chối đúng trường mà kiến trúc sở hữu đòi
+
+Đây là mục đáng kể nhất của phiên, và **công phát hiện không thuộc bên mình**: Lợi đã ghi
+va chạm này trên `OriLife-Core#151` từ **2026-08-16** (mục 1 trong khuyến nghị của bạn ấy).
+Phiên này đo lại độc lập để biết nó còn đúng trên `main` hôm nay, và để biết nó chạm gì
+trong kho này.
+
+Ba câu, cả ba đều đã được ghi thành chốt, và chúng **không cùng đúng được**:
+
+| Nguồn | Ngày | Câu |
+|---|---|---|
+| `OriLife-Core#151` — anh Đức | **08-07** | khoá ký ở mức nền tảng; **quyền sở hữu đi qua trường `owner_did`** |
+| `OriLife-Core#153` — INV-SP4 | **07-13** | mọi tên trường chứa token `did`/`owner`/`farmer`/`user` bị **từ chối**, *"kể cả dạng đã băm"* |
+| kho này | — | không có khái niệm PII nào; `owner_did` từng là **tên trường trong bài nghiệm thu 07-05** |
+
+Đo trên bản clone `OriLife-Core @ 0d27364` (2026-08-31), chạy chính hàm đó:
+
+```
+_is_pii_key("owner_did")   -> True      (khớp CẢ HAI token: "owner" và "did")
+validate_state_fields([{"key":"owner_did","value": <64 hex hợp lệ>}])
+   -> ValueError: key='owner_did' nằm trong deny-list PII — INV-SP4 cấm ghi PII
+                  (owner_did/GPS/tên/điện-thoại), kể cả dạng đã băm
+
+đối chứng nghịch: {"key":"giai_doan","value": <64 hex>}   -> LỌT
+```
+
+Hàng rào là thật, không phải chú thích: cổng bật **mặc định** (`enforce_state_fields=True`,
+`strata_client.py:771`), có nơi gọi thật ở biên `create`/`append_version`
+(`strata_client.py:1049-1053`), và **test của chính họ đông lạnh** việc từ chối
+(`test_strata_client.py:1309`). Lớp giá trị còn chặn một tầng nữa: `value` phải khớp
+`\A[0-9a-f]{64}\Z` (`:658`), nên một chuỗi DID thô không lọt dù đặt tên trường là gì.
+
+**Vì sao kho này phải quan tâm.** Không phải vì Strata chặn — Strata **không** chặn: grep
+`INV-SP4|PII` toàn kho (87 tệp) = **0 hit**, và `reports/ACCEPTANCE-2026-07-05.md:60` cho
+thấy bài nghiệm thu của chính kho này đã dùng `owner_did` làm một trong 5 tên trường. Bức
+tường nằm hoàn toàn ở phía tiêu thụ. Nhưng **hợp đồng tích hợp ở §14/§17.7 của chương này
+lại mô tả cơ chế đi qua bức tường đó**, nên câu chữ của kho này đang hứa một đường mà đầu
+kia không cho đi.
+
+### 18.4 Nó chưa cắn hôm nay, và cắn đúng lúc nào
+
+Đo tiếp để không báo động quá mức: đường shadow hôm nay **chưa bao giờ chạm**
+`create`/`append_version`. `shadow_write` gặp hasher chưa ghim thì ghi `skipped_unsigned`
+rồi thoát (`strata_client.py:1362-1382`), và tính năng còn tắt hẳn khi thiếu `STRATA_URL`.
+
+⇒ Va chạm là **tiềm ẩn**, và nó cắn đúng ở **lượt bật đường ký** — tức đúng mục `🔴 2` của
+phiên này. Nói chính xác phạm vi:
+
+| Việc | Bị chặn bởi va chạm này? |
+|---|---|
+| lượt bắt tay `#450` (so byte, `author_did`) | **không** — không đụng `state_fields` |
+| lượt nối thật với dữ liệu giả lập, không có trường sở hữu | **không** — bên mình chọn trường |
+| lời khai **sở hữu từng nông dân** qua field-proof | **có** — đây là chỗ chặn |
+
+Nên nó không thêm một nút chặn nào cho mục 2; nó lấy đi **lý do** của mục 2. Nối xong mà
+không có `owner_did` thì cái chứng minh được là *"bản ghi này tồn tại, chưa sửa"*, chưa
+phải *"cây này của người này"*.
+
+### 18.5 Sửa câu chữ của kho này — làm ngay, không chờ ai
+
+Ba chỗ trong chương này viết như thể cơ chế đã thông. Chúng thành **đúng** khi thêm một
+vế điều kiện, và bên mình không cần ai chốt để sửa câu của chính mình:
+
+| Dòng | Câu cũ hứa gì | Vế thiếu |
+|---|---|---|
+| `§17.7` mục 2 | *"quyền sở hữu đi qua `owner_did` = state-field CÓ KÝ"* | đúng về **ngữ nghĩa đã chốt**, chưa đúng về **thi hành** — cổng phía tiêu thụ đang từ chối |
+| `§17.7` mục 3 | *"field-proof trên `owner_did` **chính là** thứ chứng minh sở hữu"* | mệnh đề tương lai, không phải hiện trạng: hôm nay chưa trường nào tên đó ra khỏi `OriLife-Core` |
+| `§17.7` chỗ chặn lineage | *"`owner` chưa truyền xuống `try_shadow_write`"* | đó là **nửa rẻ**; nửa đắt là INV-SP4, và nửa đắt không sửa được bằng một tham số |
+
+Bản sửa nằm ở §18.6 dưới đây; ba dòng cũ giữ nguyên làm hồ sơ, đúng lệ §14.5.
+
+### 18.6 Câu đúng về `owner_did`, tính tới 2026-08-31
+
+> **Ngữ nghĩa** đã chốt (`#151`, 08-07): khoá ký ở mức nền tảng, quyền sở hữu đi qua
+> `owner_did`. **Thi hành** thì chưa: `OriLife-Core` có một bất biến fail-closed ra sau
+> quyết định 5 ngày (`#153`, 07-13) từ chối mọi tên trường chứa `owner`/`did`, kể cả dạng
+> đã băm, và ghim bằng test. Strata **không** chặn gì — bức tường ở phía tiêu thụ. Chỗ
+> chốt lại là `OriLife-Core#151`, thuộc anh Đức; bên mình không tự quyết và cũng không
+> đề nghị nới cổng, vì cổng đó bảo vệ thứ không sửa lại được.
+>
+> Hệ quả cho kho này: một `StrataVersion` bên `OriLife-Core` sinh ra hôm nay, kể cả khi
+> bật đường ký, **sẽ không mang trường sở hữu**. Chuỗi append-only nên bổ sung version
+> sau được; phần đã ký thì ở lại như vậy.
+
+Hướng Lợi đề xuất trên `#151` — đặt **tên trường trung tính**, giá trị là `content_cid`
+của một tài liệu riêng có chứa chủ sở hữu — chạy được với kho này **không cần đổi một dòng
+nào**: Strata không đọc `content_cid` (§17.8 — con trỏ mờ), và field-proof theo tên vẫn
+chứng minh được cam kết. Bên mình nêu ra như một dữ kiện tương thích, **không** phải một
+phiếu bầu; chốt vẫn là của anh Đức.
+
+### 18.7 CI kho này — 67/67, và bên mình không gỡ được
+
+| Đo | Giá trị |
+|---|---|
+| lượt CI hỏng | **67/67** kể từ 2026-07-30 — chưa từng xanh |
+| secret trong kho | **0** |
+| quyền của bên mình trên `LampNetCloud/Strata` | `push` — **không** `admin` |
+| quyền của bên mình trên `LampNetCloud/Anchor` | `push` — **không** `admin` |
+
+`ci.yml:48-57` đòi `ANCHOR_DEPLOY_KEY` vì `Cargo.toml` ghim `lampnet-merkle-anchor` qua
+SSH. Đặt secret cần `admin` ở kho `Strata`, và sinh deploy-key cần `admin` ở kho `Anchor`.
+Bên mình có `push` ở cả hai, `admin` ở **không kho nào** — nên `#24` không phải việc chưa
+làm, mà là việc **không làm được** ở mức quyền hiện tại. Đã ghi lại trên `#24`.
+
+### 18.8 Lưu vết phương pháp — bổ sung cho §17
+
+| Bẫy gặp trong phiên | Cách bắt |
+|---|---|
+| `gh issue view` chết vì GraphQL Projects-classic | chuyển sang `gh api repos/.../issues/N` |
+| `search/code` trả **0** cho `try_shadow_write` **và** cho `def` | đối chứng bằng một từ chắc chắn có; 0 ở cả hai ⇒ index không có, "0 hit" là **rỗng giả** ⇒ clone rồi `git grep` |
+| `ps -eo cmd \| grep -E "strata-node\|…"` bắt chính lệnh grep | loại dòng tự khớp rồi mới đọc kết quả |
+| mẫu `đối chiếu` khớp gần như mọi tệp `.py` | neo lại mẫu vào tên hàm thật (`strata_doi_chieu`) |
+| đọc deny-list bằng mắt rồi kết luận | **chạy** `_is_pii_key`, kèm **đối chứng nghịch** (`giai_doan` phải lọt) |
+| suýt ghi va chạm `owner_did` thành phát hiện của phiên | grep chính kho mình + đọc `#151` trước ⇒ Lợi đã ghi từ **08-16** |
+
+---
+
+## 19. Phiên 2026-09-07 — lượt NỐI THẬT đầu tiên, và CI kho này xanh lần đầu
+
+> Nửa VeData ở `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md §19`.
+
+### 19.1 Điều kiện tiên quyết — một đạt, một chưa
+
+| Điều kiện (bảng `§18.1`) | 08-31 | **09-07** |
+|---|---|---|
+| `Specs#32` đóng `did_hash` ↔ `Did` | chưa | ✅ **đóng 08-31** — anh Đức: **(a) cùng đại lượng** |
+| `OriLife-Core` gửi `did:pubkey` | chưa | ⏳ chưa — `#450` có phản hồi 09-05, không kèm khoá |
+
+Ràng buộc *"chưa đóng thì không tạo lineage"* đã gỡ. Lượt này sinh `ref_id` thật với dữ
+liệu **giả lập**, Preprod, beacon **TẮT**.
+
+Trước khi dùng phép dẫn `author_did` cho bất cứ thứ gì, chạy lại ba vector anh Đức đưa
+bằng CPython thuần — khớp cả ba, kèm **đối chứng âm** (`alicE` → khác). Ba ca thuận đều
+đi một chiều nên không có đối chứng âm thì chúng không phân biệt được *"hàm đúng"* với
+*"hàm sai nhưng tất định và bảng vector chép cùng nguồn"*.
+
+### 19.2 ✅ Lượt nối — trọn đường, và đọc lại từ chuỗi thì khớp
+
+| | |
+|---|---|
+| `ref_id` | `lnref1hgt6h4mtspnlg9mg7gk8r5f9hfxm78rcgpu55rfhpkyhqd8tkhfqunknsm` |
+| `author_did` | `f9f25e45…4f98a443` (từ `did:phoenix:org:orilife-notary-simulated`) |
+| **txid** | `f5a067ee4a8861722c38455a1a728391bd6cb362392237bf8bc075ff42010942` |
+| block / slot | `5148289` / `133091346` |
+| phí / size | **0,199185 tADA** / 476 B |
+| cò | `flush_max_age` · `n=1` · 1 tác giả · ~110 B |
+
+`label 1234` đọc từ chuỗi so với `GET /head`: `head_version_hash`, `mmr_root`, `seq` —
+**khớp cả ba**; đối chứng âm (lật một nibble) **lệch**.
+
+Field-proof `giai_doan` → `value 6461755f717561` = `"dau_qua"`, `salt = ""` (chế độ không
+salt, đúng `#71`), 2 sibling cho 4 lá.
+
+🔺 **Chưa verify độc lập.** Dựng lại `state_root` từ `(value, siblings)` cần **blake3**;
+phía kiểm là Python. Câu đúng: *"daemon phát ra proof đúng khuôn"*, chưa phải *"một bên
+thứ hai đã kiểm"*.
+
+### 19.3 Ba dòng nghiệm thu `#450` — chạy hết, ĐẠT
+
+| Dòng | Kết quả |
+|---|---|
+| 1 — `state_fields` rỗng | `200` · `canonical_core` **đúng 148 B** · `state_root` = `0×32` |
+| 2 — có `state_fields` | `200` · `state_root` đổi |
+| 3 — `author_did` phân giải | `200` · `ref_id` dự kiến |
+
+Con số 148 B bàn giao ở `#450` nay có một lượt chạy đứng sau nó, không còn là số đo suông.
+
+### 19.4 🟠 `_canonical` gỡ hai chỗ mù, còn chỗ thứ ba — `policy_hash`
+
+Route trả `canonical_core` · `version_hash` · `state_root` · `ref_id`, **không** trả
+`policy_hash`. Client Python không có blake3 dựng được **toàn bộ** phần còn lại rồi kẹt
+đúng ở đó, vì `Policy::policy_hash()` tính bằng blake3 và không route nào phát ra.
+
+Đường lui dùng hôm nay: gửi `policy_hash` sai, đọc `expected` trong `403
+PolicyHashMismatch`. Nó chạy, nhưng đó là **một lỗi dùng làm API**. Với `policy_authors`
+vắng, policy là một-thành-viên `[author_did]` (`routes.rs:246-253`) nên `policy_hash` suy
+được hoàn toàn từ input của chính client. Mở ở **`#84`**.
+
+### 19.5 🪤 `state_fields[].value` là HEX — và không dòng nào nói cho trường chữ
+
+`dto.rs:30` gọi `decode_var(&self.value)`. Gửi `"ra_hoa"` ăn `400`; phải gửi
+`"72615f686f61"`. Chú thích sẵn có bên `OriLife-Core` chỉ nói về trường **mang CID**
+(*"VALUE = content_cid 32B hex"*), nên người tích hợp gửi một trường **chữ** không có
+dòng nào cảnh báo. Đã ghi vào `#450` mục 5(b).
+
+### 19.6 ✅ `#73` đóng — đo trên Linux ba mục `#76` tự khai chưa kiểm
+
+`#76` ghi rõ *"Chưa kiểm: hành vi trên Linux; hai tiến trình hệ điều hành thật; nhả khoá
+khi SIGKILL"*. Máy phiên này là Linux và đang có daemon thật, nên đo được cả ba. Hai bản
+`strata-node`, **cổng khác nhau** (6790/6791) — nếu cùng cổng thì một lượt chết vì bind
+port sẽ bị đọc thành chết vì khoá:
+
+| Ca | Kết quả |
+|---|---|
+| A giữ → B mở cùng nhật ký | exit 1 · `Resource temporarily unavailable (os error 11)` |
+| **`SIGKILL` A → B mở lại** | **lên xanh** — khoá nhả, không có khoá mồ côi |
+| B giữ → C mở (đối chứng nghịch) | exit 1 lại |
+| B thoát bình thường → C mở | lên xanh |
+
+Và vế mà chú thích của `#76` để ngỏ: A đã chạy xong `read_records` (nó in dòng replay rồi
+mới lên xanh) mà **vẫn** giữ khoá. Tức trên `ext4` đây là `flock` thật, không phải khoá
+POSIX mô phỏng.
+
+Đo thêm một hệ tệp ngoài bảng của `#76`: **`v9fs`** (WSL2 `/mnt/c`) — **cũng chặn**. Nên
+`v9fs` không rơi vào ca NFS/SMB. Ca NFS/SMB thật vẫn **không phủ**, đúng như `#76` nói.
+
+**Cờ `FORCE`: không thêm.** Lý do của anh Đức mạnh hơn lý do bên mình mang vào phiên: khoá
+bám vào file description nên "khoá mồ côi" không tồn tại — ca duy nhất biện minh được cho
+cờ ấy là ca không xảy ra. Ca `SIGKILL` ở trên là bằng chứng chạy thật cho đúng câu đó.
+
+### 19.7 ✅ `#24` đóng — CI kho này XANH lần đầu tiên
+
+| | Số đo |
+|---|---|
+| trước `#75` | **72 failure / 0 success** — kho chưa từng có một lượt xanh |
+| `main` sau merge `#75` | `34e73c5` @ 09-07 09:54Z — **success**, đủ 8 bước (`fmt` · `clippy` · `test`) |
+
+Cổng cũ đo **sự có mặt của một secret**; thứ nó cần biết là **kho phụ thuộc còn đọc được
+không**. Hai đại lượng trùng nhau lúc viết và tách nhau lúc `Anchor` chuyển public. Vì cổng
+vẫn đỏ đều đặn nên nó đọc thành *"chưa ai xử"* chứ không thành *"đo sai thứ"*.
+
+🔺 **Đính chính bên mình:** các bản báo cáo trước ghi `#24` cần **admin ở hai kho**. Đó là
+hệ quả đúng của một tiền đề đã hết đúng. Bên mình đo *"ai có quyền"* mà không đo lại *"còn
+cần quyền ấy không"*.
+
+### 19.8 🪤 Ba phép đo TỰ HỎNG trong phiên này — cả ba vẫn ra "kết quả"
+
+| Hỏng | Triệu chứng | Bắt bằng |
+|---|---|---|
+| `cargo build --release --bin strata-node` ở gốc workspace **thất bại** (`no bin target … in default-run packages`), nhưng pipe qua `tail` nên exit code là của `tail` | báo "build xong"; bin trên đĩa vẫn là bản **27/08** ⇒ phép đo `flock` đầu tiên cho kết quả **ngược** (B lên xanh) và suýt thành báo động "bản vá không tác dụng" | `stat -c %y` bin so với mtime `journal.rs`; và `-p lampnet-strata-node`, `set -o pipefail` |
+| `strings <bin> \| grep "ĐANG BỊ GIỮ"` → **0** | đọc thành "bin thiếu bản vá" | `strings` cắt ở byte >127 — chuỗi có dấu không bao giờ khớp. Dùng `LC_ALL=C grep -a` với **mẫu ASCII thuần** |
+| `pkill -f "target/release/strata-node"` | giết luôn **chính lệnh shell đang chạy nó** (`-f` khớp cả dòng lệnh của mình) | lọc theo `comm` (`ps -eo pid,comm`), không theo dòng lệnh đầy đủ |
+
+Cái thứ nhất đáng nhớ nhất: nó làm **một phép đo đúng cho một kết luận sai**, và kết luận
+sai ấy đi ngược hướng — nó nói một bản vá tốt là vô dụng.
+
+### 19.9 Bảng còn treo sau phiên này
+
+| Mục | Trạng thái 09-07 | Chờ ai |
+|---|---|---|
+| `#450` cặp `did:pubkey` | ⏳ chưa gửi | `OriLife-Core` |
+| `OriLife#151` — ngữ nghĩa sở hữu sau `#153` | mở; hướng "tên trung tính + CID" nay có **bằng chứng chạy thật** | anh Đức |
+| `OriLife#276` — `confirmed` sớm | mở; nay có **số đo dương ~40 s** đo trên đường thật | `OriLife-Core` |
+| `Core#129` — chỗ chạy + sao lưu | mở; nay nhật ký **đã mang lineage đã neo** | quyết định vận hành |
+| `#84` — `policy_hash` vào `CanonicalResp` | mới mở | anh Đức chốt hình dạng API |
+| `#64` — phần chữ `§3` | mở, CI **nay xanh** | anh Đức merge |
+| `#82` · `#83` — spec | mở, CI **nay xanh** | anh Đức merge (bên mình không tự merge phần chữ) |
+| `#41` mục còn lại | mở — `#76` chỉ vá mục 4 và 5 | bên mình |

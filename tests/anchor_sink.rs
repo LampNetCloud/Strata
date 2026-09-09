@@ -64,6 +64,21 @@ fn tok(tag: u8) -> AssetClass {
     }
 }
 
+/// Token mặc định cho các test đường GHI.
+///
+/// `publish` nay **fail-đóng** khi sink không pin thread-token: không pin thì `resolve()`
+/// không phân biệt được UTxO thật với UTxO kẻ lạ cấy vào địa chỉ script, nên đường ghi mù.
+/// Mọi test từng dựng sink bằng `new_unverified_for_tests` rồi gọi `publish` nay phải pin —
+/// đúng ràng buộc mà production phải theo.
+fn dtok() -> AssetClass {
+    tok(0xAA)
+}
+
+/// Sink pin token + mock phát UTxO authentic mang đúng token đó.
+fn pinned_sink(mock: MockMosaic) -> MosaicAnchorSink<MockMosaic> {
+    MosaicAnchorSink::with_thread_token(mock.pin(dtok()), dtok())
+}
+
 // ── mock backend Mosaic (in-memory on-chain state) ───────────────────────────
 struct MockMosaic {
     state: RefCell<HashMap<[u8; 32], PlutusData>>, // ref_id → datum authentic mới nhất
@@ -90,6 +105,11 @@ impl MockMosaic {
             ..Self::new()
         }
     }
+    /// Gắn thread-token authentic cho một mock đã dựng (giữ nguyên các trường khác).
+    fn pin(mut self, token: AssetClass) -> Self {
+        self.token = Some(token);
+        self
+    }
     /// Mock có thread-token authentic (production-mode).
     fn with_token(token: AssetClass) -> Self {
         Self {
@@ -109,13 +129,6 @@ impl MockMosaic {
     }
 }
 impl MosaicBackend for MockMosaic {
-    fn on_chain_seq(&self, ref_id: &[u8; 32]) -> Result<Option<u64>, AnchorError> {
-        Ok(self
-            .state
-            .borrow()
-            .get(ref_id)
-            .map(|d| parse_datum_to_anchor(d).unwrap().seq))
-    }
     fn submit_anchor(&self, datum: &PlutusData) -> Result<AnchorReceipt, AnchorError> {
         if let Some(e) = &self.fail_submit {
             return Err(e.clone());
@@ -192,7 +205,7 @@ fn s1_criteria_1_datum_roundtrip_bit_exact() {
 fn s1_criteria_2_publish_resolve_matches_chain() {
     let (chain, _pol, _a) = chain_of(2);
     let anchor = chain.anchor(); // seq=1
-    let sink = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::new());
+    let sink = pinned_sink(MockMosaic::new());
 
     let receipt = sink.publish(&anchor, AnchorPriority::Immediate).unwrap();
     assert!(receipt.is_some());
@@ -206,7 +219,7 @@ fn s1_criteria_2_publish_resolve_matches_chain() {
 // ── #3 INV-E7 rollback: neo lại seq cũ bị chặn ───────────────────────────────
 #[test]
 fn s1_criteria_3_rollback_rejected() {
-    let sink = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::new());
+    let sink = pinned_sink(MockMosaic::new());
     let a1 = sample_anchor(1);
     sink.publish(&a1, AnchorPriority::Immediate)
         .unwrap()
@@ -230,7 +243,7 @@ fn s1_criteria_3_rollback_rejected() {
 // ── #4 idempotency: publish cùng seq hai lần → tx = 1 ─────────────────────────
 #[test]
 fn s1_criteria_4_idempotent_no_double_tx() {
-    let sink = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::new());
+    let sink = pinned_sink(MockMosaic::new());
     let a1 = sample_anchor(1);
     assert!(
         sink.publish(&a1, AnchorPriority::Immediate)
@@ -254,12 +267,64 @@ fn s1_criteria_4_idempotent_no_double_tx() {
     assert_eq!(sink.backend().tx_count(), 1);
 }
 
+// ── #4b Mosaic-A: nhảy bậc seq bị chặn TẠI SINK, không đẩy lên chuỗi ─────────
+//
+// Validator Plutus đang chạy ép `datum_out.seq == datum_in.seq + 1`
+// (`VeDataIO/Code: mosaic/aiken/lib/strata/anchor.ak:55-57`). Trước bản vá này, sink đẩy
+// thẳng một seq nhảy bậc lên chuỗi: tx bị từ chối, nhưng head local đã tiến ⇒ mọi lần neo
+// sau đều nhảy bậc y hệt ⇒ lineage kẹt vĩnh viễn. Anh Đức chốt hướng B (2026-08-07): giữ
+// luật on-chain, sửa tầng đẩy — nên sink phải fail cứng TRƯỚC khi dựng tx.
+#[test]
+fn seq_gap_rejected_before_building_tx() {
+    let sink = pinned_sink(MockMosaic::new());
+
+    // Neo bậc đầu (lineage chưa có gì on-chain) — hợp lệ, validator không guard CREATE.
+    sink.publish(&sample_anchor(1), AnchorPriority::Immediate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sink.backend().tx_count(), 1);
+
+    // Nhảy từ 1 sang 3 → SeqGap, KHÔNG đẻ tx.
+    let err = sink
+        .publish(&sample_anchor(3), AnchorPriority::Immediate)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        AnchorError::SeqGap {
+            on_chain_seq: Some(1),
+            expected: 2,
+            attempted: 3,
+        }
+    );
+    // Fail CỨNG: retry cùng seq vẫn hỏng y hệt, không được xếp vào diện retryable.
+    assert!(!err.is_retryable());
+    assert_eq!(sink.backend().tx_count(), 1);
+
+    // Neo đúng bậc kế tiếp thì đi tiếp bình thường — bản vá không chặn đường hợp lệ.
+    sink.publish(&sample_anchor(2), AnchorPriority::Immediate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sink.backend().tx_count(), 2);
+    sink.publish(&sample_anchor(3), AnchorPriority::Immediate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sink.backend().tx_count(), 3);
+
+    // NoAnchor vẫn thoát sớm, không đụng backend dù seq nhảy bậc.
+    assert!(
+        sink.publish(&sample_anchor(99), AnchorPriority::NoAnchor)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(sink.backend().tx_count(), 3);
+}
+
 // ── #5 resolve sau append: verify version cũ dưới root ĐÃ NEO ─────────────────
 #[test]
 fn s1_criteria_5_resolve_after_append_verifies_old_root() {
     let (mut chain, pol, a) = chain_of(2); // seq 0,1
     let ph = pol.policy_hash();
-    let sink = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::new());
+    let sink = pinned_sink(MockMosaic::new());
     let mut table = AnchoredTable::new();
 
     // Neo seq=1 + ghi bảng daemon TẠI thời điểm neo.
@@ -292,9 +357,9 @@ fn s1_criteria_5_resolve_after_append_verifies_old_root() {
 fn s1_criteria_6_backend_errors_propagate() {
     let a1 = sample_anchor(1);
 
-    let sink_big = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::failing(
-        AnchorError::DatumTooLarge { bytes: 20_000 },
-    ));
+    let sink_big = pinned_sink(MockMosaic::failing(AnchorError::DatumTooLarge {
+        bytes: 20_000,
+    }));
     assert_eq!(
         sink_big
             .publish(&a1, AnchorPriority::Immediate)
@@ -302,12 +367,10 @@ fn s1_criteria_6_backend_errors_propagate() {
         AnchorError::DatumTooLarge { bytes: 20_000 }
     );
 
-    let sink_ada = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::failing(
-        AnchorError::InsufficientAda {
-            need: 1_500_000,
-            have: 900_000,
-        },
-    ));
+    let sink_ada = pinned_sink(MockMosaic::failing(AnchorError::InsufficientAda {
+        need: 1_500_000,
+        have: 900_000,
+    }));
     let err = sink_ada
         .publish(&a1, AnchorPriority::Immediate)
         .unwrap_err();
@@ -321,9 +384,7 @@ fn s1_criteria_6_backend_errors_propagate() {
     assert!(!err.is_retryable());
 
     // Network là retryable (phân tầng §8.1b).
-    let sink_net = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::failing(
-        AnchorError::Network("timeout".into()),
-    ));
+    let sink_net = pinned_sink(MockMosaic::failing(AnchorError::Network("timeout".into())));
     assert!(
         sink_net
             .publish(&a1, AnchorPriority::Immediate)
@@ -358,7 +419,7 @@ fn resolve_thread_token_rejects_poisoning() {
 #[test]
 fn resolve_skips_garbage_datum_no_error() {
     // Chế độ không pin token (round-trip) — cô lập hành vi bỏ-qua-rác.
-    let sink = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::new());
+    let sink = pinned_sink(MockMosaic::new());
     let authentic = sample_anchor(3);
     sink.publish(&authentic, AnchorPriority::Immediate)
         .unwrap()
@@ -371,7 +432,7 @@ fn resolve_skips_garbage_datum_no_error() {
     assert_eq!(got.unwrap().seq, 3, "bỏ qua datum rác, lấy anchor hợp lệ");
 
     // Chỉ có datum rác (không authentic) → Ok(None), KHÔNG Err (chống DoS 1-tx).
-    let sink2 = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::new());
+    let sink2 = pinned_sink(MockMosaic::new());
     sink2.backend().inject_forged(garbage, None);
     assert_eq!(sink2.resolve(&[7u8; 32]).unwrap(), None);
 }
@@ -409,9 +470,7 @@ fn publish_with_retry_only_network_exp_backoff() {
     let a1 = sample_anchor(1);
 
     // Network liên tục → retry đủ max_attempts=3 rồi trả Err; backoff mũ 10,20.
-    let sink = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::failing(
-        AnchorError::Network("t".into()),
-    ));
+    let sink = pinned_sink(MockMosaic::failing(AnchorError::Network("t".into())));
     let mut sleeps = Vec::new();
     let err = sink
         .publish_with_retry(&a1, AnchorPriority::Immediate, 3, 10, |ms| sleeps.push(ms))
@@ -420,9 +479,9 @@ fn publish_with_retry_only_network_exp_backoff() {
     assert_eq!(sleeps, vec![10, 20], "3 lần gọi = 2 lần chờ, backoff mũ");
 
     // Lỗi KHÔNG retryable → trả ngay, 0 lần chờ.
-    let sink_rej = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::failing(
-        AnchorError::DatumTooLarge { bytes: 99 },
-    ));
+    let sink_rej = pinned_sink(MockMosaic::failing(AnchorError::DatumTooLarge {
+        bytes: 99,
+    }));
     let mut s2 = Vec::new();
     assert!(
         sink_rej
@@ -432,7 +491,7 @@ fn publish_with_retry_only_network_exp_backoff() {
     assert!(s2.is_empty(), "lỗi cứng không retry");
 
     // Thành công ngay → không chờ.
-    let sink_ok = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::new());
+    let sink_ok = pinned_sink(MockMosaic::new());
     let mut s3 = Vec::new();
     assert!(
         sink_ok
@@ -495,7 +554,7 @@ fn anchored_table_multichain_key_and_persist() {
 fn verify_resolved_rebuilds_proof_no_stored_proof() {
     let (mut chain, pol, a) = chain_of(2);
     let ph = pol.policy_hash();
-    let sink = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::new());
+    let sink = pinned_sink(MockMosaic::new());
     let mut table = AnchoredTable::new();
 
     let anchor1 = chain.publish_anchor().unwrap();
@@ -510,4 +569,64 @@ fn verify_resolved_rebuilds_proof_no_stored_proof() {
     let resolved = sink.resolve(&anchor1.ref_id).unwrap().unwrap();
     verify_resolved(&chain, &resolved, &table)
         .expect("verify tái dựng proof ở size cũ phải PASS dù record muộn");
+}
+
+// ── Ba mục review PR #42 — bài kiểm cho từng mục ─────────────────────────────
+
+/// **Mục 1.** Đường GHI đi qua cửa đã xác thực: một UTxO cấy vào địa chỉ script mang
+/// `seq = 2^63` KHÔNG còn kẹt được lineage.
+///
+/// Trước bản vá, `publish` hỏi `on_chain_seq()` — một số vô hướng, sink không còn gì để lọc
+/// — nên `seq` của kẻ lạ trở thành `on_chain_seq` và mọi lần neo sau đều ăn `RollbackAttempt`
+/// vĩnh viễn. Nay `publish` đọc qua `resolve()`, vốn loại UTxO không mang thread-token.
+#[test]
+fn utxo_cay_seq_khong_lo_khong_con_ket_duong_ghi() {
+    let t = tok(7);
+    let mock = MockMosaic::with_token(t.clone());
+    // Kẻ lạ gửi UTxO datum giả: cùng ref_id, seq = 2^63, KHÔNG mang thread-token.
+    mock.inject_forged(map_anchor_to_datum(&sample_anchor(u64::MAX / 2)), None);
+    let sink = MosaicAnchorSink::with_thread_token(mock, t);
+
+    // Lineage chưa neo lần nào (không UTxO nào qua được cửa xác thực) ⇒ neo đầu đi lọt.
+    let r = sink.publish(&sample_anchor(0), AnchorPriority::Immediate);
+    assert!(
+        r.is_ok(),
+        "UTxO cấy vào phải bị loại, không được kẹt đường ghi: {r:?}"
+    );
+}
+
+/// **Mục 2.** Chế độ không-xác-thực **fail-đóng ở đường GHI**, nhưng vẫn ĐỌC được.
+///
+/// Không pin token thì `resolve()` nhận mọi ứng viên, tức không có gác nào — trả một kết quả
+/// trông-như-đúng là chỗ hỏng im lặng. Đọc thì vẫn cho, vì đọc không thay đổi trạng thái.
+#[test]
+fn khong_pin_token_thi_chan_ghi_nhung_van_cho_doc() {
+    let sink = MosaicAnchorSink::new_unverified_for_tests(MockMosaic::new());
+    let err = sink
+        .publish(&sample_anchor(0), AnchorPriority::Immediate)
+        .expect_err("đường ghi phải fail-đóng khi không pin thread-token");
+    assert!(
+        matches!(&err, AnchorError::Rejected(m) if m.contains("with_thread_token")),
+        "thông điệp phải chỉ thẳng cách sửa, nhận được: {err:?}"
+    );
+    assert!(sink.resolve(&[1u8; 32]).is_ok(), "đường đọc không bị chặn");
+}
+
+/// **Mục 3.** `AnchorPriority` thưa + Mosaic bị chặn NGAY, kèm lý do đúng.
+///
+/// Không chặn thì nó không hỏng im lặng — nó hỏng *ồn ào nhưng sai hướng*: `SeqGap` kèm câu
+/// "on-chain đòi neo seq=N trước", đọc như gọi sai thứ tự trong khi thực chất là sai cấu hình.
+#[test]
+fn priority_thua_bi_chan_voi_ly_do_dung() {
+    let t = tok(9);
+    let sink = MosaicAnchorSink::with_thread_token(MockMosaic::with_token(t.clone()), t);
+    for p in [AnchorPriority::Milestone, AnchorPriority::BatchDaily] {
+        let err = sink
+            .publish(&sample_anchor(0), p)
+            .expect_err("priority thưa phải bị chặn ở Mosaic-A");
+        assert!(
+            matches!(&err, AnchorError::Rejected(m) if m.contains("Settlement")),
+            "phải chỉ sang backend đúng, nhận được: {err:?}"
+        );
+    }
 }

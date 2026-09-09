@@ -162,15 +162,16 @@ fn build_settlement(get: EnvGet<'_>) -> Result<SinkChoice, String> {
         None => SinkConfig::default().resolve_scan_limit,
     };
 
-    let submitter = MosaicDoorSubmitter::from_env_with(get, METADATA_LABEL, beacon_submit)?
+    // Mạng truyền XUỐNG, không đọc lại từ env thứ hai: nó nằm trong thông điệp operator
+    // ký, và hai nguồn cho cùng một giá trị thì lệch nhau vào ngày không ai nhìn.
+    let submitter = MosaicDoorSubmitter::from_env_with(get, METADATA_LABEL, beacon_submit, &net)?
         .ok_or_else(|| {
-            format!(
-                "backend=settlement nhưng chưa có {}: dưới B1′, tx neo do MOSAIC dựng — Strata \
+        format!(
+            "backend=settlement nhưng chưa có {}: dưới B1′, tx neo do MOSAIC dựng — Strata \
                  chỉ kiểm INV-E7 + encode rồi đẩy lô sang cửa Mosaic.",
-                lampnet_anchor_io::mosaic_door::DOOR_URL_ENV
-            )
-        })?
-        .with_network(Some(net.clone()));
+            lampnet_anchor_io::mosaic_door::DOOR_URL_ENV
+        )
+    })?;
 
     let cfg = SinkConfig {
         publisher_address: publisher.clone(),
@@ -180,10 +181,17 @@ fn build_settlement(get: EnvGet<'_>) -> Result<SinkChoice, String> {
         ..SinkConfig::default()
     };
     let query = BlockfrostQuery::new(base.to_string(), token.trim().to_string());
+    // In **khoá CÔNG KHAI** của operator ngay lúc khởi động. Nó không phải bí mật — nó
+    // chính là thứ phải nằm trong `MOSAIC_DOOR_OPERATOR_KEYS` của cửa. Người vận hành
+    // đối chiếu được một chuỗi hex **trước** lượt neo đầu tiên; nếu không, cách duy nhất
+    // để biết mình sai là một `401` mà cửa CỐ Ý không nói lý do.
+    let operator_vkey = submitter
+        .operator_vkey_hex()
+        .unwrap_or_else(|| "KHÔNG CÓ".to_string());
     let description = format!(
         "backend=settlement label={METADATA_LABEL} mạng={net} publisher={publisher} \
          beacon_submit={beacon_submit} beacon_resolve={} scan_limit={scan_limit} \
-         (tx do cửa Mosaic dựng)",
+         operator_vkey={operator_vkey} (tx do cửa Mosaic dựng)",
         beacon_policy.as_deref().unwrap_or("tắt")
     );
     Ok(SinkChoice {
@@ -217,7 +225,25 @@ mod tests {
             ("BLOCKFROST_API_KEY", "preprod_token"),
             ("MOSAIC_DOOR_URL", "http://127.0.0.1:6691"),
             ("MOSAIC_DOOR_TOKEN", "door-token"),
+            (
+                "MOSAIC_DOOR_OPERATOR_SK",
+                "0101010101010101010101010101010101010101010101010101010101010101",
+            ),
         ]
+    }
+
+    /// 🔴 Cửa Mosaic từ chối **401** mọi lô không kèm chữ ký operator (từ `Core#96`,
+    /// 2026-08-21). Thiếu khoá ký mà daemon vẫn lên xanh nghĩa là mọi lô sẽ rớt — và
+    /// rớt ở đầu này dưới một mã lỗi **không nói gì về chữ ký**.
+    ///
+    /// Ca này chính là lỗ đã đo được ngày 2026-08-25: đường neo sản xuất `401` suốt từ
+    /// hôm gác kia land, và không lượt chạy nào giữa hai mốc đi qua nó.
+    #[test]
+    fn settlement_thieu_khoa_ky_operator_thi_khong_khoi_dong() {
+        let mut e = full();
+        e.retain(|(k, _)| *k != "MOSAIC_DOOR_OPERATOR_SK");
+        let err = build(&e).expect_err("thiếu khoá ký operator PHẢI chặn khởi động");
+        assert!(err.contains("MOSAIC_DOOR_OPERATOR_SK"), "{err}");
     }
 
     #[test]

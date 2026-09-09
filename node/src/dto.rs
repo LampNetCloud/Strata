@@ -321,9 +321,22 @@ pub struct FieldProofResp {
     pub fvh: String,
     /// Salt làm mù (§6.3), hex. **Rỗng = không làm mù.**
     ///
-    /// Có mặt kể cả khi rỗng: verifier phải băm `salt ‖ value` để so `fvh`, nên một
-    /// trường vắng mặt lúc blinding được bật sẽ làm **mọi** proof đỏ ở phía client mà
-    /// nhìn từ server thì không có gì sai.
+    /// Có mặt kể cả khi rỗng, và nó là thứ **CHỌN CHẾ ĐỘ** — không phải một đầu vào phụ
+    /// của một phép băm duy nhất (`Strata#71`):
+    ///
+    /// | `salt` | `fvh` |
+    /// |---|---|
+    /// | rỗng | `H_dom(TAG_STATE_FVAL, value)` |
+    /// | khác rỗng | `H_dom(TAG_STATE_FVAL_SALTED, u32_be(len(salt)) ‖ salt ‖ value)` |
+    ///
+    /// Hai chế độ nằm ở **hai domain-tag khác nhau**, nên verifier bỏ qua trường này
+    /// không chỉ thiếu một đầu vào — nó băm **nhầm miền**. `value` **không** có
+    /// length-prefix: nó là phần còn lại của bộ đệm nên biên đã xác định duy nhất; thêm
+    /// một prefix nữa là đổi byte, không phải làm chặt hơn.
+    ///
+    /// Trường vắng mặt lúc blinding được bật làm **mọi** proof đỏ ở phía client mà nhìn
+    /// từ server thì không có gì sai. Vector đối chiếu: `apis/canonical-core-vectors.json`
+    /// mục `fval_mode_vectors` + `fval_mode_negative_controls`.
     pub salt: String,
     pub siblings: Vec<(String, bool)>,
     pub state_root: String,

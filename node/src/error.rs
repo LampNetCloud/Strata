@@ -75,6 +75,15 @@ impl From<AnchorError> for ApiError {
                 current: on_chain_seq,
                 attempted,
             }),
+            // Nhảy bậc seq: client ĐANG gọi sai thứ tự, không phải backend hỏng. Nói thẳng
+            // seq nào phải neo trước để client sửa được, thay vì để nó retry mù.
+            AnchorError::SeqGap {
+                expected,
+                attempted,
+                ..
+            } => ApiError::AnchorRejected(format!(
+                "nhảy bậc seq: on-chain đòi neo seq={expected} trước, đã thử seq={attempted}"
+            )),
             // Hai lỗi fail-cứng của backend UTxO — retry vô ích, trả 502 kèm lý do.
             AnchorError::DatumTooLarge { bytes } => {
                 ApiError::AnchorRejected(format!("datum {bytes} byte vượt giới hạn tx"))
@@ -82,6 +91,20 @@ impl From<AnchorError> for ApiError {
             AnchorError::InsufficientAda { need, have } => {
                 ApiError::AnchorRejected(format!("min-ADA không đủ: cần {need}, có {have}"))
             }
+            // 400, KHÔNG phải 502. Backend chưa hề được hỏi: lô do bên gọi dựng đã tự
+            // mâu thuẫn (hai anchor cho cùng một `ref_id`), và sink chặn trước cả lượt
+            // đọc on-chain. Trả 5xx ở đây là đổ lỗi cho chuỗi về một thứ chuỗi không gây
+            // ra — client sẽ đi retry mù thay vì đi sửa lô.
+            //
+            // Dùng `Malformed` thay vì đặt một tên lỗi HTTP mới: bộ tên lỗi trên dây là bề
+            // mặt client học thuộc, thêm tên vào đó là việc của spec + anh Đức (bảng §3.1
+            // `Strata-API.md`), không phải việc của một bản vá lỗi vận hành. Lý do vẫn
+            // đọc được nguyên vẹn ở `detail.reason`.
+            AnchorError::DuplicateRefIdInBatch { ref_id } => ApiError::Malformed(format!(
+                "lô có hai anchor cùng ref_id {} — một tx không được mang hai seq cho cùng \
+                 một lineage; gộp chúng lại rồi gửi một anchor duy nhất cho ref đó",
+                h(&ref_id)
+            )),
         }
     }
 }

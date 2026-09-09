@@ -13,7 +13,8 @@
 
 use lampnet_strata::hash::h_dom;
 use lampnet_strata::state::{
-    TAG_STATE_FVAL, TAG_STATE_LEAF, TAG_STATE_NODE, build_state_root, fval_hash, leaf_hash,
+    TAG_STATE_FVAL, TAG_STATE_FVAL_SALTED, TAG_STATE_LEAF, TAG_STATE_NODE, build_state_root,
+    fval_hash, fval_hash_salted, leaf_hash,
 };
 use lampnet_strata::version::{StrataVersion, TAG_VER};
 
@@ -51,6 +52,31 @@ fn state_vector(name: &str, why: &str, fields: &[(Vec<u8>, Vec<u8>)]) -> String 
     }}"#,
         per_field.join(",\n"),
         hex(&build_state_root(fields)),
+    )
+}
+
+/// Một vector CHẾ ĐỘ `fvh`: `(salt, value)` → `fvh`, kèm chế độ đã dùng.
+///
+/// Tách khỏi [`state_vector`] có chủ ý: `state_vector` đo *cây*, mục này đo *một phép băm*.
+/// Bên phải-khớp cài sai chế độ thì `state_root` cũng sai, nhưng lệch ở tầng cây không chỉ
+/// ra được rằng nguyên nhân nằm ở việc chọn **miền băm**.
+fn fval_mode_vector(name: &str, why: &str, salt: &[u8], value: &[u8]) -> String {
+    let mode = if salt.is_empty() {
+        "khong_salt"
+    } else {
+        "salted"
+    };
+    let tag = if salt.is_empty() {
+        TAG_STATE_FVAL
+    } else {
+        TAG_STATE_FVAL_SALTED
+    };
+    format!(
+        r#"    {{"name": {name:?}, "why": {why:?}, "salt": "{}", "salt_len": {}, "value": "{}", "mode": "{mode}", "tag": "{tag}", "fvh": "{}"}}"#,
+        hex(salt),
+        salt.len(),
+        hex(value),
+        hex(&fval_hash_salted(salt, value)),
     )
 }
 
@@ -277,6 +303,76 @@ fn main() {
         .map(|(n, w, fs)| state_vector(n, w, fs))
         .collect();
     println!("{}", sbody.join(",\n"));
-    println!("  ]");
+    println!("  ],");
+
+    // ---- CHẾ ĐỘ fvh (Strata#71) ----------------------------------------------------
+    let s_salt: &[u8] = b"salt-ngau-nhien-32B-cho-vector";
+    let m_val: &[u8] = b"yes";
+    // V = u32_be(|S|) ‖ S ‖ M — đúng nguyên liệu khai thác của #71.
+    let mut v_exploit = Vec::new();
+    v_exploit.extend_from_slice(&(s_salt.len() as u32).to_be_bytes());
+    v_exploit.extend_from_slice(s_salt);
+    v_exploit.extend_from_slice(m_val);
+
+    println!(
+        r#"  "fval_mode_note": "Strata#71. `fvh` có HAI chế độ nằm ở HAI domain-tag KHÁC NHAU, và `salt` là thứ CHỌN chế độ: salt RỖNG ⇒ fvh = H_dom(tag_fval, value); salt KHÁC RỖNG ⇒ fvh = H_dom(tag_fval_salted, u32_be(len(salt)) || salt || value). KHÔNG có length-prefix cho value (value là phần còn lại, biên đã xác định duy nhất) — thêm prefix thứ hai là ĐỔI BYTE. Dùng CHUNG một tag cho hai chế độ là lỗ P0: xem fval_mode_negative_controls.","#
+    );
+    println!(r#"  "fval_mode_hash": {{"#);
+    println!(r#"    "tag_fval": "{TAG_STATE_FVAL}","#);
+    println!(r#"    "tag_fval_salted": "{TAG_STATE_FVAL_SALTED}","#);
+    println!(
+        r#"    "mode_selector": "salt rỗng (len 0) ⇒ khong_salt; ngược lại ⇒ salted. Verifier KHÔNG đọc salt thì không biết mình ở miền băm nào — đó không phải thiếu một đầu vào, đó là băm nhầm miền.""#
+    );
+    println!(r#"  }},"#);
+
+    let modes = [
+        fval_mode_vector(
+            "M1-salt-rong-trung-bit-duong-cu",
+            "salt RỖNG phải trả về ĐÚNG fval_hash(value) — mọi state_root đã ký từ trước không đổi một bit",
+            b"",
+            m_val,
+        ),
+        fval_mode_vector(
+            "M2-salt-khac-rong",
+            "đường làm mù: tag RIÊNG + u32_be(len(salt)) trước salt",
+            s_salt,
+            m_val,
+        ),
+        fval_mode_vector(
+            "M3-salt-1-byte",
+            "biên nhỏ nhất khác rỗng — bắt bên cài quên u32_be mà dùng 1 byte length",
+            b"s",
+            m_val,
+        ),
+        fval_mode_vector(
+            "M4-value-rong-salt-khac-rong",
+            "value RỖNG vẫn hợp lệ; thiếu length-prefix cho value là ĐÚNG, đừng thêm",
+            s_salt,
+            b"",
+        ),
+    ];
+    println!(r#"  "fval_mode_vectors": ["#);
+    println!("{}", modes.join(",\n"));
+    println!(r#"  ],"#);
+
+    println!(r#"  "fval_mode_negative_controls": ["#);
+    println!(
+        r#"    {{"name": "NC1-hai-che-do-KHONG-duoc-chung-mien", "why": "Lỗ P0 Strata#71. Nếu bên cài dùng CHUNG một tag cho hai chế độ thì hai giá trị dưới đây cho ĐÚNG CÙNG một fvh, và người ghi cam kết `value_khong_salt` rồi xuất proof khai (salt, value_salted) — verifier băm lại khớp, state_root khớp, XANH. Không cần va chạm băm nào. Hai số dưới đây PHẢI KHÁC NHAU.", "salt": "{}", "value_salted": "{}", "value_khong_salt": "{}", "fvh_salted": "{}", "fvh_khong_salt_cua_V": "{}", "must": "fvh_salted != fvh_khong_salt_cua_V"}},"#,
+        hex(s_salt),
+        hex(m_val),
+        hex(&v_exploit),
+        hex(&fval_hash_salted(s_salt, m_val)),
+        hex(&fval_hash(&v_exploit)),
+    );
+    println!(
+        r#"    {{"name": "NC2-noi-tran-bi-chan", "why": "Thiếu u32_be(len(salt)) thì (salt=ab, value=c) và (salt=a, value=bc) cho cùng một fvh, mà cả hai đều do NGƯỜI GHI chọn. Hai số dưới đây PHẢI KHÁC NHAU.", "a": {{"salt": "{}", "value": "{}", "fvh": "{}"}}, "b": {{"salt": "{}", "value": "{}", "fvh": "{}"}}, "must": "a.fvh != b.fvh"}}"#,
+        hex(b"ab"),
+        hex(b"c"),
+        hex(&fval_hash_salted(b"ab", b"c")),
+        hex(b"a"),
+        hex(b"bc"),
+        hex(&fval_hash_salted(b"a", b"bc")),
+    );
+    println!(r#"  ]"#);
     println!("}}");
 }
