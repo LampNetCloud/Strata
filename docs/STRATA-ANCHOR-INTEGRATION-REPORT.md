@@ -2376,10 +2376,29 @@ Ba chỗ đo được, ghi để ngày đó khỏi đo lại:
 | doc `:390` | khai *"Trả phần dư chưa đọc"* — chữ ký `Result<PlutusData, CborError>` không trả phần dư nào |
 
 `settlement.rs:49-51` đã hạ claim tường minh (canonical ở tầng **cấu trúc**, kèm câu *"KHÔNG
-đảm bảo canonical CBOR nguyên thuỷ"*). `anchor_sink.rs` chưa có câu tương đương. Bản vá đề
-xuất: khối doc cùng khuôn + gác trailing-byte + sửa dòng `:390`; **chưa** siết luật chấp
-nhận mảng, vì siết khi chưa có đường thật nào chạy qua là chốt trước một quyết định thuộc
-bên dựng tx.
+đảm bảo canonical CBOR nguyên thuỷ"*). `anchor_sink.rs` chưa có câu tương đương.
+
+**Vá ở `#87`** — đúng ba chỗ không cần ai quyết: gác trailing-byte (`CborError::Trailing`),
+sửa dòng doc `:390`, và khối doc mức bảo đảm cùng khuôn `settlement.rs`. **Không** siết luật
+chấp nhận mảng và luật int non-minimal: siết khi chưa có đường thật nào chạy qua là chốt
+trước một quyết định thuộc bên dựng tx — và riêng luật definite array thì siết là **tự đóng
+cửa với chính đường sản xuất tương lai**, vì cardano-cli/Lucid phát definite.
+
+Bốn ca kiểm đi hai trục — hai ca đo vế **đã gác**, hai ca đo vế **khoan dung**; ca trailing
+có đối chứng dương ngay trên cùng input, vì một bộ toàn ca `Err` không phân biệt được "gác
+đúng" với "decoder hỏng". Ba lượt đảo mã, mỗi lượt đỏ **đúng một** ca:
+
+| đảo mã | ca đỏ |
+|---|---|
+| gỡ gác trailing trong `from_cbor` | `cbor_tu_choi_byte_thua_duoi` |
+| bỏ nhánh definite trong `read_field_list` | `cbor_nhan_ca_hai_dang_mang_constr` |
+| `read_arg` chỉ nhận minimal | `cbor_int_non_minimal_ra_cung_gia_tri` |
+
+🪤 Lượt thứ ba lúc đầu đỏ **hai** ca: bài *"cụt là `Eof`"* dùng input `0x1a…` nên phụ thuộc
+cùng luật `read_arg` với bài int non-minimal. Hai bài đo chung một luật thì một lượt đảo làm
+đỏ cả hai và **không chỉ ra được chỗ nào hỏng** — đảo mã mất đúng cái nó dùng để làm. Đổi
+input sang `0x41` (bytes(1) thiếu dữ liệu) để mỗi bài đo đúng một thứ. **279 pass** toàn
+workspace, clippy `-D warnings` sạch, `fmt --check` sạch.
 
 ### 20.4 Trạng thái đo của năm mục anh Đức để lại
 
@@ -2389,7 +2408,7 @@ bên dựng tx.
 | `#15` payload `{t,a}` | `#40` đã sửa cả ba chỗ mang lỗi (`§8.1(b)`, bảng `§4.2`, `Tech §5.2`) | đóng khi `#40` land |
 | `#64` | CI **xanh** sau `3a2416a`, `clean` | anh Đức merge |
 | `#40` | CI vẫn đỏ vì head `fcb8a14` chưa chạy lại; nội dung còn thiếu đúng `SeqGap` | anh Đức đẩy + chốt kiểu `on_chain_seq` |
-| `#41` | mục 4 · 5 ✅ land `3941141`; mục 2 → `#80`; **mục 3 rà xong**; mục 1 chờ `#40`; mục 6 chưa đo được | — |
+| `#41` | mục 4 · 5 ✅ land `3941141`; mục 2 → `#80`; **mục 3 vá ở `#87`**; mục 1 chờ `#40`; mục 6 chưa đo được | `#87` review |
 
 `#41` mục 6 (`[NEEDS-EVIDENCE]` kiểu `label` Blockfrost) **chưa đo** — điều kiện đóng tự đặt
 là log request/response thật, và ổ chứa `.env` Blockfrost mất mount giữa phiên (`/mnt/c`,
