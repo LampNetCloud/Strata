@@ -394,26 +394,29 @@ proptest! {
     /// **P7 `ref_id_collision_resistance`** — `(author_did, nonce)` khác → `ref_id`
     /// khác.
     ///
-    /// `Did` trong Strata là `[u8; 32]` cố định (CHỐT-5), nên test ở ĐÚNG miền hợp lệ:
-    /// did 32 byte, nonce độ dài tuỳ ý. Miền `author_did` độ dài tuỳ ý có va chạm cấu
-    /// trúc — xem `ref_id_variable_len_did_collides` (không phải va chạm BLAKE3).
+    /// `Did` **và** `genesis_nonce` trong Strata đều là `[u8; 32]` cố định (CHỐT-5), và
+    /// từ issue #39 điểm 1 thì chữ ký hàm cũng ép đúng thế, nên test chạy ở ĐÚNG miền
+    /// hợp lệ. Miền độ dài biến thiên — nơi có va chạm **cấu trúc**, không phải va chạm
+    /// BLAKE3 — nay không dựng được nữa; hàng rào cho nó là doctest `compile_fail` trên
+    /// `gen_ref_id_raw`, và vế giá trị-không-đổi ở
+    /// [`ref_id_value_unchanged_by_type_tightening`].
     ///
     /// **Miền sinh hẹp có chủ đích.** Bản đầu lấy did ngẫu nhiên 32 byte đầy đủ: hai did
     /// gần như LUÔN khác nhau ⇒ nhánh "cùng did, khác nonce" không bao giờ chạy, và
     /// mutation-test cho thấy bỏ hẳn `nonce` khỏi `gen_ref_id_raw` mà test **vẫn xanh**.
-    /// Nay did lấy từ pool 4 giá trị + nonce từ bảng chữ cái 2 ký tự ⇒ cả bốn tổ hợp
+    /// Nay did VÀ nonce cùng lấy từ pool 4 giá trị (chỉ số, không phải byte) ⇒ cả bốn tổ hợp
     /// (cùng/khác) × (did/nonce) đều xuất hiện thật.
     #[test]
     fn p7_ref_id_distinct_inputs_distinct_id(
         ia in 0usize..DID_POOL.len(),
         ib in 0usize..DID_POOL.len(),
-        nonce_a in prop::collection::vec(0u8..2, 0..4),
-        nonce_b in prop::collection::vec(0u8..2, 0..4),
+        ja in 0usize..NONCE_POOL.len(),
+        jb in 0usize..NONCE_POOL.len(),
     ) {
         let (did_a, did_b) = (DID_POOL[ia], DID_POOL[ib]);
-        let a = gen_ref_id_raw(&did_a, &nonce_a);
-        let b = gen_ref_id_raw(&did_b, &nonce_b);
-        if ia == ib && nonce_a == nonce_b {
+        let a = gen_ref_id_raw(&did_a, &NONCE_POOL[ja]);
+        let b = gen_ref_id_raw(&did_b, &NONCE_POOL[jb]);
+        if ia == ib && ja == jb {
             prop_assert_eq!(a, b, "cùng input → cùng ref_id (tất định)");
         } else {
             prop_assert_ne!(a, b, "input khác → ref_id phải khác");
@@ -425,13 +428,13 @@ proptest! {
     #[test]
     fn p7_nonce_alone_changes_ref_id(
         i in 0usize..DID_POOL.len(),
-        nonce_a in prop::collection::vec(0u8..3, 0..4),
-        nonce_b in prop::collection::vec(0u8..3, 0..4),
+        ja in 0usize..NONCE_POOL.len(),
+        jb in 0usize..NONCE_POOL.len(),
     ) {
-        prop_assume!(nonce_a != nonce_b);
+        prop_assume!(ja != jb);
         let did = DID_POOL[i];
         prop_assert_ne!(
-            gen_ref_id_raw(&did, &nonce_a), gen_ref_id_raw(&did, &nonce_b),
+            gen_ref_id_raw(&did, &NONCE_POOL[ja]), gen_ref_id_raw(&did, &NONCE_POOL[jb]),
             "cùng did, nonce khác → ref_id phải khác"
         );
     }
@@ -441,11 +444,11 @@ proptest! {
     fn p7_did_alone_changes_ref_id(
         ia in 0usize..DID_POOL.len(),
         ib in 0usize..DID_POOL.len(),
-        nonce in prop::collection::vec(0u8..3, 0..4),
+        j in 0usize..NONCE_POOL.len(),
     ) {
         prop_assume!(ia != ib);
         prop_assert_ne!(
-            gen_ref_id_raw(&DID_POOL[ia], &nonce), gen_ref_id_raw(&DID_POOL[ib], &nonce),
+            gen_ref_id_raw(&DID_POOL[ia], &NONCE_POOL[j]), gen_ref_id_raw(&DID_POOL[ib], &NONCE_POOL[j]),
             "cùng nonce, did khác → ref_id phải khác"
         );
     }
@@ -454,6 +457,12 @@ proptest! {
 /// Pool `Did` nhỏ (4 giá trị 32 byte phân biệt) — đủ nhỏ để "hai did BẰNG nhau" là ca
 /// thường gặp trong khi sinh, đủ khác nhau về byte để không tự tạo cấu trúc giả.
 const DID_POOL: [[u8; 32]; 4] = [[0x11; 32], [0x22; 32], [0xA5; 32], [0xFE; 32]];
+
+/// Pool `genesis_nonce` nhỏ, cùng lẽ với [`DID_POOL`]: từ issue #39 điểm 1 nonce cũng là
+/// `[u8; 32]` cố định, nên miền sinh phải là **chỉ số** vào một pool hẹp chứ không phải
+/// byte ngẫu nhiên 32 byte — nếu không thì "hai nonce BẰNG nhau" gần như không bao giờ
+/// xảy ra và nhánh cùng-nonce của P7 lại thành nhánh chết (đúng bẫy M6 lần trước).
+const NONCE_POOL: [[u8; 32]; 4] = [[0x01; 32], [0x02; 32], [0x7C; 32], [0xB3; 32]];
 
 // ─────────────────── strategy/helper phụ (ngoài macro proptest) ───────────────────
 
@@ -598,21 +607,29 @@ fn state_root_dup_key_not_permutation_invariant() {
     );
 }
 
-/// **Lưu vết P7 — va chạm CẤU TRÚC khi `author_did` độ dài biến thiên.**
+/// **Lưu vết P7 — va chạm CẤU TRÚC nay đóng ở KIỂU, và `ref_id` không đổi một bit.**
 ///
-/// `gen_ref_id_raw(author_did, nonce)` nối `author_did ‖ nonce` **không length-prefix**
-/// (`src/refid.rs`), nên `("ab", "c")` và `("a", "bc")` cho CÙNG `ref_id`. Trong đường
-/// đi hợp lệ, `Did = [u8; 32]` cố định nên không chạm; nhưng chữ ký hàm nhận `&[u8]` và
-/// `gen_ref_id` được re-export ở gốc crate, nên caller ngoài chạm được.
+/// Bản trước của ca kiểm này khẳng định `gen_ref_id_raw(b"ab", b"c")` bằng
+/// `gen_ref_id_raw(b"a", b"bc")` — va chạm thật, do phép nối không length-prefix.
+/// Hướng chốt ở issue #39 là siết KIỂU (`&[u8; 32]`) chứ không đổi công thức, nên hai
+/// dòng đó nay **không biên dịch được**: hàng rào chuyển từ lúc chạy sang lúc biên
+/// dịch, và không ca kiểm runtime nào giữ nổi nó nữa. Hàng rào đó cùng **đối chứng
+/// dương** (32 byte thì biên dịch) nằm ở doctest trên `gen_ref_id_raw`, `src/refid.rs`.
 ///
-/// Cùng lớp lỗi song ánh canonical §1.7 quy tắc 3 (issue #18). Ghim lại để quyết định
-/// nằm ở spec chứ không trôi lặng.
+/// Cái ca kiểm này giữ là vế còn lại — vế quyết định giữa hai hướng: siết kiểu **không
+/// đổi giá trị** `ref_id` nào. Vector dưới chụp trên `main` `dc222a6`, TRƯỚC lượt siết.
+/// Thêm length-prefix vào công thức (hướng (a)) làm ca này đỏ; đó đúng là cái giá mà
+/// hướng (b) tránh, vì `ref_id` KHÔNG đổi qua các phiên bản (INV-E5).
 #[test]
-fn ref_id_variable_len_did_collides_without_length_prefix() {
-    let x = gen_ref_id_raw(b"ab", b"c");
-    let y = gen_ref_id_raw(b"a", b"bc");
+fn ref_id_value_unchanged_by_type_tightening() {
+    const GOLDEN_DC222A6: [u8; 32] = [
+        0x29, 0x25, 0xaa, 0x32, 0xbf, 0xff, 0xc1, 0x2b, 0xf0, 0xfd, 0xea, 0x32, 0x51, 0x86, 0x0a,
+        0xeb, 0xbf, 0xc2, 0x5c, 0x29, 0x91, 0x73, 0xc6, 0xa5, 0xe8, 0xc1, 0xd9, 0xa1, 0xb3, 0x32,
+        0xbe, 0xcc,
+    ];
     assert_eq!(
-        x, y,
-        "nếu KHÁC nhau thì refid đã được length-prefix — cập nhật lưu vết này + P7"
+        gen_ref_id_raw(&[7u8; 32], &[9u8; 32]),
+        GOLDEN_DC222A6,
+        "ref_id đã ĐỔI GIÁ TRỊ — mọi lnref1… đã lưu/đã neo nay trỏ sai (INV-E5)"
     );
 }

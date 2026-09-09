@@ -342,6 +342,8 @@ pub fn gen_ref_id(author_did: &Did, genesis_nonce: &H32) -> H32 {
 pub fn encode_ref_id_bech32(ref_id: &H32) -> String { /* bech32m, charset như cid.rs */ }
 ```
 
+> **Chữ ký kiểu là một phần của chốt, không phải chi tiết cài đặt** (issue #39 điểm 1). Phép nối trên KHÔNG length-prefix, nên nếu tham số nhận lát cắt độ dài tuỳ ý thì `(A‖B, C)` và `(A, B‖C)` cho **cùng** `ref_id` — va chạm **cấu trúc**, chi phí bằng không, không cần va chạm BLAKE3. Không vá bằng length-prefix: `author_did` là trường **cố định** ghi nguyên byte (`_CONTRACT.md`, §1.7 quy tắc 4) và đổi công thức là đổi **giá trị** mọi `ref_id` đã sinh, mà `ref_id` KHÔNG đổi qua các phiên bản (INV-E5). Vì thế hai tham số PHẢI là kiểu độ dài cố định 32 byte (`&Did` / `&H32` như viết ở trên), để bên truyền lát cắt tuỳ ý đỏ lúc **biên dịch**. Mã đã theo: `src/refid.rs::gen_ref_id_raw` nhận `&[u8; 32]`, kèm doctest `compile_fail` + đối chứng dương.
+
 ### §2.2 Lỗi hiện tại trong `cid.rs` / `spec.rs`
 
 Định danh công khai hiện **nhúng loại**:
