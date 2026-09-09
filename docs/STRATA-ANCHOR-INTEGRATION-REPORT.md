@@ -2484,3 +2484,68 @@ lúc dùng, nếu quãng giữa có người land gì đó.
 | `Math §7.1:329-332` + `§10 Mệnh đề 2` | nợ mở, **thuộc anh Đức** — nêu `13/08`, chưa land |
 | `src/anchor_sink.rs:64` | còn `VeDataIO/Code` trong doc-comment (ngoài phạm vi PR spec) |
 | `SeqGap.on_chain_seq: Option<u64>` | chờ anh Đức chốt kiểu |
+
+---
+
+## §21. Vòng `09/09` (2) — `#39` sau khi anh Đức trả lời: một điểm land, một điểm dừng có lý do, một điểm hết việc
+
+Anh Đức trả lời `#39` ngày `06/09`, sau **36 ngày** treo. Bản vá ở `#88`. Mục này ghi cả ba điểm, kể cả hai điểm **không** sinh ra thay đổi mã — vì "không có việc" cũng là một kết quả đo, và lần sau đọc lại thì cần biết vì sao.
+
+### 21.1 Con trỏ của người trả lời trỏ vào văn bản đã trôi
+
+Comment viết `06/09` đo trên `main` = `a4ac267` (`31/08`). Vòng land `09/09` (`§20`) đẩy 5 PR spec vào giữa. Nên **hai trong ba** con trỏ dòng hết đúng trước khi ai kịp đọc:
+
+| Điểm | Con trỏ trong comment | `main` `dc222a6` hôm nay |
+|---|---|---|
+| 1. `ref_id` | `src/refid.rs:19` nhận `&[u8]` | y nguyên — **chưa ai land**, đây là việc thật |
+| 2. spec dup-key | `Strata-API.md:463` | trôi xuống `:773`; `:463` nay là đoạn "KHÔNG khử trùng ở tầng đọc", không liên quan |
+| 3. §9.3 P3 | `Strata-Tech.md:816` câu cũ về MMR | **đã sửa rồi** ở `#40` `f4a3ec6`, nay `:850`, bind theo `mmr_size` + dẫn `Math §4.5` |
+
+Đây là lần thứ hai cùng một hình dạng: comment là **ảnh chụp**, không phải trạng thái. Cách duy nhất không mất thời gian là mở văn bản tại đúng commit người ta đo (`git rev-list -1 --before=… main`) rồi so với `main`, trước khi bắt tay.
+
+### 21.2 Điểm 1 — hướng (b), và một lẽ mới mà comment chưa có
+
+Anh Đức so hai hướng trên bốn trục và chốt **(b) siết KIỂU**. Land nguyên hướng đó: `gen_ref_id_raw` / `gen_ref_id` nhận `&[u8; 32]`.
+
+Một lẽ **thứ năm** phát sinh sau comment, mạnh hơn cả bốn trục kia vì nó không phải đánh đổi mà là mâu thuẫn: `#82` (`4934b18`, land `09/09`) chốt trong `_CONTRACT.md` rằng `author_did` là trường **cố định**, ghi nguyên byte, **KHÔNG** tiền tố độ dài. Và `Strata-Tech.md:334` vốn đã viết chữ ký kiểu cố định (`&Did`, `&H32`) từ đầu. Vậy (b) là đưa **mã** về đúng spec; (a) nay **mâu thuẫn** spec chứ không còn là một lựa chọn kém hơn.
+
+**Giá trị không đổi một bit** — và không để câu đó là lời hứa: golden vector chụp trên `dc222a6` **trước** lượt siết, ghim ở `ref_id_value_unchanged_by_type_tightening`. Hướng (a) làm đúng ca đó đỏ, nên ca kiểm chính là chỗ lưu lý do chọn.
+
+### 21.3 Hàng rào rời khỏi tầm với của test — và cách chứng minh nó vẫn thật
+
+Ca lưu vết cũ khẳng định `gen_ref_id_raw(b"ab", b"c") == gen_ref_id_raw(b"a", b"bc")`. Sau khi siết kiểu, hai dòng đó **không biên dịch được**, nên hàng rào chuyển từ lúc chạy sang lúc **biên dịch** và không ca kiểm runtime nào giữ nổi nó. Thay bằng doctest `compile_fail`.
+
+`compile_fail` là loại cổng dễ xanh giả nhất trong Rust: nó xanh **cả khi hỏng vì lý do khác** — sai `use`, sai tên hàm, thiếu crate. Một mình nó không chứng minh gì. Hai thứ đi kèm mới làm nó thành hàng rào:
+
+- **đối chứng dương** ngay cạnh, dùng **cùng dòng `use`**, thân 32 byte → biên dịch được ⇒ đường import đã resolve ⇒ cái đỏ ở ca kia đỏ vì **kiểu**, không vì môi trường;
+- **đối chứng nghịch đã đo**: đưa thân `compile_fail` về ca 32 byte thì doctest đỏ, và đỏ **đúng lý do** — `Test compiled successfully, but it's marked compile_fail`. Tức cổng này *xanh được* và *đỏ được*, không phải cổng luôn xanh.
+
+### 21.4 Một chỗ suýt thành xanh giả, đúng bẫy cũ
+
+Ba ca P7 sinh `nonce` bằng `prop::collection::vec(0u8..3, 0..4)` — độ dài biến thiên, nên siết kiểu là chúng gãy. Chỗ dễ làm cho xong là đổi sang `[u8; 32]` ngẫu nhiên. Như vậy thì "hai nonce BẰNG nhau" gần như không bao giờ xảy ra ⇒ nhánh cùng-nonce thành **nhánh chết** ⇒ mutation "bỏ hẳn `nonce`" lại xanh — **đúng bẫy M6** đã bắt được ở `#38`, chỉ đổi trục từ did sang nonce. Nên miền sinh là **chỉ số** vào `NONCE_POOL` 4 giá trị, cùng lẽ với `DID_POOL` sẵn có.
+
+Ghi lại thành câu dùng được: *khi siết một tham số từ độ dài biến thiên sang cố định, mọi miền sinh property chạm tham số đó phải đo lại xem nhánh "bằng nhau" còn xảy ra không* — sức của property test nằm ở miền sinh, không ở số ca.
+
+### 21.5 Điểm 2 — sửa spec cho khớp hiện trạng, KHÔNG đóng nợ bằng câu chữ
+
+Câu cũ ở `Strata-API.md` gộp ba việc vào một, nên đọc được thành "lõi đã cưỡng chế". Tách làm ba vế:
+
+| Vế | Nội dung |
+|---|---|
+| đã đóng ở **CỬA** | `find_duplicate_key` (`src/state.rs:135`) gọi tại `node/src/dto.rs::to_pairs` (`#50`) — mọi request qua daemon bị chặn 400 trước `build_state_root` |
+| **CHƯA** đóng ở **LÕI** | `build_state_root` vẫn trả `Hash32` vô-lỗi; `StrataError` có **11 biến thể, không biến thể nào tên `DuplicateFieldKey`**. Caller gọi thẳng crate vẫn ký được version có `X = v1` VÀ `X = v2`, hai giá trị mâu thuẫn cùng sinh field-proof hợp lệ dưới CÙNG `state_root` đã ký |
+| yêu cầu còn **mở** | giữ nguyên chữ "core PHẢI enforce" + phạm vi + ngoại lệ `field_policy::grant()` |
+
+Chỗ cố ý **không** làm: vế enforce đổi `build_state_root` từ `-> Hash32` sang `-> Result<…>`, tức đổi **chữ ký công khai** của một hàm re-export ở gốc crate. Và vùng tìm bên tiêu thụ ngoài repo **không đóng** — `gh api repos/LampNetCloud/lampnet-hivemind` trả `404` với token hiện có, `gh search code` trả rỗng. "Không thấy" ở một vùng không đóng thì không có nghĩa gì, nên không kết luận "không có bên gọi nào" và không land. Đã hỏi ở `#88`: hoặc quyền đọc kho đó để đo, hoặc chữ chốt cứ đổi.
+
+### 21.6 Nợ mở sau vòng này
+
+| Mục | Trạng thái |
+|---|---|
+| `#39` điểm 1 | ✅ land ở `#88` |
+| `#39` điểm 3 | ✅ hết việc — `#40` đã sửa `09/09` |
+| `#39` điểm 2, vế **lõi** | ⬜ **mở** — chờ chốt chữ ký `build_state_root` + đo bên gọi ngoài repo. `#39` giữ mở vì mục này |
+| `Math §7.1:329-332` + `§10 Mệnh đề 2` | nợ mở, thuộc anh Đức — nêu `13/08`, chưa land |
+| `SeqGap.on_chain_seq: Option<u64>` | chờ chốt kiểu |
+| `#41` mục 6 | chưa đo — kiểu `label` Blockfrost, cần log request/response thật |
+| `src/anchor_sink.rs:64` | còn `VeDataIO/Code` trong doc-comment |
