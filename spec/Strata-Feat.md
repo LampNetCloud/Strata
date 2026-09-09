@@ -60,7 +60,7 @@ Strata mở ra năm khả năng mà hệ thống dữ liệu tĩnh hiện nay kh
 
 - **Chứng minh một trường mà giấu trường khác.** Với hồ sơ cấu trúc (học bạ, sổ bệnh), người dùng chứng minh đúng **một trường** — ví dụ "điểm Toán là 9", "nhóm máu là O" — mà **không để lộ** các trường còn lại (INV-E6). Một field-level proof từ `state_root` chỉ phơi bày trường được chọn; bên xác minh tin được trường đó mà vẫn không biết gì về phần riêng tư còn lại.
 
-- **Kiểm tra lịch sử không bị sửa.** Bất kỳ ai cũng đối chiếu được chuỗi phiên bản với `anchor` đã neo trên Cardano để chắc rằng lịch sử **chưa bị tua lùi hay sửa lén**. Vì `anchor` đơn điệu theo `seq` (INV-E7), không ai neo lại được một phiên bản cũ để giả vờ trạng thái khác. Một bằng chứng inclusion cũ vẫn đúng dưới `mmr_root` mới (INV-E3) — lịch sử chỉ dài thêm, không bao giờ viết lại.
+- **Kiểm tra lịch sử không bị sửa.** Bất kỳ ai cũng đối chiếu được chuỗi phiên bản với `anchor` đã neo trên Cardano để chắc rằng lịch sử **chưa bị tua lùi hay sửa lén**. Vì `anchor` đơn điệu theo `seq` (INV-E7), không ai neo lại được một phiên bản cũ để giả vờ trạng thái khác. Một bằng chứng inclusion cũ vẫn xác thực được sau khi lịch sử dài thêm — verify lại dưới tập peak hiện hành (INV-E3; chi tiết `Strata-Math §4.5`) — lịch sử chỉ dài thêm, không bao giờ viết lại.
 
 ---
 
