@@ -1,0 +1,70 @@
+name: CI
+
+# Gate cho repo Strata — issue #24.
+#
+# Trước PR này repo KHÔNG có workflow nào: `gh pr checks` trả "no checks reported",
+# nên mọi lệnh test/clippy/fmt chỉ đúng ở máy nào có chạy. Đây là cùng lớp gap đã gặp
+# ở VeDataIO/Glint#12 và gói tx-builder của Mosaic.
+#
+# Thứ tự bật (xem #24): pin toolchain (#29) → sweep fmt (#30) → MỚI bật gate này.
+# Bật `fmt --check` trước khi sweep thì mọi PR đỏ oan.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust (test · clippy · fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `lampnet-merkle-anchor` kéo từ LampNetCloud/Anchor (pin git rev). Repo đó nay
+      # **public** (`gh api repos/LampNetCloud/Anchor` → `visibility: public`, đo 2026-09-04),
+      # nên cargo fetch ẩn danh qua https là đủ — không cần deploy key, không cần rewrite
+      # URL, không cần `CARGO_NET_GIT_FETCH_WITH_CLI`.
+      #
+      # Trước đây workflow gác bằng secret `ANCHOR_DEPLOY_KEY` vì Anchor từng private; secret
+      # chưa bao giờ được đặt (cần admin) nên `main` đỏ 67/67 lượt từ 17/08 tới 31/08 — đỏ vì
+      # một điều kiện đã hết đúng, không phải vì mã. Bước dưới gác đúng điều kiện THẬT: Anchor
+      # còn đọc ẩn danh được không. Nếu một ngày Anchor quay lại private thì bước này đỏ với
+      # câu chỉ đường, và đường deploy key (SSH, không phải PAT) vẫn ở
+      # `docs/STRATA-S7-CI-REPORT.md §4` để dựng lại.
+      - name: Preflight — LampNetCloud/Anchor đọc ẩn danh được
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          if ! git -c credential.helper= ls-remote --exit-code \
+               https://github.com/LampNetCloud/Anchor.git HEAD >/dev/null 2>&1; then
+            echo "::error::Không đọc ẩn danh được https://github.com/LampNetCloud/Anchor."
+            echo "::error::Cargo.toml pin lampnet-merkle-anchor từ repo đó; cargo fetch sẽ chết vì auth."
+            echo "::error::Nếu Anchor đã chuyển private: dựng lại đường deploy key theo"
+            echo "::error::docs/STRATA-S7-CI-REPORT.md §4 (cần admin repo để đặt secret)."
+            exit 1
+          fi
+
+      # KHÔNG pin toolchain ở đây: rust-toolchain.toml (#29) là nguồn duy nhất.
+      # rustup tự cài đúng channel + components khi chạy lệnh cargo đầu tiên.
+      - name: Toolchain theo rust-toolchain.toml
+        run: rustup show && cargo --version && rustfmt --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+

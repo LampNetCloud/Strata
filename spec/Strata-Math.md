@@ -74,6 +74,7 @@ H_dom(tag, x) = BLAKE3( tag ‖ 0x00 ‖ x )
 | MMR internal node | `LN/STRATA/mmr/node/v1` |
 | MMR root (bag + n) | `LN/STRATA/mmr/root/v1` |
 | State: băm giá trị trường | `LN/STRATA/state/fval/v1` |
+| State: băm giá trị trường, dạng **làm mù** | `LN/STRATA/state/fval/salted/v1` |
 | State: leaf (key+fval) | `LN/STRATA/state/leaf/v1` |
 | State: internal node | `LN/STRATA/state/node/v1` |
 | State: padding (giấu số trường) | `LN/STRATA/state/pad/v1` |
@@ -109,7 +110,7 @@ Vì vậy Strata thỏa: số lá khác nhau ⇒ tập đỉnh khác nhau ⇒ ro
 
 ### §3.1 Định nghĩa `version_hash`
 
-Gọi `core(v)` là mã hóa tất định (deterministic, ví dụ TLV độ-dài-có-tiền-tố hoặc CBOR canonical) của **tất cả** trường phiên bản **trừ** `sig`, theo đúng thứ tự canonical ở §1:
+Gọi `core(v)` là mã hóa tất định của **tất cả** trường phiên bản **trừ** `sig`, theo đúng thứ tự canonical ở §1. Mã hóa **đã CHỐT là TLV độ-dài-có-tiền-tố**, **KHÔNG** phải CBOR canonical — quy tắc byte đầy đủ ở `Strata-Tech.md §1.7`, vector đối chiếu ở `apis/canonical-core-vectors.json`. (Nêu hai lựa chọn ở đây là để ngỏ một quyết định đã chốt: hai bên cài hai kiểu sẽ ra hai `version_hash` khác nhau cho cùng một phiên bản, mà cả hai đều "đúng spec".)
 
 ```
 core(v) = canonical( seq, prev_hash, content_cid, state_root, author_did, policy_hash, ts )
@@ -127,7 +128,13 @@ Tức là: phần lõi được băm thẳng ra `version_hash`; tác giả ký *
 - `version_hash` định danh duy nhất phần **nội dung** phiên bản (không phụ thuộc chữ ký). Vì `prev_hash` của phiên bản kế trỏ vào `version_hash` này, liên kết chuỗi (§3.2) khóa chặt nội dung.
 - `sig` **bắt buộc là chữ ký Ed25519 canonical (low-S)**: với một cặp `(pk, version_hash)` chỉ tồn tại **một** chữ ký canonical hợp lệ. Điều này chặn malleability ở tầng chữ ký (không thể tạo một `sig'` khác cùng hợp lệ cho cùng nội dung) — chứng minh ở §10 Mệnh đề 6. Verifier kiểm `Ed25519_verify(pk(author_did), version_hash(v), sig(v))` **và** kiểm dạng canonical (low-S) rồi mới chấp nhận; cột chặt nội dung ↔ tác giả (phục vụ INV-E4).
 
-> Lưu ý mã hóa: `canonical` phải là **song ánh** trên miền trường (mỗi bộ trường ↔ đúng một chuỗi byte). Dùng độ-dài-có-tiền-tố cho mọi trường biến độ dài (`content_cid`, `author_did`) để tránh nhập nhằng ranh giới — nếu không, hai bộ trường khác nhau có thể cho cùng `core` và cùng `version_hash` (va chạm cấu trúc, không phải va chạm BLAKE3). Đây là điều kiện để mọi mệnh đề an toàn ở §10 quy được về độ khó BLAKE3.
+> Lưu ý mã hóa: `canonical` phải là **song ánh** trên miền trường (mỗi bộ trường ↔ đúng một chuỗi byte), nếu không hai bộ trường khác nhau có thể cho cùng `core` và cùng `version_hash` — va chạm **cấu trúc**, không phải va chạm BLAKE3. Đây là điều kiện để mọi mệnh đề an toàn ở §10 quy được về độ khó BLAKE3.
+>
+> Song ánh đạt được bằng **hai luật khác nhau cho hai loại trường**, và trộn hai luật là hỏng:
+> - **Trường biến độ dài** — trong `core(v)` **chỉ có `content_cid`** — ghi `u32_be(len)` rồi tới byte.
+> - **Trường cố định** (`prev_hash`, `state_root`, `author_did`, `policy_hash`, đều đúng 32 byte theo §2.1) — ghi **nguyên byte, KHÔNG tiền tố độ dài**.
+>
+> ⚠️ `author_did` là trường **cố định** (`Did = [u8;32]`, CHỐT-5), **không** phải trường biến độ dài. Thêm `u32_be(32)` trước nó là **đổi byte** ⇒ đổi `version_hash` ⇒ **hỏng mọi chữ ký đã ký**, và hỏng theo kiểu không chỉ ra được nguyên nhân: chữ ký Ed25519 sai không nói nó sai ở byte nào, nên một bên cài như vậy sẽ nhận `BadSignature` cho **mọi** phiên bản mà không log nào giải thích. Quy tắc byte đầy đủ: `Strata-Tech.md §1.7` quy tắc 4.
 
 ### §3.2 Liên kết chuỗi và chứng minh INV-E1, INV-E2
 
@@ -289,7 +296,21 @@ Field-proof là **ZK-lite**, không phải zero-knowledge đầy đủ. Nó *có
 
 *Giải pháp khi cần giấu cả số trường và chống so-khớp*:
 - **Đệm (padding)** số lá lên lũy thừa 2 cố định bằng các lá giả `H_dom("LN/STRATA/state/pad/v1", nonce)` — che số trường thật.
-- **Làm mù (blinding)**: `fvh_i = H_dom("LN/STRATA/state/fval/v1", salt_i ‖ field_value_bytes)` với `salt_i` ngẫu nhiên mỗi phiên bản — khiến hash anh em đổi mỗi lần, chặn so-khớp liên-proof và tấn công từ điển trên giá trị ít entropy (ví dụ trường boolean).
+- **Làm mù (blinding)**: `fvh_i = H_dom("LN/STRATA/state/fval/salted/v1", u32_be(len(salt_i)) ‖ salt_i ‖ field_value_bytes)` với `salt_i` ngẫu nhiên mỗi phiên bản — khiến hash anh em đổi mỗi lần, chặn so-khớp liên-proof và tấn công từ điển trên giá trị ít entropy (ví dụ trường boolean).
+
+  **Hai chi tiết dưới đây là điều kiện đúng đắn, không phải tuỳ chọn hiện thực.**
+
+  1. **Tag RIÊNG cho dạng làm mù.** Dùng chung `.../fval/v1` cho cả hai dạng thì với salt `S`
+     và giá trị `M` bất kỳ, giá trị **không làm mù** `V = u32_be(|S|) ‖ S ‖ M` cho **đúng cùng
+     một `fvh`**. Người ghi cam kết `V` rồi xuất proof khai `(salt = S, value = M)` — verifier
+     băm lại khớp, `state_root` khớp, **xanh**. Tức đổi được lời khai về giá trị SAU KHI
+     `state_root` đã nằm trong `version_hash` đã ký. Không cần va chạm băm nào.
+  2. **Length-prefix cho `salt_i`.** Nối trần `salt_i ‖ value` cho `(salt="ab", value="c")` và
+     `(salt="a", value="bc")` cùng một `fvh`, mà cả hai đều do người ghi chọn — cùng một lớp lỗi,
+     lùi xuống một bậc.
+
+  Cả hai đều là lỗi **phân tách miền**, không phải rủi ro mật mã: chúng không phụ thuộc kích thước
+  không gian giá trị, nên rào "trường này chỉ có 3–4 giá trị nên không lo" không áp được.
 - Khi cần ẩn hoàn toàn (chứng minh thuộc tính mà không lộ cả hash), nâng lên cam kết đại số + bằng chứng ZK (ngoài phạm vi V hiện tại; ghi chú để backlog).
 
 Đây là sự đánh đổi có chủ đích: ZK-lite rẻ (chỉ băm), đủ cho phần lớn ca dùng; khi cần kín hơn thì bật padding + blinding.

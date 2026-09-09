@@ -32,6 +32,26 @@ pub enum ApiError {
     AnchorRejected(String),
     /// Backend neo lỗi mạng (`Network`) — client retry được. 503.
     AnchorNetwork(String),
+    /// `ts` vượt quá xa hiện tại ⇒ gần như chắc chắn client gửi **mili giây** thay vì giây.
+    ///
+    /// Vì sao phải chặn Ở CỬA chứ không ở lõi: lõi (`chain.rs`) là hàm thuần, không có đồng
+    /// hồ — nó chỉ ép `ts` không-giảm, nên một `ts` tương lai xa vẫn hợp lệ với nó. Nhưng
+    /// nhận nó một lần là **khoá chết quyền ghi của ref đó tới tận năm 56000**: mọi version
+    /// sau với `ts` giây thật đều `TimestampRegress`. Không có route sửa, không có rollback.
+    /// Một ký tự thừa của `Date.now()` = mất hồ sơ vĩnh viễn. Đây là chỗ duy nhất chặn được.
+    /// Nhật ký bền vững hỏng ⇒ RAM đã tiến quá trạng thái ghi được. 503.
+    ///
+    /// Không phải 500: 500 nói *"lỗi bất ngờ"*, còn đây là một trạng thái **đã biết và
+    /// đã chọn** — daemon còn phục vụ ĐỌC đúng, chỉ không nhận thêm việc nó không nhớ nổi.
+    JournalBroken(String),
+    TimestampTooFarFuture {
+        /// `ts` client gửi.
+        got: u64,
+        /// Đồng hồ daemon lúc nhận (unix secs).
+        now: u64,
+        /// Biên lệch cho phép (giây).
+        max_skew: u64,
+    },
 }
 
 impl From<StrataError> for ApiError {
@@ -55,6 +75,15 @@ impl From<AnchorError> for ApiError {
                 current: on_chain_seq,
                 attempted,
             }),
+            // Nhảy bậc seq: client ĐANG gọi sai thứ tự, không phải backend hỏng. Nói thẳng
+            // seq nào phải neo trước để client sửa được, thay vì để nó retry mù.
+            AnchorError::SeqGap {
+                expected,
+                attempted,
+                ..
+            } => ApiError::AnchorRejected(format!(
+                "nhảy bậc seq: on-chain đòi neo seq={expected} trước, đã thử seq={attempted}"
+            )),
             // Hai lỗi fail-cứng của backend UTxO — retry vô ích, trả 502 kèm lý do.
             AnchorError::DatumTooLarge { bytes } => {
                 ApiError::AnchorRejected(format!("datum {bytes} byte vượt giới hạn tx"))
@@ -62,12 +91,37 @@ impl From<AnchorError> for ApiError {
             AnchorError::InsufficientAda { need, have } => {
                 ApiError::AnchorRejected(format!("min-ADA không đủ: cần {need}, có {have}"))
             }
+            // 400, KHÔNG phải 502. Backend chưa hề được hỏi: lô do bên gọi dựng đã tự
+            // mâu thuẫn (hai anchor cho cùng một `ref_id`), và sink chặn trước cả lượt
+            // đọc on-chain. Trả 5xx ở đây là đổ lỗi cho chuỗi về một thứ chuỗi không gây
+            // ra — client sẽ đi retry mù thay vì đi sửa lô.
+            //
+            // Dùng `Malformed` thay vì đặt một tên lỗi HTTP mới: bộ tên lỗi trên dây là bề
+            // mặt client học thuộc, thêm tên vào đó là việc của spec + anh Đức (bảng §3.1
+            // `Strata-API.md`), không phải việc của một bản vá lỗi vận hành. Lý do vẫn
+            // đọc được nguyên vẹn ở `detail.reason`.
+            AnchorError::DuplicateRefIdInBatch { ref_id } => ApiError::Malformed(format!(
+                "lô có hai anchor cùng ref_id {} — một tx không được mang hai seq cho cùng \
+                 một lineage; gộp chúng lại rồi gửi một anchor duy nhất cho ref đó",
+                h(&ref_id)
+            )),
         }
     }
 }
 
 fn h(x: &Hash32) -> String {
     hex::encode(x)
+}
+
+/// Mô tả một dòng — dùng cho log khởi động và cho thông điệp replay.
+///
+/// Cùng nguồn với thân response (`split`), nên câu người vận hành đọc trong log **là**
+/// câu client nhận. Hai câu khác nhau cho cùng một lỗi là hai lời khai phải đối chiếu tay.
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (status, name, detail) = split(self);
+        write!(f, "{} {name} {detail}", status.as_u16())
+    }
 }
 
 /// `(status, tên lỗi, detail)` — bảng §3.1 cho phần lõi.
@@ -158,6 +212,26 @@ fn split(e: &ApiError) -> (StatusCode, &'static str, Value) {
             StatusCode::SERVICE_UNAVAILABLE,
             "AnchorNetwork",
             json!({ "reason": m }),
+        ),
+        ApiError::JournalBroken(m) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "JournalBroken",
+            json!({ "detail": m }),
+        ),
+        // 422 — cùng nhóm với `TimestampRegress` của lõi (cả hai là lỗi miền `ts`).
+        // Thông điệp nói THẲNG nguyên nhân thật (đơn vị), vì client đọc "ts không hợp lệ"
+        // sẽ đi sửa đồng hồ chứ không đi sửa đơn vị.
+        ApiError::TimestampTooFarFuture { got, now, max_skew } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "TimestampTooFarFuture",
+            json!({
+                "got": got,
+                "now": now,
+                "max_skew_secs": max_skew,
+                "detail": "ts tính bằng GIÂY unix, không phải mili giây. \
+                           Nhận một ts tương lai xa sẽ khoá quyền ghi của ref này vĩnh viễn \
+                           (mọi version sau đều TimestampRegress), nên daemon từ chối ở cửa."
+            }),
         ),
     }
 }

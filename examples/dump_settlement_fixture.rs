@@ -9,6 +9,7 @@
 //! Chạy lại khi đổi codec: `cargo run --example dump_settlement_fixture > apis/settlement-metadata.json`
 //! Rust là nguồn sinh vì nó giữ **decoder** — bên nào phải khớp thì bên đó không nên tự ra đề.
 
+use ciborium::value::{Integer, Value};
 use lampnet_strata::chain::StrataAnchor;
 use lampnet_strata::settlement::{SettlementRecord, encode_records};
 
@@ -116,6 +117,151 @@ fn multi_case() -> String {
     )
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Khối `must_reject` + `must_skip` — anh Đức chốt hướng (b) ở PR #40.
+//
+// Vì sao cần: tám ca ở trên toàn là **ca dương**. Một bản cài TS pass 8/8 vẫn có thể
+// **nhận** một encoding không canonical, vì không ca nào ép nó phải TỪ CHỐI thứ gì.
+// Chừng nào chưa có khối này thì gọi fixture là "nguồn sự thật DUY NHẤT" là nói quá —
+// nó mới là nguồn sự thật cho **nửa dương**.
+//
+// Cùng hình dạng với `apis/canonical-core-vectors.json` (PR #47): ca dương khoá encoder,
+// ca âm khoá decoder. Thiếu nửa nào thì nửa đó trôi tự do.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn cbor_hex(v: &Value) -> String {
+    let mut out = Vec::new();
+    ciborium::ser::into_writer(v, &mut out).expect("Vec<u8> writer không fail");
+    hex(&out)
+}
+
+fn t_a(t: u8, a: Vec<Value>) -> Value {
+    Value::Map(vec![
+        (Value::Text("t".into()), Value::Integer(Integer::from(t))),
+        (Value::Text("a".into()), Value::Array(a)),
+    ])
+}
+
+fn bytes32(fill: u8) -> Value {
+    Value::Bytes(vec![fill; 32])
+}
+
+fn reject_case(name: &str, why: &str, err: &str, top: Value) -> String {
+    format!(
+        r#"    {{
+      "name": "{name}",
+      "why": "{why}",
+      "expect_error": "{err}",
+      "cbor_hex": "{}"
+    }}"#,
+        cbor_hex(&top)
+    )
+}
+
+fn malformed() -> Vec<String> {
+    vec![
+        // Luật: bytes ≤64B phải là MỘT bytestring trần. Bọc mảng 1 chunk = không canonical.
+        reject_case(
+            "le64_wrapped_in_array",
+            "ref_id 32B bọc trong mảng 1 chunk — <=64B thì CẤM chunk, nếu không thì một giá trị có hai encoding",
+            "BadChunking",
+            Value::Array(vec![t_a(
+                1,
+                vec![
+                    Value::Array(vec![bytes32(0x11)]),
+                    bytes32(0x22),
+                    bytes32(0x33),
+                    Value::Integer(Integer::from(0u8)),
+                ],
+            )]),
+        ),
+        // Luật: mọi chunk TRỪ chunk cuối phải đúng 64B.
+        reject_case(
+            "middle_chunk_not_64",
+            "payload 65B chia [32,33] thay vì [64,1] — chunk giữa khác 64B thì cùng một bytes có nhiều cách chia",
+            "BadChunking",
+            Value::Array(vec![t_a(
+                2,
+                vec![Value::Array(vec![
+                    Value::Bytes(payload(32)),
+                    Value::Bytes(payload(33)),
+                ])],
+            )]),
+        ),
+        // Luật: chunk cuối 1..=64B, KHÔNG được rỗng.
+        reject_case(
+            "last_chunk_empty",
+            "chia [64,0] — chunk cuối rỗng là chunk thừa, cùng bytes lại có thêm một encoding",
+            "BadChunking",
+            Value::Array(vec![t_a(
+                2,
+                vec![Value::Array(vec![
+                    Value::Bytes(payload(64)),
+                    Value::Bytes(vec![]),
+                ])],
+            )]),
+        ),
+        // Luật: record map phải có ĐÚNG 2 entry (t, a) — chống malleability duplicate-key.
+        reject_case(
+            "map_three_entries",
+            "map có entry thứ ba — parser khác nhau thấy giá trị khác nhau khi map có key lạ/trùng",
+            "BadShape",
+            Value::Array(vec![Value::Map(vec![
+                (Value::Text("t".into()), Value::Integer(Integer::from(1u8))),
+                (
+                    Value::Text("a".into()),
+                    Value::Array(vec![
+                        bytes32(0x11),
+                        bytes32(0x22),
+                        bytes32(0x33),
+                        Value::Integer(Integer::from(0u8)),
+                    ]),
+                ),
+                (Value::Text("x".into()), Value::Integer(Integer::from(9u8))),
+            ])]),
+        ),
+        reject_case(
+            "record_not_a_map",
+            "record là mảng thay vì map — hình dạng sai ngay tầng ngoài",
+            "BadShape",
+            Value::Array(vec![Value::Array(vec![Value::Integer(Integer::from(1u8))])]),
+        ),
+        reject_case(
+            "bytestring_over_64",
+            "một bytestring 65B không chunk — vượt trần bytestring của metadata Cardano",
+            "BadChunking",
+            Value::Array(vec![t_a(2, vec![Value::Bytes(payload(65))])]),
+        ),
+    ]
+}
+
+/// `t` lạ **KHÔNG** phải lỗi — bỏ qua để giữ forward-compat. Ca này khoá đúng chiều ngược
+/// lại của `must_reject`: một bản cài quá nghiêm, ném lỗi khi gặp `t` chưa biết, sẽ làm
+/// mọi reader cũ chết ngay ngày thêm loại record mới.
+fn skip_case() -> String {
+    let top = Value::Array(vec![
+        t_a(99, vec![Value::Bytes(payload(4))]),
+        t_a(
+            1,
+            vec![
+                bytes32(0x11),
+                bytes32(0x22),
+                bytes32(0x33),
+                Value::Integer(Integer::from(7u8)),
+            ],
+        ),
+    ]);
+    format!(
+        r#"    {{
+      "name": "unknown_t_is_skipped_not_error",
+      "why": "t=99 chưa biết phải BỎ QUA, không được ném lỗi (forward-compat); record t=1 sau nó vẫn phải decode ra",
+      "expect_records": 1,
+      "cbor_hex": "{}"
+    }}"#,
+        cbor_hex(&top)
+    )
+}
+
 fn main() {
     let cases = [
         anchor_case("anchor_seq_zero", 0x11, 0x22, 0x33, 0),
@@ -137,6 +283,18 @@ fn main() {
     );
     println!("  \"cases\": [");
     println!("{}", cases.join(",\n"));
+    println!("  ],");
+    println!(
+        "  \"must_reject_note\": \"Ca ÂM. Tám ca `cases` ở trên toàn ca dương — một bản cài pass 8/8 vẫn có thể NHẬN encoding không canonical vì không ca nào ép nó từ chối thứ gì. Bên nào đọc metadatum label 1234 PHẢI từ chối đúng các `cbor_hex` dưới đây.\","
+    );
+    println!("  \"must_reject\": [");
+    println!("{}", malformed().join(",\n"));
+    println!("  ],");
+    println!(
+        "  \"must_skip_note\": \"Chiều ngược lại: `t` chưa biết phải BỎ QUA chứ không ném lỗi. Cài quá nghiêm ở đây thì mọi reader cũ chết ngày thêm loại record mới.\","
+    );
+    println!("  \"must_skip\": [");
+    println!("{}", skip_case());
     println!("  ]");
     println!("}}");
 }

@@ -202,7 +202,11 @@ Audit-log là một Strata #2 độc lập, gắn với object nhạy cảm qua 
 - **Ký cái gì** — `version_hash` hoặc `content_cid` của object được truy cập/ký.
 - **Ở đâu** — vị trí/ngữ cảnh truy cập (qua Compass — định vị/ngữ cảnh trong hệ sinh thái).
 
-Vì audit-log là Strata #2, mỗi entry kế thừa toàn bộ tính bất biến: không xóa được entry cũ (append-only), không sửa lén (hash-linked + có thể anchor). Một bên kiểm toán chứng minh được "object này đã bị DID Z truy cập lúc T" bằng inclusion-proof, mà không cần tin máy chủ.
+Vì audit-log là Strata #2, mỗi entry kế thừa toàn bộ tính bất biến: không xóa được entry cũ (append-only), không sửa lén (hash-linked + có thể anchor). Một bên kiểm toán chứng minh được bằng inclusion-proof rằng **entry này nằm trong log tại vị trí đó và chưa bị sửa từ lúc được ghi**.
+
+**Ranh giới, phải nói rõ vì nó dễ bị đọc quá lên.** Inclusion-proof KHÔNG chứng minh "DID Z đã tự tay ký lần truy cập đó". Chữ ký của actor được daemon kiểm ở cửa rồi **không đi vào leaf**: `AuditEntry` không có trường `sig` (`src/audit.rs:41-53`), và `canonical()` chỉ gồm `created_ts ‖ actor_did ‖ action ‖ signed_hash ‖ location` (`src/audit.rs:57-65`); phép kiểm nằm ở `node/src/routes.rs:494-496` và kết quả của nó không được lưu lại. Hệ quả: bên kiểm toán vẫn phải **tin daemon đã kiểm chữ ký đúng** — thứ chứng minh được không cần tin máy chủ là *tính không-sửa-sau-khi-ghi*, không phải *tính xác thực của lần truy cập*.
+
+Muốn bỏ được vế "tin daemon" thì `canonical()` phải cam kết cả chữ ký (trực tiếp hoặc qua `H_dom(tag, sig)`). Đó là **đổi byte-layout đã sinh ra `log_root`** ⇒ phá tương thích với mọi log đã ghi ⇒ theo bảng thẩm quyền, cần quyết định spec, không phải việc sửa tại chỗ.
 
 ---
 

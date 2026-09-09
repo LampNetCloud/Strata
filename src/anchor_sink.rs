@@ -49,7 +49,7 @@ pub struct AnchorReceipt {
     pub slot: Option<u64>,
 }
 
-/// Lỗi adapter (§8.1b — 6 biến thể phủ hết case biên).
+/// Lỗi adapter (§8.1b — 8 biến thể phủ hết case biên).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnchorError {
     /// Backend chưa cấu hình (thiếu key/URL).
@@ -60,10 +60,43 @@ pub enum AnchorError {
     Network(String),
     /// INV-E7: backend phát hiện anchor cũ hơn on-chain (fail cứng).
     RollbackAttempt { on_chain_seq: u64, attempted: u64 },
+    /// **Backend Mosaic-A: nhảy bậc seq.** Validator Plutus đang chạy ép
+    /// `datum_out.seq == datum_in.seq + 1` (`VeDataIO/Code: mosaic/aiken/lib/strata/anchor.ak:55-57`,
+    /// test `seq_advances_rejects_skip`). Neo một `seq` cao hơn `on_chain_seq + 1` sẽ bị
+    /// chuỗi từ chối, nhưng head local đã tiến ⇒ **mọi lần neo sau kẹt vĩnh viễn**.
+    /// Vì vậy sink chặn TẠI CHỖ, trước khi dựng tx (anh Đức chốt hướng B ngày 2026-08-07:
+    /// giữ luật on-chain, sửa tầng đẩy — neo đúng từng seq).
+    ///
+    /// `expected` = seq DUY NHẤT được phép neo tiếp theo; người gọi phải neo `expected`
+    /// trước (fail cứng, KHÔNG retryable — retry cùng `attempted` vẫn hỏng y hệt).
+    ///
+    /// KHÔNG áp cho lần neo ĐẦU TIÊN của một lineage (`on_chain_seq == None`): validator
+    /// không guard CREATE nên UTxO anchor đầu được mang `seq` bất kỳ — đó là đường hợp lệ
+    /// để đưa chuỗi đã sống off-chain lên neo giữa chừng.
+    SeqGap {
+        /// `seq` on-chain hiện tại (`None` = lineage chưa neo lần nào — biến thể này
+        /// hiện KHÔNG được dựng với `None`; trường giữ để sink tương lai chặn chặt hơn).
+        on_chain_seq: Option<u64>,
+        /// `seq` DUY NHẤT được phép neo tiếp theo.
+        expected: u64,
+        /// `seq` mà người gọi vừa thử neo.
+        attempted: u64,
+    },
     /// Datum vượt maxTxSize/protocol param (fail cứng).
     DatumTooLarge { bytes: usize },
     /// Backend UTxO (Mosaic A): min-ADA không đủ (fail cứng).
     InsufficientAda { need: u64, have: u64 },
+    /// **Lô gửi đi có HAI (hoặc hơn) anchor cùng một `ref_id`.** Lỗi của bên DỰNG LÔ,
+    /// không phải của chuỗi — nên nó không phải `Rejected` (biến thể đó nói *"cửa/chuỗi
+    /// từ chối"*, và bên gọi cần phân biệt được hai chuyện đó để biết phải sửa ở đâu).
+    ///
+    /// Vì sao fail cứng chứ không lặng lẽ giữ lại một cái: một tx mang hai anchor cho cùng
+    /// một lineage là hai `seq` cùng lúc trên chuỗi, và `resolve()` sau đó chọn cái nào là
+    /// chuyện của thứ tự record trong metadatum — tức là **lịch sử của lineage đó do một
+    /// chi tiết mã hoá quyết định**. Không có cách nào sửa sau khi tx đã lên chuỗi.
+    ///
+    /// Fail cứng, KHÔNG retryable: bắn lại đúng lô ấy vẫn hỏng y hệt.
+    DuplicateRefIdInBatch { ref_id: Hash32 },
 }
 
 impl AnchorError {
@@ -80,6 +113,42 @@ impl std::fmt::Display for AnchorError {
 }
 impl std::error::Error for AnchorError {}
 
+/// Một anchor **đọc lại từ chuỗi**, kèm chỗ nó nằm — đơn vị lá của luồng
+/// checkpoint toàn cục (`Specs#32` mục 10).
+///
+/// Có `slot` + `txid` vì tập lá được định nghĩa **thuần theo dữ liệu on-chain**
+/// (*"mọi record anchor `t = 1` dưới label 1234, trong tx do publisher đã pin chi, có
+/// slot ∈ `[from, to)`"*). Bên thứ ba phải **quét lại được** đúng tập đó; một cam kết
+/// mà chỉ bên ghi dựng lại được thì chỉ là chữ ký của ta lên lời khai của ta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowAnchor {
+    pub anchor: StrataAnchor,
+    /// Slot của block chứa tx.
+    pub slot: u64,
+    /// Tx đã chở record này.
+    pub txid: String,
+}
+
+/// Kết quả quét một cửa sổ slot.
+///
+/// **Không có trường `truncated`, có chủ ý.** Một lượt quét không phủ hết cửa sổ phải
+/// là **lỗi**, không phải một danh sách ngắn hơn: bên gọi sẽ tính `root` trên tập
+/// thiếu, chốt nó lên chuỗi, và không có gì bật ra — chuỗi `epoch` vẫn liên tục, cửa
+/// sổ vẫn khít, chỉ có nội dung cam kết là ít hơn sự thật.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowScan {
+    pub from_slot: u64,
+    pub to_slot: u64,
+    /// Slot của block mới nhất lúc quét — bên gọi cần nó để tự quyết cửa sổ đã đủ
+    /// **sâu** để đóng chưa (rollback). Quyết định đó KHÔNG thuộc về lượt quét.
+    pub tip_slot: u64,
+    /// Số tx đã đọc trong lượt quét (để đo giá của một chu kỳ).
+    pub scanned_txs: usize,
+    /// Anchor tìm được, **chưa khử trùng** — luật khử trùng `(ref_id, seq)` thuộc về
+    /// bên tính `root`, không thuộc về bên đọc.
+    pub anchors: Vec<WindowAnchor>,
+}
+
 /// Adapter một-đường: nhận `StrataAnchor` (đã enforce INV-E7 ở core), đẩy on-chain.
 /// Core KHÔNG biết Cardano; adapter sống ở daemon. Một trait, nhiều backend.
 pub trait AnchorSink {
@@ -92,6 +161,72 @@ pub trait AnchorSink {
 
     /// Đọc anchor mới nhất on-chain cho `ref_id`. `None` nếu chưa neo bao giờ.
     fn resolve(&self, ref_id: &Hash32) -> Result<Option<StrataAnchor>, AnchorError>;
+
+    /// [`resolve`](AnchorSink::resolve) cho **nhiều** `ref_id`. Chỉ trả những ref
+    /// **đã** có anchor on-chain (ref chưa neo bao giờ thì vắng mặt, không phải
+    /// `None` trong danh sách).
+    ///
+    /// Có mặt trên trait vì đường **xem trước** cần hỏi cả lô: mặc định ở đây lặp
+    /// `resolve` (đúng nhưng tốn N lượt quét), còn backend nào quét được một lượt
+    /// cho cả lô thì **phải** ghi đè — `SettlementSink` làm vậy.
+    fn resolve_many(&self, ref_ids: &[Hash32]) -> Result<Vec<StrataAnchor>, AnchorError> {
+        let mut out = Vec::new();
+        for id in ref_ids {
+            if let Some(a) = self.resolve(id)? {
+                out.push(a);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Quét **mọi** anchor đã phát trong cửa sổ slot `[from_slot, to_slot)` — nguồn
+    /// lá của luồng checkpoint toàn cục.
+    ///
+    /// Vì sao nó nằm ở kho NÀY chứ không phải bên Mosaic: decoder label 1234 và luật
+    /// tin cậy (*"chỉ tin tx do publisher CHI"*) là **chain logic**, và đã có đúng
+    /// một bản ở `settlement.rs`. Dựng bản thứ hai bên Mosaic để đọc cùng byte đó là
+    /// đúng lớp lỗi `stamp_id` 32-vs-36 byte: hai encoder cho một sự thật, lệch nhau
+    /// vào ngày không ai đang nhìn.
+    ///
+    /// **Mặc định fail-closed.** Backend nào không quét được theo slot thì **nói
+    /// ra**, không trả danh sách rỗng: rỗng và "không đọc được" là hai câu trả lời
+    /// khác nhau, mà bên tính `root` thì coi rỗng là một chu kỳ hợp lệ.
+    fn scan_window(&self, from_slot: u64, to_slot: u64) -> Result<WindowScan, AnchorError> {
+        let _ = (from_slot, to_slot);
+        Err(AnchorError::Rejected(
+            "backend này không quét được cửa sổ slot (luồng checkpoint cần đường đọc \
+             on-chain có slot)"
+                .into(),
+        ))
+    }
+
+    /// Đẩy **một lô** anchor trong **một** tx. Trả một biên nhận cho cả lô, hoặc
+    /// `Ok(None)` khi mọi anchor trong lô đã neo idempotent.
+    ///
+    /// Đây là đường mà bên quyết lô (Mosaic `BatchCoordinator`) đi vào: nó chọn
+    /// **thành phần** lô, còn Strata giữ nguyên gác INV-E7 — mỗi anchor vẫn qua
+    /// `resolve()` trước khi được đưa vào payload.
+    ///
+    /// **Mặc định fail-closed, KHÔNG lặp `publish()`.** Một vòng lặp trông vô hại
+    /// nhưng biến "một tx cho N anchor" thành "N tx" — đo thật là `~0,896` so với
+    /// `~89,6` tADA cho 100 cây (`VEDATA-MOSAIC-LOAD-FEE-REPORT.md`). Chênh 100×
+    /// mà không lỗi nào bật ra là đúng loại hỏng im lặng phải chặn ở đây: backend
+    /// nào không batch được thì **nói ra**, để người gọi tự chọn đường khác.
+    fn publish_many(
+        &self,
+        anchors: &[StrataAnchor],
+        priority: AnchorPriority,
+    ) -> Result<Option<AnchorReceipt>, AnchorError> {
+        if priority == AnchorPriority::NoAnchor {
+            return Ok(None);
+        }
+        Err(AnchorError::Rejected(format!(
+            "backend này không nhận lô ({} anchor): nó neo 1 tx / 1 anchor. Lặp publish() hộ ở \
+             đây sẽ đội phí 100× trong im lặng — hãy gọi publish() từng anchor một cách tường \
+             minh nếu đó thật sự là điều muốn.",
+            anchors.len()
+        )))
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -205,6 +340,26 @@ pub fn parse_datum_to_anchor(d: &PlutusData) -> Result<StrataAnchor, DatumError>
 // ────────────────────────────────────────────────────────────────────────────
 // CBOR (ledger Cardano `Data`) — đặc tả byte + size-guard. Round-trip nội bộ.
 // ────────────────────────────────────────────────────────────────────────────
+//
+// MỨC BẢO ĐẢM (cùng khuôn khai báo với `settlement.rs`, xem khối doc đầu tệp đó).
+//
+// Codec này canonical ở tầng CẤU TRÚC, KHÔNG phải bijection byte↔giá trị:
+// - `read_arg` nhận mọi additional-info 24/25/26/27, nên `seq = 1` decode được từ `0x01`,
+//   `0x1801`, `0x190001`, `0x1a00000001`, `0x1b…` — **int non-minimal không bị từ chối**;
+// - `read_field_list` nhận CẢ indefinite `0x9f…0xff` LẪN definite major-4, trong khi
+//   `encode_field_list` chỉ phát indefinite. Chấp nhận definite là **có chủ ý**: datum thật
+//   do bên dựng tx (Mosaic/cardano-cli/Lucid) sinh ra, và các bộ đó phát definite;
+// - `Map` không kiểm thứ tự khoá và không chặn khoá trùng.
+//
+// ⟹ Hai byte-string khác nhau decode ra CÙNG một `PlutusData`. Vô hại chừng nào không ai
+// dùng **byte datum** làm định danh: `resolve` so `StrataAnchor` đã parse, không so byte
+// (`grep "to_cbor()"` toàn kho: chỉ round-trip trong test). Nếu ngày nào có consumer băm
+// datum-bytes làm khoá, mức bảo đảm này KHÔNG đủ và phải thêm kiểm minimal-encoding.
+//
+// Vế ĐÃ gác: [`PlutusData::from_cbor`] từ chối **byte thừa đuôi** ([`CborError::Trailing`]),
+// cùng phép đo mà `AnchoredTable::from_bytes` đã có. Không có gác đó thì một datum hợp lệ
+// nối thêm rác vẫn parse xanh, và cái đuôi ấy đi qua mọi so sánh ở tầng giá trị mà không
+// ai thấy.
 
 impl PlutusData {
     /// Encode CBOR theo quy ước `Data` của ledger Cardano:
@@ -252,10 +407,17 @@ impl PlutusData {
         }
     }
 
-    /// Decode một `PlutusData` từ CBOR (nghịch của [`to_cbor`]). Trả phần dư chưa đọc.
+    /// Decode một `PlutusData` từ CBOR (nghịch của [`to_cbor`]). Đòi input chứa **đúng
+    /// một** giá trị: còn byte chưa đọc ⇒ [`CborError::Trailing`], KHÔNG trả phần dư.
     pub fn from_cbor(bytes: &[u8]) -> Result<PlutusData, CborError> {
         let mut c = Cursor { b: bytes, i: 0 };
         let d = c.read_data()?;
+        if c.i != bytes.len() {
+            return Err(CborError::Trailing {
+                read: c.i,
+                len: bytes.len(),
+            });
+        }
         Ok(d)
     }
 
@@ -336,6 +498,12 @@ pub enum CborError {
     Eof,
     Unsupported(u8),
     BadTag(u64),
+    /// Còn byte chưa đọc sau khi đã lấy trọn một `PlutusData` — `read` = đã đọc,
+    /// `len` = tổng. Từ chối để một datum hợp lệ nối rác không parse xanh.
+    Trailing {
+        read: usize,
+        len: usize,
+    },
 }
 
 struct Cursor<'a> {
@@ -472,8 +640,6 @@ pub struct ResolvedAnchor {
 /// Seam ra Mosaic (VeData). Ranh giới issue #1: **Mosaic dựng+submit tx**, Strata chỉ
 /// map datum + gọi. Real impl gọi Mosaic SDK/Lucid (Phase 2); test dùng mock.
 pub trait MosaicBackend {
-    /// `seq` on-chain hiện tại của `ref_id` (None = chưa neo). Cho idempotency/rollback.
-    fn on_chain_seq(&self, ref_id: &Hash32) -> Result<Option<u64>, AnchorError>;
     /// Mosaic dựng reference-UTxO CIP-68 spend-recreate từ datum + submit. Trả receipt.
     fn submit_anchor(&self, datum: &PlutusData) -> Result<AnchorReceipt, AnchorError>;
     /// **HỢP ĐỒNG BẢO MẬT (§8.1b, trust-model thread-token — anh Đức chốt phương án a):**
@@ -566,8 +732,51 @@ impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
         if priority == AnchorPriority::NoAnchor {
             return Ok(None); // sống tầng (a)/(b), không đẩy
         }
-        // Idempotency + rollback cross-process (§8.1b): query on-chain seq TRƯỚC khi build.
-        match self.backend.on_chain_seq(&anchor.ref_id)? {
+        // **`AnchorPriority` THƯA không có nghĩa ở Mosaic-A.**
+        //
+        // Validator ép `seq' == seq + 1`, tức backend này neo TỪNG anchor một. Neo thưa
+        // (`Milestone`/`BatchDaily`) làm head local tiến nhiều bậc rồi mới đẩy ⇒ từ lần neo
+        // thứ hai trở đi LUÔN `SeqGap`, kèm câu "on-chain đòi neo seq=N trước" — đọc như gọi
+        // sai thứ tự trong khi thực chất là **sai cấu hình**. Một thông điệp đúng sự thật mà
+        // dẫn người ta đi sai hướng thì tệ hơn im lặng, nên chặn ngay tại đây và nói thẳng.
+        //
+        // Chỗ đúng nhất để chặn là nơi ghép (backend, priority) — nhưng sink không nhận
+        // `priority` lúc dựng, nó tới theo từng lần gọi. Nên gác đặt ở cửa đầu của `publish`.
+        if matches!(
+            priority,
+            AnchorPriority::Milestone | AnchorPriority::BatchDaily
+        ) {
+            return Err(AnchorError::Rejected(format!(
+                "Mosaic-A neo từng anchor một (validator ép seq' == seq + 1), nên \
+                 AnchorPriority::{priority:?} không có nghĩa ở backend này và sẽ sinh SeqGap từ \
+                 lần neo thứ hai. Muốn neo thưa thì dùng backend Settlement."
+            )));
+        }
+        // **FAIL-ĐÓNG: đường GHI không chạy ở chế độ không-xác-thực.**
+        //
+        // Trước đây `publish` hỏi `on_chain_seq()` — một số VÔ HƯỚNG, nên sink không còn gì
+        // để lọc: backend trả "UTxO seq cao nhất tại address" thì kẻ lạ gửi một UTxO datum
+        // giả `seq = 2^63` (validator chỉ guard SPEND, KHÔNG guard CREATE) là kẹt lineage
+        // vĩnh viễn. `expected_token` khi đó chỉ gác đường ĐỌC, đường GHI mù hoàn toàn.
+        //
+        // Nay `publish` đi qua đúng cửa `resolve()` đã lọc thread-token. Nhưng `resolve()`
+        // chỉ lọc được KHI CÓ token pin — không pin thì nó nhận mọi ứng viên, tức lỗ cũ
+        // nguyên vẹn. Nên chế độ không-xác-thực bị chặn thẳng ở đây thay vì trả một kết quả
+        // trông-như-đúng: sink dựng bằng `new_unverified_for_tests` chỉ đọc được, không ghi.
+        if self.expected_token.is_none() {
+            return Err(AnchorError::Rejected(
+                "sink không pin thread-token: `resolve()` không phân biệt được UTxO thật với \
+                 UTxO cấy vào địa chỉ script, nên đường ghi bị chặn. Dùng \
+                 `MosaicAnchorSink::with_thread_token` cho mọi đường ghi thật."
+                    .to_string(),
+            ));
+        }
+        // Idempotency + rollback + nhảy bậc (§8.1b), đọc qua `resolve()` — cùng một cửa đã
+        // xác thực với đường đọc. Ba nhánh KHÔNG được gộp: neo lại đúng seq = no-op; neo lùi
+        // = rollback (INV-E7); neo vượt quá một bậc = wedge. Nhánh thứ ba trước đây rơi vào
+        // `_ => {}` và được đẩy thẳng lên chuỗi, nơi validator từ chối (`seq' == seq + 1`) —
+        // nhưng lúc đó head local đã tiến nên KHÔNG có đường quay lại.
+        match self.resolve(&anchor.ref_id)?.map(|a| a.seq) {
             Some(s) if s == anchor.seq => return Ok(None), // đã neo — no-op idempotent
             Some(s) if s > anchor.seq => {
                 return Err(AnchorError::RollbackAttempt {
@@ -575,6 +784,19 @@ impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
                     attempted: anchor.seq,
                 });
             }
+            Some(s) if anchor.seq > s + 1 => {
+                return Err(AnchorError::SeqGap {
+                    on_chain_seq: Some(s),
+                    expected: s + 1,
+                    attempted: anchor.seq,
+                });
+            }
+            // `None` = không có UTxO nào MANG ĐÚNG thread-token, tức lineage chưa neo lần nào.
+            // Không bị chặn: validator chỉ guard SPEND nên UTxO anchor đầu tiên được mang
+            // `seq` bất kỳ — đây là đường hợp lệ để đưa một chuỗi đã sống off-chain lên neo
+            // giữa chừng. Ràng buộc +1 chỉ bắt đầu từ lần neo THỨ HAI, đúng bằng phạm vi
+            // chuỗi thật sự ép. Khác hẳn `None` cũ: cũ là "backend không thấy gì", nay là
+            // "không có gì qua được cửa xác thực".
             _ => {}
         }
         let datum = map_anchor_to_datum(anchor);

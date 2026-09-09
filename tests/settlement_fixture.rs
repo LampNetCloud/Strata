@@ -108,3 +108,71 @@ fn fixture_covers_chunk_boundary() {
         assert!(names.contains(&must), "vector thiếu ca biên `{must}`");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Nửa ÂM của fixture — anh Đức chốt hướng (b) ở PR #40.
+//
+// Tám ca `cases` ở trên toàn là ca dương: chúng chứng minh encoder hai bên sinh ra cùng
+// byte. Chúng KHÔNG chứng minh bên nào từ chối được encoding không canonical. Một bản cài
+// pass 8/8 vẫn có thể nhận `<=64B mà lại chunk` rồi ghi thứ đó lên chain.
+//
+// Chừng nào chưa có hai test dưới đây thì gọi fixture là "nguồn sự thật DUY NHẤT" là nói
+// quá — nó mới là nguồn sự thật cho nửa dương.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Số ca âm tối thiểu — chặn việc "sửa test cho xanh" bằng cách rút bớt ca.
+const MIN_MUST_REJECT: usize = 6;
+
+#[test]
+fn must_reject_thi_decoder_phai_tu_choi() {
+    let fx = fixture();
+    let cases = fx["must_reject"]
+        .as_array()
+        .expect("fixture thiếu khối must_reject");
+    assert!(
+        cases.len() >= MIN_MUST_REJECT,
+        "còn {} ca âm (tối thiểu {MIN_MUST_REJECT})",
+        cases.len()
+    );
+
+    for c in cases {
+        let name = c["name"].as_str().unwrap();
+        let want = c["expect_error"].as_str().unwrap();
+        let bytes = unhex(c["cbor_hex"].as_str().unwrap());
+
+        let err = decode_records(&bytes).err().unwrap_or_else(|| {
+            panic!("ca âm `{name}`: decoder CHẤP NHẬN encoding không canonical — xanh giả")
+        });
+
+        // So theo TÊN biến thể, không so chuỗi hiển thị: thông điệp lỗi được phép đổi chữ,
+        // còn phân loại lỗi thì là hợp đồng với bên đọc.
+        let got = match err {
+            lampnet_strata::settlement::PayloadError::BadCbor(_) => "BadCbor",
+            lampnet_strata::settlement::PayloadError::BadShape(_) => "BadShape",
+            lampnet_strata::settlement::PayloadError::BadChunking => "BadChunking",
+        };
+        assert_eq!(got, want, "ca âm `{name}`: từ chối nhưng SAI phân loại");
+    }
+}
+
+/// Chiều ngược lại: `t` chưa biết phải BỎ QUA, không được ném lỗi.
+///
+/// Cài quá nghiêm ở đây cũng hỏng — mọi reader cũ sẽ chết đúng ngày thêm một loại record
+/// mới. Ca này giữ cho `must_reject` không bị hiểu thành "cứ lạ là từ chối".
+#[test]
+fn must_skip_thi_t_la_khong_gay_loi() {
+    let fx = fixture();
+    for c in fx["must_skip"].as_array().expect("thiếu khối must_skip") {
+        let name = c["name"].as_str().unwrap();
+        let want = c["expect_records"].as_u64().unwrap() as usize;
+        let bytes = unhex(c["cbor_hex"].as_str().unwrap());
+
+        let recs = decode_records(&bytes)
+            .unwrap_or_else(|e| panic!("ca `{name}`: `t` lạ KHÔNG được thành lỗi, nhận: {e}"));
+        assert_eq!(
+            recs.len(),
+            want,
+            "ca `{name}`: bỏ qua `t` lạ nhưng số record còn lại lệch"
+        );
+    }
+}

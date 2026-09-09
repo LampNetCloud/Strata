@@ -61,6 +61,17 @@ impl MemorySink {
     pub fn pushes(&self) -> u64 {
         *self.pushes.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// Đặt sẵn một anchor "đã có on-chain" **không** qua đường đẩy.
+    ///
+    /// Dựng đúng ca *daemon vừa restart nên gương rỗng, còn trên chuỗi ref đã ở seq
+    /// cao hơn* — ca mà mọi gác dựa vào trạng thái trong tiến trình đều không thấy.
+    pub fn seed(&self, anchor: StrataAnchor) {
+        self.anchored
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(anchor.ref_id, anchor);
+    }
 }
 
 impl AnchorSink for MemorySink {
@@ -100,6 +111,42 @@ impl AnchorSink for MemorySink {
             .unwrap_or_else(|e| e.into_inner())
             .get(ref_id)
             .cloned())
+    }
+
+    /// Lô = một "tx" giả: mọi anchor được ghi, nhưng **đếm đúng MỘT lần đẩy**. Đếm
+    /// N lần thì test đường lô không phân biệt được "một tx cho N anchor" với "N
+    /// tx" — mà đó chính là tính chất đường này sinh ra để giữ.
+    fn publish_many(
+        &self,
+        anchors: &[StrataAnchor],
+        priority: AnchorPriority,
+    ) -> Result<Option<AnchorReceipt>, AnchorError> {
+        if matches!(priority, AnchorPriority::NoAnchor) || anchors.is_empty() {
+            return Ok(None);
+        }
+        let mut g = self.anchored.lock().unwrap_or_else(|e| e.into_inner());
+        // Kiểm TOÀN LÔ trước khi ghi bất cứ gì — một anchor rollback làm hỏng cả lô,
+        // không để lại lô nửa-ghi (đúng ngữ nghĩa `publish_batch` của SettlementSink).
+        for a in anchors {
+            if let Some(prev) = g.get(&a.ref_id)
+                && a.seq <= prev.seq
+            {
+                return Err(AnchorError::Rejected(format!(
+                    "rollback: đã neo seq={}, thử neo seq={}",
+                    prev.seq, a.seq
+                )));
+            }
+        }
+        for a in anchors {
+            g.insert(a.ref_id, a.clone());
+        }
+        let mut n = self.pushes.lock().unwrap_or_else(|e| e.into_inner());
+        *n += 1;
+        Ok(Some(AnchorReceipt {
+            txid: format!("memory-batch-{}-{}", anchors.len(), *n),
+            backend: AnchorBackend::Settlement,
+            slot: None,
+        }))
     }
 }
 

@@ -19,6 +19,7 @@ log = "0.4"
 ciborium = "0.2"
 
 [dev-dependencies]
+proptest = "1"
 # Chỉ để đọc test-vector chung `apis/settlement-metadata.json` (đã có sẵn trong lockfile
 # qua anchor-io) — không thêm dep vào đường build production.
 serde_json = "1"
