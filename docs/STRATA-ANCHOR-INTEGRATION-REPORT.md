@@ -2335,7 +2335,8 @@ Anh Đức đề nghị `#40` land **cuối** (13/08) để nó gộp ba mục c
 | route `_canonical` — route thứ 9 | 0 hit (chỉ `entry_bytes_canonical` `§8.3`) | có, `§3` |
 | `AnchorError::SeqGap` | 0 hit | 0 hit |
 
-`#64` vào trước ⇒ `#40` chỉ còn `SeqGap` (`Strata-API.md:496`, 6 biến thể → 7). Ghép thử cả
+`#64` vào trước ⇒ `#40` chỉ còn phần `AnchorError` (`Strata-API.md:496`, **6 biến thể → 8** — xem
+§20.5.2, con số 7 mà bản đầu mục này viết là đếm hụt). Ghép thử cả
 hai lên `main` bằng `git merge-tree`: **sạch cả hai chiều**, và ở `§2.5` hai bản vá bổ sung
 nhau (`#64` sửa câu "tự kiểm `fvh`" theo chế độ; `#40` thêm cảnh báo key-trùng). `#82`/`#83`
 không đụng `Strata-API.md`.
@@ -2407,7 +2408,7 @@ workspace, clippy `-D warnings` sạch, `fmt --check` sạch.
 | `#73` khoá nhật ký | ✅ đóng 07/09, `flock` land ở `#76` (`3941141`) | — |
 | `#15` payload `{t,a}` | `#40` đã sửa cả ba chỗ mang lỗi (`§8.1(b)`, bảng `§4.2`, `Tech §5.2`) | đóng khi `#40` land |
 | `#64` | CI **xanh** sau `3a2416a`, `clean` | anh Đức merge |
-| `#40` | CI vẫn đỏ vì head `fcb8a14` chưa chạy lại; nội dung còn thiếu đúng `SeqGap` | anh Đức đẩy + chốt kiểu `on_chain_seq` |
+| `#40` | CI vẫn đỏ vì head `fcb8a14` chưa chạy lại; nội dung thiếu `SeqGap` **và** `DuplicateRefIdInBatch` | đẩy lại + chốt kiểu `on_chain_seq` |
 | `#41` | mục 4 · 5 ✅ land `3941141`; mục 2 → `#80`; **mục 3 vá ở `#87`**; mục 1 chờ `#40`; mục 6 chưa đo được | `#87` review |
 
 `#41` mục 6 (`[NEEDS-EVIDENCE]` kiểu `label` Blockfrost) **chưa đo** — điều kiện đóng tự đặt
@@ -2417,3 +2418,69 @@ kênh 9p `Input/output error`). Chỗ cần đo đã xác định: `anchor-io/sr
 string**; nếu Blockfrost trả số thì `as_str()` cho `None`, `tx_metadata_cbor` trả `Ok(None)`,
 và lượt resolve im lặng thành *"chưa neo"* chứ không báo lỗi. Txid để đo: `f5a067ee…`
 (`§19.2`) và `6cc6ab6e…` (`§13`).
+
+### 20.5 Vòng land 2026-09-09 — năm PR đóng, và bốn câu phải sửa ngay trước lúc bấm
+
+Hàng chờ mở đầu phiên có **sáu** PR, cái cũ nhất treo 39 ngày. Cả sáu `mergeable_state`
+`CLEAN`, cả sáu CI xanh trên đúng head sha đang mở. Năm cái land; cái thứ sáu là chính bản
+ghi này.
+
+| # | Nội dung | Tác giả | sha trên `main` |
+|---|---|---|---|
+| `#87` | gác byte thừa đuôi `from_cbor` + khai mức bảo đảm codec | mình | `9007cae` |
+| `#82` | chốt TLV cho `canonical_core`, `author_did` không length-prefix, thêm tag làm mù | anh Đức | `4934b18` |
+| `#83` | gỡ 3 chỗ bán cam kết mã không giữ (audit-log, `TAG_STATE_PAD`, `migrate_static`) | anh Đức | `0ef9f23` |
+| `#64` | `§3` bốn route `_`, 3 chỗ schema đã trôi, `§4.4` hợp đồng cửa | mình | `4f97a33` |
+| `#40` | đồng bộ spec↔code (7 mục P1–P7) | anh Đức | `f4a3ec6` |
+
+Thứ tự không tuỳ ý: `#87` là mã nên đi trước; `#82`/`#83` đụng `Math`/`_CONTRACT`/`Feat`/`Tech`
+mà không đụng `Strata-API.md`; `#64` phải trước `#40` vì nó đã ăn hai trong ba mục mà `#40`
+được giao gộp (`§20.2`); `#40` chạm cả bốn tệp nên land cuối.
+
+**Đo trước khi bấm, không tin `CLEAN`.** `git merge-tree` sạch chỉ nói *văn bản không giẫm
+nhau*, nó không nói *câu còn đúng không*.
+
+#### 20.5.1 Bốn câu trong `#40` đã hết đúng trong lúc nó chờ
+
+`#40` viết `2026-08-01`, land `2026-09-09`. Trong 39 ngày đó `main` đi tiếp, và bốn câu của
+chính nó thành sai — land nguyên văn là land câu sai.
+
+| # | Câu trong PR | Trạng thái lúc land | Vá |
+|---|---|---|---|
+| 1 | `pub enum AnchorError` liệt **6** biến thể | mã có **8** (`#42` thêm `SeqGap`, `#76` thêm `DuplicateRefIdInBatch`) | bù cả hai + cập nhật dòng phân tầng retryable |
+| 2 | `Tech §5.4`: lệch pha gap *"CHƯA giải, cần anh Đức chốt"* | anh Đức chốt hướng **(B)** `07/08`; bản vá land ở `#42` | ghi là đã chốt + đã vá; giữ hai hướng A/B vì chúng là *lý do* của lựa chọn |
+| 3 | `Tech §5.4`: *"cần chốt lấy `Math §7.1` làm chuẩn hay hạ mức"* | anh Đức chốt `13/08`: **chuẩn là §5.4**, `Math §7.1` sai | ghi quyết định + lý do (vế đúng là consistency-proof, không phải inclusion-proof) |
+| 4 | `VeDataIO/Code` (3 chỗ) | kho đổi tên `VeDataIO/Core` từ `2026-07-18` | sửa cả 3 |
+
+Kèm một chỗ cùng lớp với `một vị ngữ, MỘT định nghĩa`: `§8.0` liệt **6** tên lỗi cửa và đọc
+như danh sách đóng, trong khi `error.rs` có **8** biến thể mức-cửa (thiếu
+`TimestampTooFarFuture`, `JournalBroken`). Danh sách đóng nay nằm ở bảng `§3.1` vừa land cùng
+`#64`, nên `§8.0` trỏ sang đó thay vì khai lần thứ hai.
+
+Điều **không** làm: hình dạng `SeqGap.on_chain_seq` vẫn để là câu hỏi. `Option<u64>` mà nhánh
+`None` không có đường nào dựng ra (`anchor_sink.rs:755` chỉ dựng với `Some`); nếu luật fail-đóng
+nhánh genesis không vào thì kiểu đúng là `u64`. Đó là quyết định spec, ghi vào văn bản dưới dạng
+"còn chờ chốt" chứ không tự đóng.
+
+#### 20.5.2 🔺 Đính chính `§20.2` — con số "6 → 7" là đếm hụt
+
+`§20.2` viết sáng nay ghi `#40` *"chỉ còn `SeqGap`"*, `6 biến thể → 7`. Đo lại `src/anchor_sink.rs`
+trên `main` `4f97a33` thì là **6 → 8**: còn `DuplicateRefIdInBatch { ref_id: Hash32 }` nữa.
+
+Lý do sai không phải phép đo hỏng — mà là **không đo**. Con số 7 lấy từ comment của chính mình
+ngày `29/08`, còn `DuplicateRefIdInBatch` land ngày `08/09` cùng `#76`. Đúng lớp
+`đo main, đừng tin comment cuối`, chỉ khác chỗ: comment bị tin lần này là **của mình**, và nó
+sai vì thời gian trôi qua chứ không vì người viết nhầm. Một con số đúng lúc viết vẫn hết đúng
+lúc dùng, nếu quãng giữa có người land gì đó.
+
+#### 20.5.3 Còn lại sau vòng này
+
+| Mục | Trạng thái |
+|---|---|
+| `#15` payload `{t,a}` | đóng được — cả ba chỗ mang lỗi đã sửa trong `#40` |
+| `#41` mục 3 | đóng được — vá ở `#87` |
+| `#41` mục 1 | đóng được — `#40` đã land |
+| `#41` mục 6 | **chưa đo** — kiểu `label` Blockfrost, cần log request/response thật |
+| `Math §7.1:329-332` + `§10 Mệnh đề 2` | nợ mở, **thuộc anh Đức** — nêu `13/08`, chưa land |
+| `src/anchor_sink.rs:64` | còn `VeDataIO/Code` trong doc-comment (ngoài phạm vi PR spec) |
+| `SeqGap.on_chain_seq: Option<u64>` | chờ anh Đức chốt kiểu |
