@@ -2649,3 +2649,29 @@ Hôm nay chưa với tới được: cả ba nhánh mới đều do **hình dạ
 | `Math §7.1:329-332` + `§10 Mệnh đề 2` | nợ anh Đức, nêu `13/08` |
 | `SeqGap.on_chain_seq: Option<u64>` | chờ chốt kiểu |
 | `src/anchor_sink.rs:64` | còn `VeDataIO/Code` trong doc-comment |
+
+### 22.7 Sau merge — đo trên `main`, không đo trên từng nhánh
+
+Ba PR land `11/09`:
+
+| PR | merge commit |
+|---|---|
+| `#92` `.gitignore` chặn `CLAUDE.md` | `af9d8ef` |
+| `#91` nhãn Blockfrost hai hình dạng + ba nhánh mù | `dc69ead` |
+| `#89` beacon fail-closed **+ bước lùi** (`968be00`) | `af37eb3` |
+
+Đo lại trên `main = af37eb3`:
+
+```
+cargo test --workspace --no-fail-fast   →  291 passed, 0 failed
+cargo clippy --workspace --all-targets -D warnings  →  exit 0
+cargo fmt --all -- --check              →  exit 0
+```
+
+Con số khớp đúng phép cộng, nên nó là phép đo chứ không phải một câu chúc: mốc trước vòng này
+(`c269dac`) là **281**; `#89` thêm ròng **5** (hai ca cũ đổi nghĩa, năm ca mới) và `#91` thêm **5**
+⇒ **291**. Và mỗi nhánh đo RIÊNG đều ra **286** — đúng `281 + 5`, tức hai PR không đo chồng lên nhau.
+
+Ghi ra vì đo từng nhánh rời không kết luận được gì về `main`: hai bản vá cùng đổi một lớp hành vi
+(`Ok(None)` → `Err`) trên cùng đường `resolve`, và `#91` làm `tx_metadata_cbor` **có thể `Err`** đúng
+tại dòng mà `#89` vừa đổi cách xử lý. Chỗ hai bản vá gặp nhau chỉ tồn tại sau khi cả hai đã vào.
