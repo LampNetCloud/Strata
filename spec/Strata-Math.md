@@ -323,15 +323,27 @@ Field-proof là **ZK-lite**, không phải zero-knowledge đầy đủ. Nó *có
 
 **INV-E7 (chống rollback)**: anchor on-chain đơn điệu theo `seq`; không thể neo lại version cũ.
 
-`anchor = (ref_id, head_version_hash, mmr_root, seq)`. Hợp đồng on-chain cập nhật anchor cho một `ref_id` chỉ chấp nhận anchor mới nếu:
+`anchor = (ref_id, head_version_hash, mmr_root, seq)`.
+
+**(a) Thứ chuỗi thực thi HÔM NAY.** Validator Mosaic-A đang chạy Preview chấp nhận `anchor_mới` khi và chỉ khi:
 
 ```
-seq_mới > seq_cũ
-∧ head_version_hash_mới khớp version_hash của phiên bản seq = seq_mới
-∧ inclusion-proof: lá tương ứng head_cũ vẫn nằm dưới mmr_root_mới   (append-only, §4.5)
+shape hợp lệ  (version == 1 ∧ |ref_id| = |head_version_hash| = |mmr_root| = 32 ∧ seq ≥ 0)
+∧ ref_id_mới == ref_id_cũ
+∧ seq_mới    == seq_cũ + 1
 ```
 
-Điều kiện `seq_mới > seq_cũ` được thực thi **bởi chuỗi** (so sánh số nguyên trong validator/script). Vì chuỗi giữ trạng thái `seq_cũ` cuối cùng và từ chối mọi anchor có `seq ≤ seq_cũ`, không ai có thể "tua lùi" về một head cũ — kể cả tác giả hợp lệ. Đây là **finality kinh tế**: muốn ghi đè cần một phiên bản `seq` lớn hơn, không bao giờ nhỏ hơn. Điều kiện inclusion của head cũ dưới root mới bảo đảm anchor mới là phần **mở rộng** của lịch sử cũ, không phải một nhánh khác (chống "rewrite then re-anchor").
+`mmr_root_mới` chỉ bị kiểm **độ dài**. **Không có ràng buộc nào** giữa `mmr_root_mới` và `mmr_root_cũ`, và không có ràng buộc nào giữa `head_version_hash_mới` và nội dung chuỗi — chuỗi không đọc được version, nên nó không kiểm được hai vế đó. Vậy thứ chuỗi cam kết là **đúng một mệnh đề**: `seq` tăng đều 1, `ref_id` bất biến. Mã validator nằm ngoài kho này (ranh giới "Mosaic giữ validator"); bản đối chiếu đã đo và con trỏ tới mã ở `Strata-Tech §5.4`.
+
+**(b) Thứ mệnh đề (a) KHÔNG cho.** `seq` đơn điệu chặn tua-lùi *về một head cũ*, nhưng không chặn **rewrite-then-re-anchor**: kẻ có khoá tác giả (hoặc chính tác giả hành xử xấu) dựng một lịch sử **khác hẳn** — cùng `ref_id`, `seq_cũ + 1`, `mmr_root` của một cây không liên quan — và validator nhận. Không cần va chạm băm, không cần giả mạo chữ ký.
+
+**(c) Vế còn thiếu phải là CONSISTENCY-proof, không phải inclusion-proof.** Bản trước của mục này viết vế thứ ba là *"inclusion-proof: lá head_cũ vẫn nằm dưới `mmr_root_mới`"*. **Vế đó không đủ, kể cả nếu được hiện thực.** Inclusion-proof của **một** lá chỉ ràng buộc các nút nằm trên đường xác thực của đúng lá đó; mọi lá khác trong cây vẫn tự do bị viết lại mà proof ấy vẫn verify. Thứ cần là **consistency-proof** giữa hai MMR `(mmr_root_cũ, n_cũ)` và `(mmr_root_mới, n_mới)`: chứng minh **toàn bộ tập peak cũ** đều là nút của MMR mới và fold lại đúng `mmr_root_cũ` — đây mới là mệnh đề "mới là phần MỞ RỘNG của cũ" (§4.5).
+
+**(d) Trạng thái, khai đúng.** Consistency-proof **chưa có ở đâu**: crate MMR nền chỉ có inclusion (`git grep -c consistency -- src/` trên `origin/main@fbc643c` trả **0**); validator không nhận proof nào trong redeemer; `verify_resolved` (`src/anchor_sink.rs`, `origin/main@fbc643c`) đối chiếu anchor với **chuỗi local của chính người kiểm**, nên nó phát hiện phân kỳ cho người ĐÃ có lịch sử thật, chứ không phải một chứng minh giữa hai root on-chain. ⇒ Cho tới khi vế (c) vào redeemer, INV-E7 chỉ được chuỗi bảo đảm ở mức `seq` đơn điệu; tính mở-rộng-của-lịch-sử-cũ là **giả định vận hành off-chain**, không phải bảo đảm mật mã. Bên tiêu thụ phải đọc mục này chứ không chỉ đọc tên invariant.
+
+*Ghi chú tầng — hai tầng cố ý khác nhau.* `seq_mới == seq_cũ + 1` là luật của **Mosaic-A** (validator). Tầng Rust `publish_anchor` (`src/chain.rs`, `origin/main@fbc643c`) chỉ ép `seq_mới > seq_cũ`, **lỏng hơn**; tầng lỏng hơn không được đọc thành mô tả của tầng chặt hơn. Chỗ lệch pha giữa hai tầng và cách vá (`AnchorError::SeqGap`) ở `Strata-Tech §5.4`.
+
+Đây vẫn là **finality kinh tế** trong phạm vi đã nêu: muốn ghi đè cần một `seq` lớn hơn, không bao giờ nhỏ hơn.
 
 *Khắc phục lỗi hệ cũ*: git branch là mutable ref, tua lùi không để dấu; Strata neo head đã ký + `seq` đơn điệu on-chain nên rollback bị chặn và tamper-evident.
 
@@ -413,9 +425,13 @@ Khẳng định MECE: bốn loại phủ kín không gian (mỗi quan hệ đị
 
 Mọi mệnh đề dưới đây quy về một trong hai giả thiết khó: (i) BLAKE3 **kháng va chạm và kháng preimage** (tìm va chạm ~`2^128`, tìm preimage ~`2^256`); (ii) Ed25519 **không giả mạo được dưới tấn công chọn thông điệp** (EUF-CMA), và **tất định theo RFC 8032** (cùng `sk`+thông điệp → cùng chữ ký) — kết hợp ràng buộc low-S thì mỗi `(pk, version_hash)` có đúng một chữ ký hợp lệ (Mệnh đề 6b). Cộng thêm: mã hóa `canonical` là song ánh (§3.1) nên không có va chạm "cấu trúc" ngoài va chạm băm.
 
-**Mệnh đề 1 — Bất biến lịch sử (INV-E1, INV-E2).** Không thể sửa một phiên bản quá khứ mà giữ chuỗi hợp lệ và head không đổi, trừ khi tìm được va chạm BLAKE3 hoặc giả mạo chữ ký Ed25519 của mọi tác giả phiên bản sau. *Lập luận*: §3.2 (avalanche) cho thấy sửa `v_k` buộc đổi `version_hash` mọi phiên bản `> k`; mỗi phiên bản phải được ký lại (EUF-CMA chặn) và head/`mmr_root` mới phải neo lại (Mệnh đề 2 chặn).
+**Mệnh đề 1 — Bất biến lịch sử (INV-E1, INV-E2).** Không thể sửa một phiên bản quá khứ mà giữ chuỗi hợp lệ và head không đổi, trừ khi tìm được va chạm BLAKE3 hoặc giả mạo chữ ký Ed25519 của mọi tác giả phiên bản sau. *Lập luận*: §3.2 (avalanche) cho thấy sửa `v_k` buộc đổi `version_hash` mọi phiên bản `> k`; mỗi phiên bản phải được ký lại (EUF-CMA chặn) và head/`mmr_root` mới phải neo lại (Mệnh đề 2 chặn **một nửa** — xem dưới).
 
-**Mệnh đề 2 — Chống rollback (INV-E7).** Không thể neo lại một head cũ trên chuỗi. *Lập luận*: §7.1 — chuỗi từ chối mọi anchor có `seq ≤ seq_cũ`; vượt qua đòi hỏi đảo so-sánh số nguyên on-chain (không thể) hoặc dựng một lịch sử dài hơn hợp lệ (đòi va chạm/giả-mạo theo Mệnh đề 1).
+> **Phạm vi thật của Mệnh đề 1.** Vế "neo lại bị chặn" viện dẫn Mệnh đề 2, mà Mệnh đề 2 chỉ chặn được *tua lùi*, không chặn được *nhánh khác* (§7.1(b)). Nên mệnh đề này đứng dưới **hai** giả thiết, không phải một: (i) hai giả thiết khó ở đầu §10, và (ii) **khoá tác giả không bị lộ**. Kẻ giữ khoá tác giả viết lại lịch sử và neo tiến lên mà không cần va chạm băm lẫn giả mạo chữ ký.
+
+**Mệnh đề 2 — Chống rollback theo `seq` (INV-E7), phạm vi HẸP.** Không thể neo lại một anchor có `seq ≤ seq_cũ`. *Lập luận*: §7.1(a) — chuỗi giữ `seq_cũ` trong datum và chỉ nhận `seq_cũ + 1`; vượt qua đòi hỏi đảo so-sánh số nguyên trong validator (không thể).
+
+> **Giới hạn — mệnh đề này KHÔNG nói "không sửa được lịch sử".** Bản trước phát biểu rằng vượt INV-E7 đòi va chạm BLAKE3 hoặc giả mạo Ed25519. **Sai**: có đường thứ ba không cần cả hai. Vì chuỗi không ràng buộc `mmr_root_mới` với `mmr_root_cũ` (§7.1(a)) và không đọc được version, một tác nhân **có khoá tác giả hợp lệ** dựng được một lịch sử khác hẳn tại `seq_cũ + 1` và neo đè — chữ ký thật, băm thật, validator nhận. Chuỗi phân biệt được "tua lùi" nhưng **không** phân biệt được "nhánh khác". Đóng lỗ này cần vế consistency-proof ở §7.1(c) nằm trong redeemer; chừng nào chưa có, "chống rewrite-then-re-anchor" thuộc về **giả định tin cậy khoá tác giả**, không thuộc bảo đảm mật mã của INV-E7.
 
 **Mệnh đề 3 — Append-only (INV-E3).** Thêm phiên bản không làm sai inclusion-proof cũ. *Lập luận*: §4.5 — MMR chỉ thêm nút, không sửa nút; đường anh em cũ được bảo toàn (chứng minh quy nạp trên hai khả năng gộp/không-gộp).
 
