@@ -667,29 +667,77 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
         // Đây đúng là ca ba-trạng-thái: có · không có · KHÔNG ĐO ĐƯỢC. Trộn trạng thái
         // thứ ba vào trạng thái thứ hai làm phép đo trả về một giá trị hợp lệ đúng lúc
         // nó không đo được gì — và ở đây giá trị ấy mở đúng cái cổng mà INV-E7 đóng.
-        // Nên cả hai nhánh dưới fail-closed, và mỗi nhánh tự nói nó là nhánh nào.
-        let Some(cbor) = self.query.tx_metadata_cbor(&txid, self.cfg.label)? else {
-            return Err(AnchorError::Rejected(format!(
-                "beacon {unit}: tx mới nhất {txid} KHÔNG mang metadata label {} — beacon đã \
-                 bị cuốn theo một giao dịch khác của ví publisher (coin-selection trả phí, \
-                 gộp UTxO, hoặc một lô anchor không chứa ref này). Đây là 'không đọc được', \
-                 KHÔNG phải 'chưa neo'. Đường về: neo lại ref này để beacon trở lại một tx \
-                 có mang anchor của nó.",
+        // Nên không nhánh nào dưới đây được phép trả `Ok(None)`.
+        let unreadable = match self.query.tx_metadata_cbor(&txid, self.cfg.label)? {
+            None => format!(
+                "tx mới nhất {txid} KHÔNG mang metadata label {}",
                 self.cfg.label
-            )));
+            ),
+            // Cùng một lớp lỗi, thấp hơn đúng một dòng: tx CÓ label nhưng không chứa
+            // record nào cho ref đang hỏi (beacon đi kèm một lô anchor của ref khác).
+            // `fold_best_anchor` trả `None` ở cả hai nghĩa, nên chỗ phân biệt phải ở đây.
+            Some(cbor) => match Self::fold_best_anchor(None, &cbor, ref_id) {
+                Some(a) => return Ok(Some(a)),
+                None => format!(
+                    "tx mới nhất {txid} có metadata label {} nhưng KHÔNG chứa record anchor \
+                     nào cho ref này",
+                    self.cfg.label
+                ),
+            },
         };
-        // Cùng một lớp lỗi, thấp hơn đúng một dòng: tx CÓ label nhưng không chứa record
-        // nào cho ref đang hỏi (beacon đi kèm một lô anchor của ref khác). `fold_best_anchor`
-        // trả `None` ở cả hai nghĩa, nên chỗ phân biệt phải nằm ở đây.
-        match Self::fold_best_anchor(None, &cbor, ref_id) {
-            Some(a) => Ok(Some(a)),
-            None => Err(AnchorError::Rejected(format!(
-                "beacon {unit}: tx mới nhất {txid} có metadata label {} nhưng KHÔNG chứa \
-                 record anchor nào cho ref này — beacon đi kèm một lô của ref khác. Cùng \
-                 lớp với nhánh trên: 'không đọc được', KHÔNG phải 'chưa neo'.",
-                self.cfg.label
-            ))),
+        self.beacon_unreadable_fallback(ref_id, &unit, &unreadable)
+    }
+
+    /// Beacon tồn tại nhưng tx nó đang nằm trong KHÔNG đọc ra anchor của `ref_id`.
+    ///
+    /// # Vì sao chỗ này KHÔNG được dừng ở `Err`
+    ///
+    /// Trạng thái "beacon bị cuốn đi" **không cần ai tấn công**: beacon là native asset
+    /// nằm trong UTxO của ví publisher, nên coin-selection của chính ví đó — trả phí,
+    /// gộp UTxO, hay một lô anchor của lineage KHÁC — cuốn nó theo là chuyện thường.
+    ///
+    /// Mà `publish_batch` lấy mốc `seq` qua đúng hàm này (`resolve_many` → `?`). Nên
+    /// một `Err` cứng ở đây khoá luôn **đường ghi**: không neo lại được ref đó nữa, và
+    /// vì `resolve_many` lặp bằng `?`, một ref kẹt kéo theo **cả lô** — kể cả các ref
+    /// có beacon lành. "Đường về: neo lại ref này" tự nó đi qua cái cổng vừa đóng.
+    ///
+    /// # Bước lùi, và vì sao nó KHÔNG mở lại lỗ fail-open
+    ///
+    /// Lùi về `resolve_via_address_scan` — cùng `ChainQuery`, không thêm phương thức
+    /// nào vào trait. Nó chỉ có thể trả hai thứ, và **không thứ nào là "chưa neo" sai**:
+    ///
+    /// - **thấy anchor** ⇒ đó là mốc THẬT, `publish_batch` gác INV-E7 như thường, và
+    ///   lượt neo kế tiếp kéo beacon về một tx có mang anchor của ref ⇒ **tự lành**;
+    /// - **không thấy gì** ⇒ vẫn `Err` như cũ. Flood của issue #14 chỉ đẩy được vào
+    ///   nhánh này, tức flood không mua được `Ok(None)` — bảo đảm của beacon-mode giữ
+    ///   nguyên.
+    ///
+    /// Và bước lùi không trả được anchor CŨ hơn sự thật: cửa sổ quét xếp theo độ mới,
+    /// `seq` tăng theo thời gian neo (INV-E7), nên tx của `seq` cao luôn mới hơn tx của
+    /// `seq` thấp — `seq` thấp lọt vào cửa sổ thì `seq` cao cũng lọt. Quét trả **đúng
+    /// mốc mới nhất, hoặc không gì cả**.
+    ///
+    /// Giá: một lượt quét cửa sổ cho mỗi ref rơi vào nhánh này. Đó là giá của đường
+    /// hỏng, không phải của đường thường — đường thường vẫn O(1) theo asset-index.
+    fn beacon_unreadable_fallback(
+        &self,
+        ref_id: &Hash32,
+        unit: &str,
+        why: &str,
+    ) -> Result<Option<StrataAnchor>, AnchorError> {
+        if let Some(a) = self.resolve_via_address_scan(ref_id)? {
+            return Ok(Some(a));
         }
+        Err(AnchorError::Rejected(format!(
+            "beacon {unit}: {why} — beacon đã bị cuốn theo một giao dịch khác của ví \
+             publisher (coin-selection trả phí, gộp UTxO, hoặc một lô anchor của ref \
+             khác). Đây là 'không đọc được', KHÔNG phải 'chưa neo'. Bước lùi quét cửa \
+             sổ {} tx của publisher cũng KHÔNG thấy anchor nào cho ref này, nên mốc \
+             `seq` không dựng được và INV-E7 không gác được — từ chối thay vì đoán. \
+             Đường về: nới `resolve_scan_limit`, hoặc neo lại ref này bằng một lượt \
+             publish có beacon lành.",
+            self.cfg.resolve_scan_limit
+        )))
     }
 
     /// Quét cửa sổ slot `[from_slot, to_slot)` và trả **mọi** anchor đã phát trong
