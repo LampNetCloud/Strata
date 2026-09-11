@@ -15,6 +15,24 @@
 //! - `legacy_mode_is_blinded_by_flood_documented` — tài-liệu-hoá GIỚI HẠN của đường
 //!   legacy (`beacon_policy = None`): flood VẪN làm mù (trả `None`). Đây là đánh đổi đã
 //!   ghi rõ, KHÔNG phải hồi quy — nó chốt "vì sao cần beacon_mode".
+//!
+//! ## issue #78 — nhánh fail-open nằm TRONG chính bản vá trên
+//!
+//! `resolve_via_beacon` tìm được beacon, xác nhận tx mới nhất do publisher chi, rồi trả
+//! `Ok(None)` khi tx đó không đọc ra anchor. Người gọi đọc `None` là **"chưa neo bao
+//! giờ"** ⇒ không có mốc so `seq` ⇒ gác INV-E7 không chạy. Tức bản vá của #14 mở lại
+//! đúng cái cổng nó đóng, chỉ qua một cửa khác.
+//!
+//! Hai ca dưới canh hai nhánh ĐỘC LẬP dẫn tới đó — nhánh thứ hai không được issue nêu:
+//!
+//! - `beacon_tx_without_label_must_fail_closed` — beacon bị cuốn theo một tx không mang
+//!   metadata label (coin-selection trả phí, gộp UTxO).
+//! - `beacon_tx_with_other_refs_must_fail_closed` — tx CÓ label nhưng chỉ chứa anchor
+//!   của ref khác. `fold_best_anchor` trả `None` ở cả hai nghĩa, nên nhánh này đi lọt
+//!   kể cả sau khi vá riêng nhánh thứ nhất.
+//!
+//! Cả hai đo cùng một điều: **"không đọc được" phải kêu to hơn "chưa neo"**, không được
+//! mang cùng một giá trị trả về.
 
 use std::collections::HashMap;
 
@@ -150,5 +168,106 @@ fn legacy_mode_is_blinded_by_flood_documented() {
         got.map(|a| a.seq),
         None,
         "legacy mode: flood đẩy anchor ra ngoài cửa sổ → None (đánh đổi đã ghi, dùng beacon_mode để chống)"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// issue #78 — "không đọc được" KHÔNG được trả về cùng giá trị với "chưa neo"
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Dựng sink beacon-mode với beacon trỏ vào `beacon_tx`, và `beacon_tx` mang đúng
+/// `meta_of_beacon_tx` (None = tx không có metadata label 1234). Anchor THẬT của
+/// `REF_ID` vẫn nằm nguyên trên chuỗi ở một tx cũ hơn — nên mọi kết luận "chưa neo"
+/// trong hai ca dưới đều là kết luận SAI về trạng thái thật.
+fn build_beacon_pointing_at(
+    beacon_tx: &str,
+    meta_of_beacon_tx: Option<Vec<u8>>,
+) -> SettlementSink<MockQuery, NoSubmit> {
+    let real = StrataAnchor {
+        ref_id: REF_ID,
+        head_version_hash: [0x22; 32],
+        mmr_root: [0x33; 32],
+        seq: REAL_SEQ,
+    };
+    let mut txs = vec![beacon_tx.to_string(), "real_anchor_tx".to_string()];
+    let mut inputs = HashMap::new();
+    let mut meta = HashMap::new();
+    // Cả hai tx đều do publisher CHI — phép kiểm defense-in-depth ở trên phải ĐẠT,
+    // để ca này đo đúng nhánh metadata chứ không vô tình đo nhánh input.
+    inputs.insert(beacon_tx.to_string(), vec![PUBLISHER.to_string()]);
+    inputs.insert("real_anchor_tx".to_string(), vec![PUBLISHER.to_string()]);
+    meta.insert(
+        "real_anchor_tx".to_string(),
+        encode_records(&[SettlementRecord::Anchor(real)]),
+    );
+    if let Some(m) = meta_of_beacon_tx {
+        meta.insert(beacon_tx.to_string(), m);
+    }
+    txs.dedup();
+
+    let mut asset_latest = HashMap::new();
+    asset_latest.insert(
+        format!("{BEACON_POLICY}{}", "11".repeat(32)),
+        beacon_tx.to_string(),
+    );
+
+    let cfg = SinkConfig {
+        publisher_address: PUBLISHER.to_string(),
+        resolve_scan_limit: 10,
+        beacon_policy: Some(BEACON_POLICY.to_string()),
+        ..Default::default()
+    };
+    SettlementSink::new(
+        cfg,
+        MockQuery {
+            txs,
+            inputs,
+            meta,
+            asset_latest,
+        },
+        NoSubmit,
+    )
+}
+
+/// Nhánh #78 nêu: beacon bị cuốn theo một tx KHÔNG mang metadata label 1234 (ví
+/// publisher trả phí / gộp UTxO). Trước bản vá: `Ok(None)` ⇒ người gọi hiểu "chưa neo"
+/// ⇒ mất mốc so `seq` ⇒ INV-E7 không được gác. Sau vá: `Err`, và thông điệp phải tự
+/// nói nó là trạng thái "không đọc được".
+#[test]
+fn beacon_tx_without_label_must_fail_closed() {
+    let sink = build_beacon_pointing_at("fee_sweep_tx", None);
+    let got = sink.resolve(&REF_ID);
+    let Err(AnchorError::Rejected(msg)) = got else {
+        panic!("beacon tồn tại nhưng tx không đọc được anchor: phải fail-closed, nhận {got:?}");
+    };
+    assert!(
+        msg.contains("KHÔNG mang metadata"),
+        "thông điệp phải nói rõ nhánh nào, nhận: {msg}"
+    );
+}
+
+/// Nhánh issue KHÔNG nêu, nằm thấp hơn đúng một dòng: tx CÓ metadata label 1234 nhưng
+/// chỉ chứa anchor của **ref khác** (beacon đi kèm một lô của lineage khác — chuyện
+/// thường, vì publisher gộp nhiều ref vào một tx). `fold_best_anchor` trả `None` ở đây
+/// với cùng một nghĩa mơ hồ, nên vá riêng nhánh trên là chưa đủ.
+#[test]
+fn beacon_tx_with_other_refs_must_fail_closed() {
+    let other = StrataAnchor {
+        ref_id: [0x99; 32],
+        head_version_hash: [0x22; 32],
+        mmr_root: [0x33; 32],
+        seq: 1,
+    };
+    let sink = build_beacon_pointing_at(
+        "batch_of_other_refs_tx",
+        Some(encode_records(&[SettlementRecord::Anchor(other)])),
+    );
+    let got = sink.resolve(&REF_ID);
+    let Err(AnchorError::Rejected(msg)) = got else {
+        panic!("beacon trỏ vào lô của ref khác: phải fail-closed, nhận {got:?}");
+    };
+    assert!(
+        msg.contains("KHÔNG chứa"),
+        "thông điệp phải phân biệt được với nhánh thiếu label, nhận: {msg}"
     );
 }

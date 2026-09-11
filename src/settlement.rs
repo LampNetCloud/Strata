@@ -650,10 +650,46 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
                 "beacon {unit}: tx mới nhất {txid} không do publisher chi — asset-index bất nhất"
             )));
         }
+        // ── Từ đây trở xuống, `Ok(None)` là một phát biểu KHÔNG có bằng chứng đỡ.
+        //
+        // `Ok(None)` ở đường này được đọc là **"ref_id chưa neo bao giờ"** — xem nhánh
+        // `:642`, và xem người gọi: `publish_batch` dùng chính kết quả này làm mốc so
+        // `seq`, nên `None` = "không có mốc" = **bỏ qua gác chống tụt lùi INV-E7**.
+        //
+        // Nhưng tới được dòng này nghĩa là beacon **đang tồn tại trên chuỗi** và tx mới
+        // nhất đụng nó **do publisher chi** (hai phép kiểm ngay trên). Hai điều kiện đó
+        // không chứng minh "đã neo" — beacon dùng native policy `sig(publisher)` nên
+        // chuỗi không ép mint phải đi kèm anchor; bất biến ấy là bất biến của công cụ
+        // publisher (`anchor-io/src/mosaic_door.rs:22` từ chối mint beacon trỏ vào anchor
+        // không có trong lô), không phải của validator. Nhưng chúng thừa sức bác `None`:
+        // thứ ta đang cầm là **"không đọc được"**, không phải **"chưa từng có"**.
+        //
+        // Đây đúng là ca ba-trạng-thái: có · không có · KHÔNG ĐO ĐƯỢC. Trộn trạng thái
+        // thứ ba vào trạng thái thứ hai làm phép đo trả về một giá trị hợp lệ đúng lúc
+        // nó không đo được gì — và ở đây giá trị ấy mở đúng cái cổng mà INV-E7 đóng.
+        // Nên cả hai nhánh dưới fail-closed, và mỗi nhánh tự nói nó là nhánh nào.
         let Some(cbor) = self.query.tx_metadata_cbor(&txid, self.cfg.label)? else {
-            return Ok(None);
+            return Err(AnchorError::Rejected(format!(
+                "beacon {unit}: tx mới nhất {txid} KHÔNG mang metadata label {} — beacon đã \
+                 bị cuốn theo một giao dịch khác của ví publisher (coin-selection trả phí, \
+                 gộp UTxO, hoặc một lô anchor không chứa ref này). Đây là 'không đọc được', \
+                 KHÔNG phải 'chưa neo'. Đường về: neo lại ref này để beacon trở lại một tx \
+                 có mang anchor của nó.",
+                self.cfg.label
+            )));
         };
-        Ok(Self::fold_best_anchor(None, &cbor, ref_id))
+        // Cùng một lớp lỗi, thấp hơn đúng một dòng: tx CÓ label nhưng không chứa record
+        // nào cho ref đang hỏi (beacon đi kèm một lô anchor của ref khác). `fold_best_anchor`
+        // trả `None` ở cả hai nghĩa, nên chỗ phân biệt phải nằm ở đây.
+        match Self::fold_best_anchor(None, &cbor, ref_id) {
+            Some(a) => Ok(Some(a)),
+            None => Err(AnchorError::Rejected(format!(
+                "beacon {unit}: tx mới nhất {txid} có metadata label {} nhưng KHÔNG chứa \
+                 record anchor nào cho ref này — beacon đi kèm một lô của ref khác. Cùng \
+                 lớp với nhánh trên: 'không đọc được', KHÔNG phải 'chưa neo'.",
+                self.cfg.label
+            ))),
+        }
     }
 
     /// Quét cửa sổ slot `[from_slot, to_slot)` và trả **mọi** anchor đã phát trong
