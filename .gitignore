@@ -2,3 +2,6 @@
 Cargo.lock
 _Agents/
 .claude/settings.json
+# Ghi chú làm việc nội bộ. Kho này PUBLIC — `CLAUDE.md` không nằm trong .gitignore
+# thì nó hiện ra là tệp chưa theo dõi, và một lần `git add -A` là nó ra ngoài.
+CLAUDE.md
