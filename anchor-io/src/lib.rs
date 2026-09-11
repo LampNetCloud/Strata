@@ -147,6 +147,25 @@ fn truncate(s: &str, n: usize) -> &str {
     }
 }
 
+/// `label` trong đáp ứng Blockfrost khớp `want` hay không — **nhận cả hai hình dạng**.
+///
+/// Tài liệu Blockfrost tả `label` là chuỗi, và mã cũ chỉ so `as_str()`. Nhưng nhãn
+/// metadata là một **số nguyên** trong định dạng giao dịch Cardano, nên một đáp ứng
+/// trả `1234` (số JSON) thay vì `"1234"` là hợp lệ với chính khái niệm ấy — và khi đó
+/// `as_str()` trả `None`, không mục nào khớp, hàm trả `Ok(None)`, rồi `resolve` đọc
+/// thành *"ref chưa neo"*. Sai lặng, trên đường gác chống tụt lùi.
+///
+/// Nhận cả hai gỡ luôn nhu cầu đi đo Blockfrost thật sự trả hình dạng nào: câu hỏi
+/// ấy chỉ tồn tại vì mã chỉ chấp nhận một hình dạng. Chuỗi được **so với `want` dạng
+/// thập phân** chứ không parse tự do, để `"01234"` hay `" 1234"` không lọt.
+fn label_matches(v: Option<&serde_json::Value>, want: u64) -> bool {
+    match v {
+        Some(serde_json::Value::String(s)) => s == &want.to_string(),
+        Some(serde_json::Value::Number(n)) => n.as_u64() == Some(want),
+        _ => false,
+    }
+}
+
 impl ChainQuery for BlockfrostQuery {
     fn address_txs(&self, addr: &str, limit: usize) -> Result<Vec<String>, AnchorError> {
         let mut out = Vec::new();
@@ -241,11 +260,18 @@ impl ChainQuery for BlockfrostQuery {
         let Some(v) = self.get_json(&format!("/txs/{txid}/metadata/cbor"))? else {
             return Ok(None);
         };
+        // 200 mà thân không phải mảng = Blockfrost đổi hình dạng, tức KHÔNG ĐỌC ĐƯỢC.
+        // Trả `Ok(None)` ở đây là nói "tx này không có metadata", và người gọi
+        // (`resolve`) đọc tiếp thành "ref chưa neo" — mở đúng cổng INV-E7 đóng.
         let Some(items) = v.as_array() else {
-            return Ok(None);
+            return Err(AnchorError::Rejected(format!(
+                "Blockfrost /txs/{txid}/metadata/cbor trả 200 nhưng thân không phải mảng — \
+                 hình dạng đáp ứng đã đổi. Đây là 'không đọc được', KHÔNG phải 'tx không có \
+                 metadata'."
+            )));
         };
         for it in items {
-            if it.get("label").and_then(|l| l.as_str()) != Some(&label.to_string()) {
+            if !label_matches(it.get("label"), label) {
                 continue;
             }
             // Blockfrost: field "metadata" (hex) hoặc "cbor_metadata" ("\x" + hex).
@@ -253,13 +279,26 @@ impl ChainQuery for BlockfrostQuery {
                 .get("metadata")
                 .and_then(|m| m.as_str())
                 .or_else(|| it.get("cbor_metadata").and_then(|m| m.as_str()));
-            if let Some(h) = hex_str {
-                let h = h.strip_prefix("\\x").unwrap_or(h);
-                if let Ok(bytes) = hex::decode(h) {
-                    return Ok(Some(bytes));
-                }
-            }
+            // Nhãn ĐÃ khớp ⇒ mục này là mục của mình. Không giải mã được thì đó là hỏng,
+            // không phải "không có". `continue` ở đây làm vòng lặp chạy hết rồi rơi xuống
+            // `Ok(None)` — cùng một giá trị với "tx không mang nhãn này".
+            let Some(h) = hex_str else {
+                return Err(AnchorError::Rejected(format!(
+                    "tx {txid} có metadata nhãn {label} nhưng không có trường `metadata` lẫn \
+                     `cbor_metadata` — không đọc được nội dung đã neo."
+                )));
+            };
+            let h = h.strip_prefix("\\x").unwrap_or(h);
+            return hex::decode(h).map(Some).map_err(|e| {
+                AnchorError::Rejected(format!(
+                    "tx {txid} nhãn {label}: hex của metadata hỏng ({e}) — không đọc được nội \
+                     dung đã neo."
+                ))
+            });
         }
+        // Tới đây là đã duyệt hết mục mà không mục nào mang nhãn này. Đây mới đúng nghĩa
+        // "tx này không neo gì cho nhãn đang hỏi" — trạng thái CÓ THẬT, không phải trạng
+        // thái mù.
         Ok(None)
     }
 }
@@ -274,5 +313,53 @@ mod tests {
         let dbg = format!("{q:?}");
         assert!(dbg.contains("<REDACTED>"));
         assert!(!dbg.contains("secret_token_abc123"));
+    }
+
+    // ── #41 mục 6: nhãn metadata phải khớp ở CẢ HAI hình dạng JSON ────────────
+
+    /// Hình dạng mã cũ đã nhận. Giữ ca này để việc nới rộng không đánh mất nó.
+    #[test]
+    fn label_matches_string_shape() {
+        assert!(label_matches(Some(&serde_json::json!("1234")), 1234));
+    }
+
+    /// Hình dạng mã cũ KHÔNG nhận — và đó là chỗ hỏng: `as_str()` trả `None`, không
+    /// mục nào khớp, `tx_metadata_cbor` trả `Ok(None)`, `resolve` đọc thành "chưa neo".
+    #[test]
+    fn label_matches_number_shape() {
+        assert!(
+            label_matches(Some(&serde_json::json!(1234)), 1234),
+            "nhãn dạng SỐ phải khớp — mã cũ chỉ so as_str() nên trượt lặng"
+        );
+    }
+
+    /// Nới rộng không được nới thành parse tự do: chuỗi phải khớp đúng dạng thập phân.
+    #[test]
+    fn label_does_not_match_loose_strings() {
+        for s in ["01234", " 1234", "1234 ", "0x4d2", ""] {
+            assert!(
+                !label_matches(Some(&serde_json::json!(s)), 1234),
+                "chuỗi {s:?} không được coi là nhãn 1234"
+            );
+        }
+    }
+
+    /// Nhãn khác, thiếu nhãn, hoặc nhãn kiểu lạ — đều là KHÔNG khớp, và đó là trạng
+    /// thái có thật ("mục này không phải của mình"), khác hẳn trạng thái mù.
+    #[test]
+    fn label_mismatch_and_absent() {
+        assert!(!label_matches(Some(&serde_json::json!(1235)), 1234));
+        assert!(!label_matches(Some(&serde_json::json!("1235")), 1234));
+        assert!(!label_matches(None, 1234));
+        assert!(!label_matches(Some(&serde_json::json!(null)), 1234));
+        assert!(!label_matches(Some(&serde_json::json!({"v": 1234})), 1234));
+    }
+
+    /// Số âm / số thực không phải nhãn hợp lệ — `as_u64()` trả `None`, không được
+    /// rơi vào nhánh khớp.
+    #[test]
+    fn label_rejects_non_integer_numbers() {
+        assert!(!label_matches(Some(&serde_json::json!(-1)), 1234));
+        assert!(!label_matches(Some(&serde_json::json!(1234.5)), 1234));
     }
 }
