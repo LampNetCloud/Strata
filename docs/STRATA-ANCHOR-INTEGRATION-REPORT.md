@@ -2549,3 +2549,103 @@ Chỗ cố ý **không** làm: vế enforce đổi `build_state_root` từ `-> H
 | `SeqGap.on_chain_seq: Option<u64>` | chờ chốt kiểu |
 | `#41` mục 6 | chưa đo — kiểu `label` Blockfrost, cần log request/response thật |
 | `src/anchor_sink.rs:64` | còn `VeDataIO/Code` trong doc-comment |
+
+---
+
+## §22. Vòng `11/09` — ba PR của anh Đức, và một `Err` cứng khoá luôn đường GHI
+
+Anh Đức mở ba PR cùng ngày (`#89`, `#91`, `#92`) và trả lời hai issue tồn (`#39`, `#41`). Hai PR land được nguyên trạng. PR thứ ba đúng về chẩn đoán nhưng bản vá tạo ra một trạng thái **kẹt vĩnh viễn** — đo được, không phải suy luận.
+
+### 22.1 Bảng ba PR
+
+| PR | Nội dung | Kết luận |
+|---|---|---|
+| `#92` | `.gitignore` chặn `CLAUDE.md` | ✅ land — đo lại đúng: kho `visibility: public`, `git ls-files \| grep -i claude` **rỗng** (chưa theo dõi) ⇒ một lượt `git add -A` là ra ngoài thật |
+| `#91` | nhãn metadata Blockfrost nhận cả `"1234"` lẫn `1234`; ba nhánh mù thành fail-closed (`#41` mục 6) | ✅ land — `286 pass / 0 fail`, clippy sạch. Kèm một ghi chú phạm vi ở `22.4` |
+| `#89` | `resolve_via_beacon` fail-closed thay vì `Ok(None)` (`#78`) | ⚠️ **chẩn đoán đúng, bản vá thiếu một vế** — xem `22.2` |
+
+### 22.2 `#89` — thông điệp lỗi chỉ ra một đường về mà chính nó đã đóng
+
+Bản vá đổi hai nhánh `Ok(None)` trong `resolve_via_beacon` thành `Err(Rejected)`, thông điệp ghi: *"Đường về: neo lại ref này để beacon trở lại một tx có mang anchor của nó."*
+
+Đường về đó **không đi được**. `publish_batch` lấy mốc `seq` qua `resolve_many` → `resolve_via_beacon` → `?`, nên lượt neo lại rơi vào đúng cái `Err` vừa dựng. Đo bằng một bài tạm trên chính nhánh PR:
+
+```
+publish_batch(seq=6) => Err(Rejected("beacon …: tx mới nhất fee_sweep_tx KHÔNG mang
+  metadata label 1234 … Đường về: neo lại ref này …"))
+publish_batch([ref_lành, ref_bị_cuốn]) => Err(Rejected(… cùng thông điệp …))
+```
+
+Hai hệ quả, cả hai đo được:
+
+1. **Kẹt vĩnh viễn cho ref đó** — không còn lượt neo nào đi qua được.
+2. **Lây cả lô** — `resolve_many` lặp bằng `?`, nên một ref kẹt khoá luôn các ref có beacon lành đứng cùng lô.
+
+Và điều kiện kích hoạt **không cần ai tấn công**: beacon là native asset nằm trong UTxO ví publisher, coin-selection của chính ví đó (trả phí, gộp UTxO, hay một lô anchor của lineage khác) cuốn nó theo là chuyện thường — chính `#78` viết như vậy.
+
+### 22.3 Bước lùi — và vì sao nó KHÔNG cần `asset_txs`
+
+`#89` viết rằng đường khôi phục cần thêm `asset_txs` vào `ChainQuery`, "thay đổi rộng hơn và thuộc quyết định thiết kế", nên dừng ở fail-closed. Đo lại thì **tiền đề đó không đúng**: thông tin cần để gỡ kẹt đã nằm trong chính `ChainQuery` hiện có. Cùng một trạng thái chuỗi, chỉ tắt `beacon_policy`:
+
+```
+[beacon=ON ] publish seq=6 => false        (kẹt)
+[beacon=OFF] publish seq=6 => Ok(Some(AnchorReceipt { txid: "new_anchor_tx", … }))
+[beacon=OFF] publish seq=4 (tụt lùi)  => Err(RollbackAttempt { on_chain_seq: 5, attempted: 4 })
+[beacon=OFF] resolve()               => Ok([… seq: 5 …])
+```
+
+`resolve_via_address_scan` lấy đúng mốc `seq=5`, và INV-E7 vẫn chặn tụt lùi. Nên bản vá bổ sung là: beacon không đọc được ⇒ **lùi về quét địa chỉ**, rồi mới `Err` nếu bước lùi cũng không thấy gì.
+
+Ba lẽ khiến bước lùi này **không** mở lại lỗ fail-open:
+
+- **thấy anchor** ⇒ mốc THẬT, gác INV-E7 chạy như thường, và lượt neo kế tiếp kéo beacon về một tx có mang anchor của ref ⇒ **tự lành**;
+- **không thấy gì** ⇒ vẫn `Err`. Flood của `#14` chỉ đẩy được vào đúng nhánh này, tức **flood không mua được `Ok(None)`** — bảo đảm của beacon-mode giữ nguyên;
+- bước lùi **không trả được anchor cũ hơn sự thật**: cửa sổ quét xếp theo độ mới, `seq` tăng theo thời gian neo (INV-E7), nên tx của `seq` cao luôn mới hơn tx của `seq` thấp — `seq` thấp lọt vào cửa sổ thì `seq` cao cũng lọt. Quét trả **đúng mốc mới nhất, hoặc không gì cả**.
+
+Giá phải trả: một lượt quét cửa sổ cho mỗi ref rơi vào nhánh hỏng. Đó là giá của đường hỏng; đường thường vẫn O(1) theo asset-index.
+
+**Năm ca kiểm**, đo đủ bốn vế, và ba lượt đảo mã mỗi lượt đỏ đúng chỗ:
+
+| đảo mã | ca đỏ |
+|---|---|
+| gỡ bước lùi (= bản `#89` gốc) | 4 ca phụ thuộc bước lùi; ca fail-closed vẫn xanh ⇒ hai vế không đo trùng nhau |
+| bước lùi mù ⇒ `Ok(None)` (fail-open cũ) | đúng 1: `beacon_unreadable_and_scan_blind_must_fail_closed` |
+| nhánh "tx có label, không có record ref này" ⇒ `Ok(None)` | đúng 1: `beacon_tx_with_other_refs_falls_back_to_scan` |
+
+Ca `publish_van_di_duoc_sau_khi_beacon_bi_cuon_va_van_chan_tut_lui` giữ **hai vế cùng lúc** — `seq` tiến đi được (đường về có thật) và `seq` lùi bị chặn (mốc lấy từ bước lùi là mốc THẬT, không phải mốc rỗng). Đây đúng ca mà `#78` đề nghị (`sau_khi_resolve_bao_loi_thi_publish_seq_lui_bi_tu_choi`) và bản vá đầu chưa có — và nó là ca duy nhất phát hiện được chỗ kẹt.
+
+Đo: `286 pass / 0 fail` toàn workspace · `clippy --workspace --all-targets -D warnings` sạch · `fmt --check` sạch.
+
+### 22.4 Ghi chú phạm vi của `#91` — `Err` mới đi qua bốn call site, không phải một
+
+`#91` đổi ba nhánh của `tx_metadata_cbor` từ `Ok(None)` sang `Err`. Hàm đó có **bốn** nơi gọi trong `settlement.rs`, tất cả dùng `?`:
+
+```
+src/settlement.rs:579   resolve_many_via_address_scan   (vòng lặp qua CẢ cửa sổ tx)
+src/settlement.rs:616   resolve_via_address_scan        (vòng lặp qua CẢ cửa sổ tx)
+src/settlement.rs:653   resolve_via_beacon              (một tx)
+src/settlement.rs:709   scan_window                     (vòng lặp — nguồn lá checkpoint)
+```
+
+Ở ba chỗ vòng lặp, một `Err` không còn bỏ qua **một tx** mà huỷ **cả lượt quét**. Và ở hai đường quét địa chỉ, lượt gọi metadata nằm **trước** phép lọc tin-cậy `input == publisher`, nên tx của ví lạ gửi tới publisher cũng đi qua nhánh này.
+
+Hôm nay chưa với tới được: cả ba nhánh mới đều do **hình dạng đáp ứng Blockfrost** quyết định (thân không phải mảng · thiếu `metadata`/`cbor_metadata` · hex hỏng), không do nội dung bên thứ ba dựng được — endpoint `/metadata/cbor` trả CBOR thô nên hex luôn hợp lệ. Ghi ra vì ngày nhà cung cấp đổi hình dạng, hệ quả không còn là "bỏ một tx" mà là "checkpoint không chạy".
+
+### 22.5 Trạng thái hai issue sau vòng này
+
+| Issue | Trạng thái |
+|---|---|
+| `#39` | điểm 1 ✅ `#88` · điểm 3 ✅ hết việc · **điểm 2 vế lõi vẫn MỞ** — anh Đức đã đo hộ bên tiêu thụ: `build_state_root` có **4 nơi gọi thật** ở `lampnet-mirage`, ghim `rev = a4ac267`, phụ thuộc `optional` sau feature TẮT mặc định ⇒ đổi chữ ký sẽ gãy **muộn và âm thầm**, không tự bật ra. Vế enforce vẫn chờ chốt |
+| `#41` | mục 1 (one-shot policy) chưa đụng · mục 2 → `#80` · mục 3 ✅ `#87` · mục 4·5 ✅ `#76` · **mục 6 vá ở `#91`** · nợ fixture `must_reject` của `apis/settlement-metadata.json` còn nguyên — nửa dương không đo được gì về nửa âm |
+
+### 22.6 Nợ mở sau vòng này
+
+| Mục | Trạng thái |
+|---|---|
+| `#39` điểm 2, vế **lõi** | ⬜ mở — đổi chữ ký `build_state_root` gãy 4 nơi gọi ở `lampnet-mirage`, gãy MUỘN (ghim rev + feature tắt). Cần chốt: đổi và sửa bên kia, hay giữ nguyên + ghi tiền đề |
+| fixture `must_reject` | ⬜ mở — `§8.1(a)` liệt 5 luật từ chối, `apis/settlement-metadata.json` chưa có mục nào |
+| `#41` mục 1 — one-shot policy | ⬜ chưa đụng |
+| beacon ở UTxO ví tự chi được | ⬜ **gốc rễ của `#78`** — bước lùi ở `22.3` là lưới, không phải thuốc. Vá gốc: giữ beacon ở UTxO ví không tự chi, hoặc `asset_txs` đi ngược lịch sử |
+| `Math §7.1:329-332` + `§10 Mệnh đề 2` | nợ anh Đức, nêu `13/08` |
+| `SeqGap.on_chain_seq: Option<u64>` | chờ chốt kiểu |
+| `src/anchor_sink.rs:64` | còn `VeDataIO/Code` trong doc-comment |
