@@ -512,6 +512,51 @@ mod tests {
         }
     }
 
+    /// `Policy::policy_hash` phải tất định bất kể thứ tự chèn — và bài này tồn tại vì
+    /// **hôm nay bất biến đó là VÔ HÌNH** (issue #84 mục 5, anh Đức chỉ ra).
+    ///
+    /// Doc của hàm ghi *"sort theo did"* nhưng thân hàm không gọi `sort` nào; thứ giữ cho nó
+    /// tất định là `allowed` tình cờ là `BTreeMap` — một tính chất của **kiểu container**,
+    /// không phải của thuật toán. Đổi `BTreeMap` → `HashMap` một ngày nào đó thì `policy_hash`
+    /// mất tất định, **và không phép kiểm nào đỏ** — trong khi giá trị này đi vào preimage
+    /// chữ ký của **mọi** version, tức mọi hồ sơ đã ký trước đó thành không kiểm lại được.
+    ///
+    /// `FieldPolicy::policy_hash` làm cùng việc, sort **tường minh**, và đã có bài
+    /// `policy_hash_deterministic_regardless_insert_order`. Đây là bài còn thiếu ở vế kia.
+    #[test]
+    fn policy_hash_tat_dinh_bat_ke_thu_tu_chen() {
+        let a1 = mk_author(1);
+        let a2 = mk_author(2);
+        let a3 = mk_author(3);
+
+        let mut p = Policy::new();
+        p.allow(a1.did, a1.sk.verifying_key());
+        p.allow(a2.did, a2.sk.verifying_key());
+        p.allow(a3.did, a3.sk.verifying_key());
+
+        let mut q = Policy::new();
+        q.allow(a3.did, a3.sk.verifying_key());
+        q.allow(a1.did, a1.sk.verifying_key());
+        q.allow(a2.did, a2.sk.verifying_key());
+
+        assert_eq!(
+            p.policy_hash(),
+            q.policy_hash(),
+            "cùng tập author, khác thứ tự chèn ⇒ PHẢI cùng policy_hash"
+        );
+
+        // Đối chứng ÂM: khác tập thì phải khác băm — nếu không, bài trên xanh cả khi hàm
+        // trả một hằng.
+        let mut r = Policy::new();
+        r.allow(a1.did, a1.sk.verifying_key());
+        r.allow(a2.did, a2.sk.verifying_key());
+        assert_ne!(
+            p.policy_hash(),
+            r.policy_hash(),
+            "bớt một author phải đổi policy_hash"
+        );
+    }
+
     fn policy_with(authors: &[&Author]) -> Policy {
         let mut p = Policy::new();
         for a in authors {
