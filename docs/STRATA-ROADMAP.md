@@ -1,6 +1,6 @@
 # Strata — Roadmap thực thi
 
-> **Repo:** `LampNetCloud/Strata` (Rust) · **Cập nhật:** 2026-08-13
+> **Repo:** `LampNetCloud/Strata` (Rust) · **Cập nhật:** 2026-09-12
 > **Strata** = tầng lưu trữ tiến hóa của MagicLamp: chuỗi version hash-link + MMR + `state_root` field-Merkle + anchor on-chain + audit-log.
 > **Spec nguồn:** `spec/_CONTRACT.md` (khế ước giao diện) + `spec/Strata-Feat/Math/Tech/API.md`.
 > **Theo dõi công việc:** issue `#1` (S1) · `#2` (S2) · `#3` (S3) · `#24` (S7: CI + fmt drift).
@@ -95,3 +95,33 @@ Mô tả trong comment issue lệch với `spec/_CONTRACT.md` hiện tại — c
 - **CHỐT-3:** `mmr_root = H_dom("LN/STRATA/mmr/root/v1", u64_be(n) ‖ bag_of_peaks)` — commit số lá `n` trước khi bag peaks.
 - **CHỐT-4:** `value_cid` của một trường state là `content_cid` thuần (không class byte / doc_type) — nếu không sẽ leak loại qua field-proof (INV-E5/E6).
 - **CHỐT-5:** `Did` lưu `[u8;32]` (băm DID PhoenixKey); verify chữ ký cần ánh xạ `Did → pubkey` qua key-registry lampnet-join/PhoenixKey, không giả định `Did == pubkey`.
+
+---
+
+## 5. Hàng chờ hiện tại — sáu issue của chủ spec (mở `06/09`), trạng thái `12/09`
+
+> Đo trên `main` `4eddac7`: `cargo test --workspace` **307 pass / 0 fail** · clippy `-D warnings` **0** · `fmt --check` sạch.
+> Chi tiết từng mục: `STRATA-ANCHOR-INTEGRATION-REPORT.md` **§23** (`#79`) và **§24** (`#77`/`#80`/`#84`).
+
+| issue | trạng thái `12/09` | phần còn lại thuộc về ai |
+|---|---|---|
+| **`#79`** gác §8.1(c) không có call site | ✅ **ĐÓNG** — `#94` | — |
+| **`#78`** beacon `Ok(None)` fail-open | ✅ **ĐÓNG** — `#89` + `968be00` | — |
+| **`#77`** đường GHI không có xác thực | 🟡 mục 1 xong (`#95`) | **spec**: có đưa xác thực vào thân yêu cầu `/anchor` không, hình dạng nào |
+| **`#80`** thông điệp ký không nonce/hạn | 🟡 mục cuối xong (`#95`) | **spec**: `nonce` + `expiry` + `batch_id` — đổi dây, 5 vector đối chứng phải đổi cùng lượt |
+| **`#84`** `policy_hash` không lấy được | 🟡 mục 5 xong (`#95`) | **spec**: đường khô *tập author → `policy_hash`* |
+| **`#81`** record không có trường phiên bản | ⬜ mở — nửa còn lại | chờ chủ spec chốt hành vi `scan_window` (xem dưới) |
+
+### Ba luật rút ra, áp cho mọi milestone sau
+
+1. **Gác có mã + có test vẫn có thể chưa bao giờ chạy.** `verify_resolved` có 5 ca kiểm và **0** call site sản xuất trong nhiều tháng. Lớp lỗi này không phát hiện được bằng đọc mã từng tệp — mỗi tệp đều đúng, mỗi test đều xanh. Phép đo rẻ: **đếm call site ngoài `tests/`**.
+2. **Chỗ được đề nghị vá có thể không có đầu vào mà bản vá cần.** `#79` đề nghị nối `verify_resolved` vào `AnchorSink`; trait đó không mang `&StrataChain`. Đo mặt cắt **trước** khi nhận phạm vi.
+3. **Bộ đệm suy được thì đừng nhớ.** `#79` mục 1 đề nghị thêm `mmr_root`+`mmr_size` vào nhật ký; `mmr_size = seq + 1` là **suy ra**, `version_hash` lấy thẳng từ chain ⇒ bảng dựng tại chỗ tương đương bảng đã lưu, và không đẻ thêm một trạng thái lệch được.
+
+### Câu hỏi đang chờ chủ spec (`#81`)
+
+Đường **quét địa chỉ** là chế độ **MẶC ĐỊNH** (`beacon_policy: None`), và ở đó một record `t` lạ vẫn bị `decode_records_lenient` bỏ qua im lặng ⇒ `Ok(None)` = *"chưa neo"* ⇒ gác INV-E7 không chạy. Vá đúng hướng là tách ba câu trả lời ở tầng decode, nhưng `scan_window` — **nguồn lá của checkpoint toàn cục** — cũng gọi cùng hàm đó, nên câu phải chốt trước khi viết:
+
+> gặp record không hiểu trong `scan_window` thì **lỗi** (checkpoint dừng vì một record lạ của bên thứ ba dưới cùng label) hay **bỏ qua** (tập lá thành *"những gì daemon này hiểu được"* thay vì *"mọi record anchor dưới label 1234"*)?
+
+Đề xuất của kho này: **bỏ qua nhưng ĐẾM** — `scan_window` trả kèm số record không hiểu, bên gọi quyết. Tập lá vẫn định nghĩa được, còn sự im lặng thì đo được thay vì vô hình.
