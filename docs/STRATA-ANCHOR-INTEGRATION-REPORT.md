@@ -2785,3 +2785,90 @@ Nhưng 502 nói *"upstream từ chối, thử lại xem"* — **sai cả hai v�
 (daemon tự dừng trước khi đẩy), và thử lại thì lệch y hệt. Tên đúng là một mã **409** riêng.
 Đã nêu ở `#79` để chủ spec chốt; tới lúc đó lý do vẫn đọc được nguyên vẹn ở `detail.reason`,
 và thông điệp tự nói *"KHÔNG thử lại; đồng bộ lại lịch sử local trước"*.
+
+---
+
+## §24. Vòng `12/09` (b) — ba hàng rào fail-closed rẻ, và một bất biến VÔ HÌNH được ghim
+
+Ba mục này gom chung một PR vì cùng một hình dạng: **không đụng dây một byte nào**, mỗi cái
+là một hàm thuần đo được, và cả ba đóng đúng phần mà chủ spec đã tách ra là *"vá được ngay,
+không cần quyết định spec"*.
+
+### 24.1 `#77` — cổng khởi động, KHÔNG phải middleware
+
+Anh Đức chỉnh lại chủ sở hữu của `#77`: **đây là lỗ ở spec.** `Strata-API.md §3` đặc tả thân
+yêu cầu của `/anchor` đúng bằng `{"priority":"immediate"}` — không có ô nào cho xác thực. Mã
+không lệch spec; nó đang khớp một đặc tả **thiếu**. Thêm trường xác thực vào thân yêu cầu là
+**đổi hình dạng trên dây** ⇒ quyết định spec, không đóng bằng một PR ở `node/`.
+
+Phần vá được ngay là cổng khởi động, và nó đứng **trước** mọi thứ khác trong `main()`:
+
+```
+STRATA_NODE_ADDR nghe ngoài loopback + chưa khai gác  →  TỪ CHỐI khởi động
+STRATA_NODE_EXPOSED=auth-gateway-in-front             →  chạy, kèm cảnh báo
+```
+
+Ba chi tiết có chủ ý:
+
+1. **Giá trị là một câu khẳng định**, không phải `1`/`true`. Cờ bật được do gõ nhầm hoặc do
+   chép một tệp env của môi trường khác; câu này thì người đặt phải biết mình khai cái gì.
+2. **Không phân giải DNS.** Một phép đo phụ thuộc trạng thái mạng lúc khởi động cho hai kết
+   luận khác nhau ở hai lượt chạy của **cùng một cấu hình**.
+3. **Fail-closed khi không parse được.** Chuỗi lạ ⇒ coi như phơi ra. Đây đúng là chiều hay
+   hỏng: parse lỗi rơi vào `else` rồi chạy tiếp — có một bài riêng cho ca này.
+
+Cổng này **không kiểm được** lớp gác kia có thật. Nó chỉ đảm bảo không ai phơi đường ghi ra
+mà **không biết mình đang làm thế** — cùng khuôn với `STRATA_NODE_JOURNAL`: *chỗ nào mất mát
+không lấy lại được thì mặc định phải là chỗ đòi người vận hành khai.*
+
+Thông điệp từ chối nói **hệ quả**, không nói "thiếu auth": `publish_anchor()` đẩy
+`last_anchor_seq` tiến lên, INV-E7 cấm neo lùi ⇒ một `seq` bị đẩy quá mức làm **mọi** lượt
+neo thật sau đó trả `AnchorRollback`. Không route sửa, không đường ghi đè. Bài kiểm khẳng
+định đúng chuỗi đó có mặt trong thông điệp.
+
+### 24.2 `#80` — `MOSAIC_DOOR_URL` đi trần
+
+`from_env_with` không kiểm scheme. `http://` tới host không phải loopback ⇒ **token gác
+(header) và chữ ký operator (thân) đi trần trên dây**.
+
+Vế làm nó nặng hơn "http không an toàn" nói chung: chữ ký operator hiện **không mang nonce
+lẫn hạn dùng** (phần còn lại của `#80` — đổi giao thức, thuộc spec), nên một gói bắt được là
+một gói **gửi lại được vô thời hạn**, mỗi lần một giao dịch tốn phí của ví publisher. Bài
+kiểm ghim đúng chuỗi `nonce` trong thông điệp để lý do không bị viết lại thành câu chung.
+
+Cùng ba chi tiết như trên: không DNS, fail-closed với scheme lạ, `https` luôn qua.
+
+📌 **Đính chính của chủ spec giữ nguyên giá trị ở đây:** mô tả gốc của `#80` viết *"cửa không
+phân biệt được thử-lại với phát-lại"* — **sai**, cửa dedupe theo **nội dung payload** nên một
+lượt thử lại đúng nghĩa trả `txid` gốc kèm `deduped: true`. Chỗ hở thật là bảng dedupe nằm
+**trong bộ nhớ tiến trình**: cửa restart ⇒ bảng rỗng; nhiều bản cửa ⇒ mỗi bản một bảng; và
+không có hạn dùng ⇒ gói bắt hôm nay chỉ cần **đợi cửa restart**. `nonce` + `expiry` vẫn là
+cách vá đúng, nhưng vì ba lý do đó chứ không phải vì cửa "không có cách phân biệt".
+
+### 24.3 `#84` mục 5 — bất biến tất định đang VÔ HÌNH
+
+`Policy::policy_hash` có doc ghi *"sort theo did"* nhưng thân hàm **không gọi `sort` nào**.
+Thứ giữ cho nó tất định là `allowed` tình cờ là `BTreeMap` — một tính chất của **kiểu
+container**, không phải của thuật toán.
+
+Vì sao đáng ghim chứ không phải chuyện phong cách: `policy_hash` đi vào **preimage chữ ký của
+mọi version**. Đổi `BTreeMap` → `HashMap` một ngày nào đó thì nó mất tất định, mọi hồ sơ đã
+ký trước đó thành không kiểm lại được — **và không phép kiểm nào đỏ**.
+
+`FieldPolicy::policy_hash` làm cùng việc, sort **tường minh**, và đã có bài
+`policy_hash_deterministic_regardless_insert_order`. Bài còn thiếu ở vế kia nay đã có, kèm
+**đối chứng âm** (bớt một author phải đổi băm — thiếu nó thì bài xanh cả khi hàm trả một hằng).
+
+Đo bằng đột biến: đổi `BTreeMap` → `HashMap` ⇒ đúng bài đó **đỏ**.
+
+### 24.4 Đo
+
+| | |
+|---|---|
+| `cargo test --workspace` | **297 → 307 pass / 0 fail** (+10: 5 cổng khởi động · 4 cửa · 1 policy) |
+| `clippy --all-targets -D warnings` | 0 |
+| `fmt --check` | sạch |
+| đột biến `BTreeMap` → `HashMap` | 1 đỏ, đúng bài `#84` |
+
+Biến mới `STRATA_NODE_EXPOSED` được khai ở **đầu tệp** cùng các biến khác — một cổng mà chỉ
+người viết nó biết cách mở thì lần đầu nó chặn ai đó sẽ trông như một lỗi khởi động.

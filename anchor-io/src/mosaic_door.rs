@@ -113,6 +113,54 @@ impl std::fmt::Debug for MosaicDoorSubmitter {
     }
 }
 
+/// Cửa Mosaic nhận **token gác** ở header và **chữ ký operator** trong thân — cả hai đi
+/// trần nếu ống là `http://` tới một host không phải loopback (issue #80, mục cuối).
+///
+/// Fail-closed khi không phân tích được: một URL lạ phải bị coi là không an toàn, không
+/// phải bỏ qua. Đây đúng là chiều hay hỏng — parse lỗi rơi vào `else` rồi chạy tiếp.
+///
+/// Không đi phân giải DNS: phép đo phụ thuộc trạng thái mạng lúc khởi động sẽ cho hai kết
+/// luận khác nhau ở hai lượt chạy của cùng một cấu hình. Chỉ nhận **literal** loopback.
+pub fn check_door_url(url: &str) -> Result<(), String> {
+    let u = url.trim();
+    let rest = match u.split_once("://") {
+        Some(("https", _)) => return Ok(()),
+        Some(("http", rest)) => rest,
+        _ => {
+            return Err(format!(
+                "{DOOR_URL_ENV} không phải http(s): `{u}`. Token gác và chữ ký operator đi \
+                 trong yêu cầu này, nên ống phải là thứ đọc được hình dạng"
+            ));
+        }
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or_else(|| rest.split(['/', '?', '#']).next().unwrap_or(""));
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+    if loopback {
+        return Ok(());
+    }
+    Err(format!(
+        "từ chối khởi động: {DOOR_URL_ENV}=`{u}` là `http://` tới host KHÔNG phải loopback.\n\
+         \n\
+         Yêu cầu gửi tới cửa mang {DOOR_TOKEN_ENV} ở header VÀ chữ ký operator trong thân — \
+         cả hai đi trần trên dây. Chữ ký ấy hiện KHÔNG có nonce lẫn hạn dùng (issue #80), \
+         nên một gói bắt được là một gói gửi lại được, mỗi lần một giao dịch tốn phí của ví \
+         publisher.\n\
+         \n\
+         Dùng `https://`, hoặc trỏ về loopback nếu cửa chạy cùng máy."
+    ))
+}
+
 impl MosaicDoorSubmitter {
     /// Dựng từ tham số tường minh.
     pub fn new(base_url: String, token: String, label: u64, beacon: bool) -> Self {
@@ -179,6 +227,7 @@ impl MosaicDoorSubmitter {
         let Some(url) = get(DOOR_URL_ENV).filter(|u| !u.trim().is_empty()) else {
             return Ok(None);
         };
+        check_door_url(&url)?;
         let token = get(DOOR_TOKEN_ENV)
             .filter(|t| !t.trim().is_empty())
             .ok_or_else(|| {
@@ -571,5 +620,57 @@ mod operator_sig_tests {
             !format!("{s:?}").contains(SK_HEX),
             "Debug KHÔNG được để lộ khoá bí mật"
         );
+    }
+}
+
+#[cfg(test)]
+mod door_url_tests {
+    use super::check_door_url;
+
+    #[test]
+    fn https_luon_qua() {
+        for u in [
+            "https://door.example.com/v1/anchor",
+            "https://10.1.2.3:8443/x",
+            "https://localhost:8443",
+        ] {
+            assert!(check_door_url(u).is_ok(), "{u}");
+        }
+    }
+
+    #[test]
+    fn http_toi_loopback_qua() {
+        for u in [
+            "http://127.0.0.1:8080/anchor",
+            "http://localhost:8080",
+            "http://[::1]:8080/x",
+        ] {
+            assert!(check_door_url(u).is_ok(), "{u}");
+        }
+    }
+
+    /// Ca chính của issue #80 mục cuối.
+    #[test]
+    fn http_toi_host_ngoai_loopback_bi_tu_choi() {
+        for u in [
+            "http://door.example.com/v1/anchor",
+            "http://10.1.2.3:8080",
+            "http://0.0.0.0:8080/x",
+        ] {
+            let e = check_door_url(u).expect_err("{u} phải bị từ chối");
+            assert!(
+                e.contains("nonce"),
+                "lý do phải nói vì sao gói bắt được lại DÙNG LẠI ĐƯỢC, không chỉ nói 'http \
+                 không an toàn': {e}"
+            );
+        }
+    }
+
+    /// Fail-closed: scheme lạ / chuỗi không parse được KHÔNG được cho qua.
+    #[test]
+    fn scheme_la_thi_tu_choi_chu_khong_bo_qua() {
+        for u in ["door.example.com", "ftp://x/y", "", "://"] {
+            assert!(check_door_url(u).is_err(), "`{u}` phải bị từ chối");
+        }
     }
 }
