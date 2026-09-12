@@ -20,7 +20,8 @@
 //! `on_chain_seq == seq` → `Ok(None)`; `>` → [`AnchorError::RollbackAttempt`].
 
 use crate::anchor_sink::{
-    AnchorBackend, AnchorError, AnchorPriority, AnchorReceipt, AnchorSink, WindowAnchor, WindowScan,
+    AnchorBackend, AnchorError, AnchorPriority, AnchorReceipt, AnchorSink, WindowAnchor,
+    WindowScan, diverging_field,
 };
 use crate::chain::StrataAnchor;
 use crate::version::Hash32;
@@ -472,6 +473,18 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
                     });
                 }
                 Some(c) if c.seq == a.seq => {
+                    // Cùng `seq` chưa đủ để kết luận "đã neo rồi" (issue #79): `seq` là
+                    // VỊ TRÍ, `mmr_root`/`head_version_hash` là NỘI DUNG. Trùng vị trí mà
+                    // khác nội dung nghĩa là thứ nằm trên chuỗi cam kết một lịch sử mà
+                    // daemon này không giữ — và nhánh no-op cũ nuốt đúng ca đó: không đẩy
+                    // gì, không lỗi nào bật ra, nên không ai phát hiện.
+                    if let Some(field) = diverging_field(a, c) {
+                        return Err(AnchorError::AnchorDivergence {
+                            ref_id: a.ref_id,
+                            seq: a.seq,
+                            field,
+                        });
+                    }
                     // idempotent no-op cho anchor này.
                 }
                 _ => fresh.push(SettlementRecord::Anchor(a.clone())),

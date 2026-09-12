@@ -704,3 +704,44 @@ fn priority_thua_bi_chan_voi_ly_do_dung() {
         );
     }
 }
+
+// ── issue #79: đường Mosaic — cùng `seq`, KHÁC cam kết ───────────────────────
+
+/// `publish` cùng `seq` nhưng khác `mmr_root` ⇒ [`AnchorError::AnchorDivergence`], KHÔNG
+/// phải `Ok(None)` idempotent, và KHÔNG được dựng tx.
+///
+/// Nhánh cũ viết `self.resolve(&anchor.ref_id)?.map(|a| a.seq)` — hai trường cam kết bị vứt
+/// **ngay tại cửa**, nên cả ba nhánh phía dưới không còn gì để so. Đây là cùng một lớp lỗi
+/// với `publish_batch` bên Settlement, ở một tệp khác và viết cách nhau nhiều tháng: đó là
+/// lý do vị ngữ *"cùng seq thì phải cùng cam kết"* nay nằm ở **một** hàm chung
+/// (`diverging_field`) thay vì hai bản chép.
+#[test]
+fn mosaic_publish_cung_seq_khac_mmr_root_thi_bao_phan_ky() {
+    let sink = pinned_sink(MockMosaic::new());
+    let a1 = sample_anchor(1);
+    sink.publish(&a1, AnchorPriority::Immediate)
+        .expect("neo lần đầu phải chạy");
+
+    let forked = StrataAnchor {
+        mmr_root: [0xEEu8; 32],
+        ..a1
+    };
+    let err = sink
+        .publish(&forked, AnchorPriority::Immediate)
+        .expect_err("cùng seq khác cam kết KHÔNG được nuốt thành no-op");
+    assert!(
+        matches!(
+            err,
+            AnchorError::AnchorDivergence {
+                field: "mmr_root",
+                ..
+            }
+        ),
+        "phải là AnchorDivergence trên mmr_root, nhận: {err:?}"
+    );
+    assert_eq!(
+        sink.backend().tx_count(),
+        1,
+        "đã từ chối thì KHÔNG được dựng tx thứ hai"
+    );
+}

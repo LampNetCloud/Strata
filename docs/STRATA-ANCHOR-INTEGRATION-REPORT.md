@@ -2675,3 +2675,113 @@ Con số khớp đúng phép cộng, nên nó là phép đo chứ không phải 
 Ghi ra vì đo từng nhánh rời không kết luận được gì về `main`: hai bản vá cùng đổi một lớp hành vi
 (`Ok(None)` → `Err`) trên cùng đường `resolve`, và `#91` làm `tx_metadata_cbor` **có thể `Err`** đúng
 tại dòng mà `#89` vừa đổi cách xử lý. Chỗ hai bản vá gặp nhau chỉ tồn tại sau khi cả hai đã vào.
+
+---
+
+## §23. Vòng `12/09` — `#79` (P0): gác §8.1(c) có mã, có test, và chưa bao giờ chạy
+
+Vòng này đóng issue nặng nhất trong nhóm sáu issue anh Đức mở hôm `06/09`. Nó không phải nợ
+kỹ thuật kiểu mã chết như mô tả ban đầu xếp — nó là **phép kiểm duy nhất chống nhận nhầm
+fork**, và cả hai đường sản xuất đang đi vòng qua nó.
+
+### 23.1 Đo trước khi vá — `verify_resolved` có đúng **0** lời gọi sản xuất
+
+```
+grep -rn "verify_resolved(" src/ node/ anchor-io/   →  0   (trừ khai báo)
+grep -rn "verify_resolved(" tests/                  →  5
+grep -rn "verify_resolved\|AnchoredTable" node/     →  0
+```
+
+Hàm được viết, được kiểm bằng 5 ca, rồi không được cắm vào đường chạy. Lớp lỗi này **không
+có cách nào phát hiện bằng đọc mã từng tệp**: mỗi tệp đều đúng, mỗi test đều xanh.
+
+Hai đường sản xuất so **mỗi `seq`**:
+
+| chỗ | mã trước khi vá | vứt mất |
+|---|---|---|
+| `src/settlement.rs:474` | `Some(c) if c.seq == a.seq => { /* no-op */ }` | `c.mmr_root`, `c.head_version_hash` |
+| `src/anchor_sink.rs:779` | `self.resolve(&anchor.ref_id)?.map(\|a\| a.seq)` | cả hai, **ngay tại cửa** |
+
+`seq` là **VỊ TRÍ**, `mmr_root` + `head_version_hash` là **NỘI DUNG**. Trùng vị trí mà khác
+nội dung nghĩa là thứ đang nằm vĩnh viễn trên chuỗi cam kết một lịch sử daemon **không giữ**
+— và nhánh no-op kết luận "đã neo rồi": không đẩy gì, không lỗi nào bật ra, bảng neo không
+được ghi. Không cần ai tấn công (hai daemon dựng từ hai nhật ký đã phân kỳ là đủ), và nó
+tích rủi ro **theo thời gian**, không theo lưu lượng.
+
+### 23.2 Chỗ anh Đức đề nghị vá KHÔNG có đầu vào mà bản vá cần
+
+Đề nghị trong `#79` là *"nối `verify_resolved` vào cả hai chỗ trên"*. Đo mặt cắt thì hai chỗ
+đó không gọi được nó:
+
+```rust
+fn publish(&self, anchor: &StrataAnchor, priority: AnchorPriority) -> Result<…>
+//              ^^ không &StrataChain, không AnchoredTable
+```
+
+`verify_resolved(chain, on_chain, table)` cần **lịch sử local**. `AnchorSink` cố ý không
+mang nó — trait là mặt cắt I/O, không phải mặt cắt trạng thái. Gọi hàm ấy ở đó buộc phải đổi
+trait, tức đổi mặt cắt cho **mọi** backend.
+
+⇒ Gác tách làm hai tầng, mỗi tầng làm đúng phần nó cầm được:
+
+| tầng | kiểm gì | cần gì |
+|---|---|---|
+| **lõi** (`diverging_field`) | cùng `seq` thì phải cùng `mmr_root` + `head_version_hash` | hai anchor, không cần lịch sử |
+| **daemon** (`verify_on_chain_against_local`) | inclusion-proof dưới `mmr_root` đã neo + chống divergence | `StrataChain` — daemon là nơi **duy nhất** cầm |
+
+Vị ngữ ở tầng lõi đặt ở **một** hàm và được cả hai đường ghi gọi. Hai đường ấy viết cách nhau
+nhiều tháng, ở hai tệp, và **cùng** rút gọn về `seq` — chép vị ngữ thành hai bản là cách lỗ
+này tái sinh.
+
+### 23.3 Bảng neo KHÔNG cần bền vững — nó **suy ra được**
+
+`#79` mục 1 đề nghị thêm `mmr_root` + `mmr_size` vào `JournalRecord::Anchor` để daemon giữ
+`AnchoredTable` bền vững. Đo `AnchoredTable::record_anchor` thì đề nghị đó **thừa**:
+
+```rust
+let mmr_size = anchor.seq + 1;                       // SUY RA, không nhớ
+let version_hash = chain.version(anchor.seq)…;       // lấy thẳng từ chain
+```
+
+Thứ **duy nhất** `verify_resolved` lấy từ bảng là `mmr_size`. Nên dựng bảng tại chỗ cho đúng
+anchor đang xét là **tương đương** với đọc một bảng đã lưu — và không đẻ thêm một trạng thái
+có thể lệch, mất, hoặc trôi khỏi nguồn. Bộ đệm suy được thì đừng nhớ.
+
+Không có vòng luẩn quẩn: bảng chỉ cấp `mmr_size`; hai phép so quyết định
+(`head_version_hash`, và inclusion dưới `mmr_root`) đều so với **giá trị on-chain**.
+
+### 23.4 Phạm vi cố ý hẹp — không giành tên của lỗi khác
+
+Gác daemon chỉ chạy khi `on_chain.seq <= attempted_seq`. Ca `on_chain.seq > attempted_seq` là
+**rollback**, đã có tên riêng (`AnchorRollback`, 409) ở tầng dưới. Chạy verify ở đó sẽ đổi
+một lỗi đúng tên thành `OnChainAhead` — tức làm client học sai một tên nó đã học đúng.
+
+Cùng lý do, `Err(NotConfigured)` từ `resolve` bị nuốt: `publish` ngay dưới trả 501 với đúng
+tên của nó.
+
+### 23.5 Đo — gác tự chứng minh bằng ba đột biến độc lập
+
+| đột biến | kết quả | đối chứng dương |
+|---|---|---|
+| tắt lời gọi `verify_on_chain_against_local` ở daemon | **1 đỏ** (`neo_bi_tu_choi_…`) | 34 ca còn lại xanh, gồm `neo_van_chay_khi_…khop_…` |
+| `diverging_field`: vô hiệu vế `mmr_root` | **1 đỏ** | vế `head_version_hash` vẫn xanh |
+| `diverging_field`: vô hiệu vế `head_version_hash` | **1 đỏ** | vế `mmr_root` vẫn xanh |
+| khôi phục cả ba | **297 xanh / 0 đỏ** | |
+
+Hai vế của vị ngữ được đo **riêng** là có chủ ý: một gác chỉ so `mmr_root` vẫn làm bài kia
+xanh nếu hai bài dùng chung một đột biến. Và mỗi ca âm đều có một ca **dương** đi kèm —
+thiếu nó thì một gác chặn-tất-cả cũng làm mọi bài âm xanh.
+
+Bộ kiểm sau vòng: `cargo test --workspace` **297 pass / 0 fail** (291 → 297, thêm 6) ·
+`clippy --all-targets -D warnings` **0** · `fmt --check` sạch.
+
+### 23.6 Một chỗ chưa khớp, ghi ra thay vì để trôi
+
+`AnchorDivergence` ánh xạ về `ApiError::AnchorRejected` ⇒ **502**, theo đúng tiền lệ của
+`DuplicateRefIdInBatch`: *bộ tên lỗi trên dây là bề mặt client học thuộc*, thêm tên vào đó là
+việc của spec (bảng §3.1 `Strata-API.md`).
+
+Nhưng 502 nói *"upstream từ chối, thử lại xem"* — **sai cả hai vế**: chuỗi không từ chối gì
+(daemon tự dừng trước khi đẩy), và thử lại thì lệch y hệt. Tên đúng là một mã **409** riêng.
+Đã nêu ở `#79` để chủ spec chốt; tới lúc đó lý do vẫn đọc được nguyên vẹn ở `detail.reason`,
+và thông điệp tự nói *"KHÔNG thử lại; đồng bộ lại lịch sử local trước"*.

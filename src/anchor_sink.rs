@@ -97,6 +97,31 @@ pub enum AnchorError {
     ///
     /// Fail cứng, KHÔNG retryable: bắn lại đúng lô ấy vẫn hỏng y hệt.
     DuplicateRefIdInBatch { ref_id: Hash32 },
+    /// **Cùng `ref_id`, cùng `seq`, KHÁC cam kết.** Anchor on-chain và anchor sắp neo trùng
+    /// `seq` nhưng lệch `mmr_root` hoặc `head_version_hash`.
+    ///
+    /// # Vì sao đây KHÔNG phải no-op idempotent (issue #79)
+    ///
+    /// Hai đường ghi trước đây so **mỗi `seq`** rồi kết luận *"đã neo rồi"*: `publish_batch`
+    /// khớp `c.seq == a.seq`, `MosaicAnchorSink::publish` thì `.map(|a| a.seq)` — vứt hai
+    /// trường kia ngay tại cửa. Nhưng `seq` là **vị trí**, còn `mmr_root` +
+    /// `head_version_hash` là **nội dung**: trùng vị trí mà khác nội dung nghĩa là thứ đang
+    /// nằm trên chuỗi cam kết một lịch sử mà daemon này KHÔNG giữ.
+    ///
+    /// Kết luận "no-op" ở đó là kết luận **sai theo chiều im lặng**: không đẩy gì, không lỗi
+    /// nào bật ra, và bảng neo không được ghi — nên không phép kiểm nào sau đó phát hiện ra.
+    /// Nó không cần ai tấn công (hai daemon dựng từ hai nhật ký đã phân kỳ, hoặc một lần
+    /// replay lỗi, là đủ) và nó tích rủi ro **theo thời gian**, không theo lưu lượng.
+    ///
+    /// Fail cứng, KHÔNG retryable: bắn lại đúng anchor ấy vẫn lệch y hệt. Đường ra là đồng
+    /// bộ lại lịch sử local, không phải thử lại.
+    AnchorDivergence {
+        ref_id: Hash32,
+        seq: u64,
+        /// Trường lệch đầu tiên phát hiện được — `"mmr_root"` hoặc `"head_version_hash"`.
+        /// Đủ để người vận hành biết phải đi so cái gì; cả hai lệch thì báo `"mmr_root"`.
+        field: &'static str,
+    },
 }
 
 impl AnchorError {
@@ -104,6 +129,25 @@ impl AnchorError {
     pub fn is_retryable(&self) -> bool {
         matches!(self, AnchorError::Network(_))
     }
+}
+
+/// Trường **nội dung** đầu tiên lệch giữa hai anchor đang được coi là "cùng một lần neo",
+/// `None` nếu cả hai khớp. Chỉ có nghĩa khi `ref_id` và `seq` đã bằng nhau — người gọi kiểm
+/// hai trường đó trước, vì chúng có ý nghĩa riêng (`ref_id` khác = lineage khác; `seq` khác
+/// = rollback hoặc nhảy bậc, đã có biến thể lỗi riêng).
+///
+/// Vị ngữ *"cùng seq thì phải cùng cam kết"* đặt ở **một chỗ** và được cả hai đường ghi gọi
+/// (`SettlementSink::publish_batch`, `MosaicAnchorSink::publish`). Siết một chỗ rồi quên chỗ
+/// kia đúng là cách lỗ này sống sót: hai đường viết cách nhau vài tháng, cùng rút gọn về
+/// `seq`, và không ai đọc hai tệp cạnh nhau.
+pub fn diverging_field(local: &StrataAnchor, on_chain: &StrataAnchor) -> Option<&'static str> {
+    if local.mmr_root != on_chain.mmr_root {
+        return Some("mmr_root");
+    }
+    if local.head_version_hash != on_chain.head_version_hash {
+        return Some("head_version_hash");
+    }
+    None
 }
 
 impl std::fmt::Display for AnchorError {
@@ -776,18 +820,30 @@ impl<B: MosaicBackend> AnchorSink for MosaicAnchorSink<B> {
         // = rollback (INV-E7); neo vượt quá một bậc = wedge. Nhánh thứ ba trước đây rơi vào
         // `_ => {}` và được đẩy thẳng lên chuỗi, nơi validator từ chối (`seq' == seq + 1`) —
         // nhưng lúc đó head local đã tiến nên KHÔNG có đường quay lại.
-        match self.resolve(&anchor.ref_id)?.map(|a| a.seq) {
-            Some(s) if s == anchor.seq => return Ok(None), // đã neo — no-op idempotent
-            Some(s) if s > anchor.seq => {
+        // Giữ **cả** anchor on-chain, không `.map(|a| a.seq)`. Bản trước rút gọn về `seq`
+        // ngay tại cửa, nên ba nhánh phía dưới không còn gì để so — và nhánh "no-op" nuốt
+        // luôn ca cùng-seq-khác-cam-kết (issue #79).
+        match self.resolve(&anchor.ref_id)? {
+            Some(c) if c.seq == anchor.seq => {
+                if let Some(field) = diverging_field(anchor, &c) {
+                    return Err(AnchorError::AnchorDivergence {
+                        ref_id: anchor.ref_id,
+                        seq: anchor.seq,
+                        field,
+                    });
+                }
+                return Ok(None); // đã neo, cùng cam kết — no-op idempotent
+            }
+            Some(c) if c.seq > anchor.seq => {
                 return Err(AnchorError::RollbackAttempt {
-                    on_chain_seq: s,
+                    on_chain_seq: c.seq,
                     attempted: anchor.seq,
                 });
             }
-            Some(s) if anchor.seq > s + 1 => {
+            Some(c) if anchor.seq > c.seq + 1 => {
                 return Err(AnchorError::SeqGap {
-                    on_chain_seq: Some(s),
-                    expected: s + 1,
+                    on_chain_seq: Some(c.seq),
+                    expected: c.seq + 1,
                     attempted: anchor.seq,
                 });
             }
