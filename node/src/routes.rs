@@ -24,7 +24,10 @@ use lampnet_strata::chain::{Policy, StrataChain, StrataError};
 use lampnet_strata::refid::{decode_ref_id, encode_ref_id, gen_ref_id_raw};
 use lampnet_strata::state::{build_state_root, prove_field};
 use lampnet_strata::version::{Did, Hash32, StrataVersion};
-use lampnet_strata::{AnchorError, AnchorPriority, AnchorSink, AuditAction, AuditEntry};
+use lampnet_strata::{
+    AnchorError, AnchorPriority, AnchorSink, AnchoredTable, AuditAction, AuditEntry,
+    verify_resolved,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -674,6 +677,75 @@ async fn anchor(
 /// lại `last_anchor_seq` đã tăng mà on-chain KHÔNG có gì — mọi lần thử lại sau đó đều
 /// `AnchorRollback` và ref chết vĩnh viễn. Cả ba bước nằm trong khoá của ref nên không có
 /// cửa sổ đua nào chen vào giữa.
+/// §8.1(c): anchor on-chain phải khớp lịch sử **local** trước khi daemon đẩy anchor kế.
+///
+/// # Vì sao gác này nằm ở đây chứ không ở `AnchorSink`
+///
+/// Issue #79 đề nghị nối `verify_resolved` vào hai chỗ so `seq` trong crate lõi
+/// (`SettlementSink::publish_batch`, `MosaicAnchorSink::publish`). Đo lại mặt cắt thì hai
+/// chỗ đó **không có đầu vào** mà hàm ấy cần: `AnchorSink::publish` nhận đúng
+/// `(&StrataAnchor, AnchorPriority)` — không `&StrataChain`, không bảng neo. Gọi
+/// `verify_resolved` ở đó buộc phải đổi trait, tức đổi mặt cắt cho **mọi** backend.
+///
+/// Nên gác tách làm hai tầng, theo đúng thứ mỗi tầng cầm được:
+/// - **lõi** so được *nội dung* của hai anchor (`diverging_field` — cùng `seq` thì phải cùng
+///   `mmr_root` + `head_version_hash`), không cần lịch sử;
+/// - **daemon** là nơi duy nhất cầm `StrataChain`, nên inclusion-proof verify nằm ở đây.
+///
+/// # Bảng neo KHÔNG cần bền vững — nó suy ra được
+///
+/// #79 mục 1 đề nghị thêm `mmr_root` + `mmr_size` vào `JournalRecord::Anchor` để daemon giữ
+/// `AnchoredTable` bền vững. Đo `AnchoredTable::record_anchor` thì thấy không cần: dòng bảng
+/// gồm `mmr_size = seq + 1` (**suy ra**, không nhớ) và `version_hash` lấy thẳng từ `chain`.
+/// Thứ duy nhất `verify_resolved` lấy từ bảng là `mmr_size`. Nên dựng bảng tại chỗ cho đúng
+/// anchor đang xét là **tương đương** với đọc một bảng đã lưu, và không đẻ thêm một trạng
+/// thái có thể lệch — bộ đệm suy được thì đừng nhớ.
+///
+/// Không có vòng luẩn quẩn: bảng chỉ cấp `mmr_size`; hai phép so quyết định
+/// (`head_version_hash`, và inclusion dưới `mmr_root`) đều so với **giá trị on-chain**.
+///
+/// # Phạm vi cố ý hẹp
+///
+/// Chỉ chạy khi `on_chain.seq <= attempted_seq`. Ca `on_chain.seq > attempted_seq` là
+/// **rollback**, đã có tên lỗi riêng (`AnchorRollback`, 409) ở tầng dưới — chạy verify ở đó
+/// sẽ đổi một lỗi đúng tên thành `OnChainAhead`, tức làm client học sai.
+fn verify_on_chain_against_local(
+    sink: &(dyn AnchorSink + Send + Sync),
+    chain: &StrataChain,
+    ref_id: &Hash32,
+    attempted_seq: u64,
+) -> ApiResult<()> {
+    let on_chain = match sink.resolve(ref_id) {
+        Ok(Some(a)) => a,
+        // Chưa neo bao giờ — không có gì để đối chiếu. (Sau #89 thì `Ok(None)` ở đường
+        // Settlement chỉ còn đúng nghĩa này; "không đọc được" đã thành `Err`.)
+        Ok(None) => return Ok(()),
+        // Backend chưa cấu hình: `publish` ngay dưới sẽ trả 501 với đúng tên của nó. Nuốt
+        // ở đây để gác mới không đổi mã lỗi của một đường đã có nghĩa.
+        Err(AnchorError::NotConfigured) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if on_chain.seq > attempted_seq {
+        return Ok(()); // rollback — để tầng dưới đặt tên, xem doc ở trên
+    }
+    let mut table = AnchoredTable::new();
+    table.record_anchor(chain, &on_chain).map_err(|e| {
+        ApiError::AnchorRejected(format!(
+            "§8.1(c): không dựng được dòng neo cho seq {} từ lịch sử local ({e:?}) — anchor \
+             on-chain trỏ vào một seq lịch sử này không có",
+            on_chain.seq
+        ))
+    })?;
+    verify_resolved(chain, &on_chain, &table).map_err(|e| {
+        ApiError::AnchorRejected(format!(
+            "§8.1(c) KHÔNG qua tại seq {}: {e:?}. Anchor on-chain không khớp lịch sử local — \
+             KHÔNG neo tiếp, KHÔNG thử lại; đồng bộ lại lịch sử local trước",
+            on_chain.seq
+        ))
+    })?;
+    Ok(())
+}
+
 fn anchor_blocking(
     st: &AppState,
     ref_id: Hash32,
@@ -697,6 +769,9 @@ fn anchor_blocking(
     if matches!(priority, AnchorPriority::NoAnchor) {
         return Ok(AnchorResp::new(&a, None, None));
     }
+
+    // §8.1(c) — đối chiếu anchor on-chain với lịch sử LOCAL trước khi đẩy (issue #79).
+    verify_on_chain_against_local(st.sink.as_ref(), &g.chain, &ref_id, a.seq)?;
 
     let receipt = st.sink.publish(&a, priority)?;
     let committed = g.chain.publish_anchor()?; // chốt INV-E7 ở lõi sau khi on-chain đã nhận

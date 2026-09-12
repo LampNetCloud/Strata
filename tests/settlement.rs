@@ -13,7 +13,7 @@ use ed25519_dalek::SigningKey;
 use lampnet_strata::anchor_sink::{
     AnchorError, AnchorPriority, AnchorSink, AnchoredTable, verify_resolved,
 };
-use lampnet_strata::chain::{Policy, StrataChain};
+use lampnet_strata::chain::{Policy, StrataAnchor, StrataChain};
 use lampnet_strata::refid::gen_ref_id_raw;
 use lampnet_strata::settlement::{
     ChainQuery, SettlementRecord, SettlementSink, SinkConfig, SubmitOutcome, Submitter,
@@ -174,4 +174,91 @@ fn settlement_resolve_old_seq_verifies_at_anchored_size() {
     let resolved = s.resolve(&ref_id).unwrap().unwrap();
     assert_eq!(resolved.seq, 1);
     assert!(verify_resolved(&chain, &resolved, &table).is_ok());
+}
+
+// ── issue #79: cùng `seq`, KHÁC cam kết ⇒ KHÔNG phải no-op idempotent ────────
+
+/// `publish_batch` thấy on-chain đã có `seq` bằng đúng `seq` đang neo — nhưng `mmr_root`
+/// khác ⇒ phải báo [`AnchorError::AnchorDivergence`], không được nuốt thành no-op.
+///
+/// Nhánh cũ (`Some(c) if c.seq == a.seq => {}`) so **mỗi `seq`**, tức so VỊ TRÍ rồi kết
+/// luận về NỘI DUNG. Hệ quả không cần ai tấn công: hai daemon dựng từ hai nhật ký đã phân
+/// kỳ cho cùng `seq`, khác `mmr_root`; đường neo kết luận "đã neo rồi", không đẩy gì, không
+/// lỗi nào bật ra — và thứ nằm vĩnh viễn trên chuỗi cam kết một lịch sử daemon không giữ.
+#[test]
+fn publish_batch_cung_seq_khac_mmr_root_thi_bao_phan_ky_chu_khong_no_op() {
+    let s = sink("addr_pub");
+    let chain = chain_of(1);
+    let a = chain.anchor();
+
+    // Lần neo thật — sau lượt này on-chain có anchor seq 0 của chính chain này.
+    s.publish_batch(std::slice::from_ref(&a))
+        .expect("neo lần đầu phải chạy");
+
+    // Cùng ref_id, cùng seq, KHÁC mmr_root: một lịch sử khác trỏ vào cùng một vị trí.
+    let forked = StrataAnchor {
+        mmr_root: [0xEE; 32],
+        ..a
+    };
+    let err = s
+        .publish_batch(&[forked])
+        .expect_err("cùng seq mà khác cam kết KHÔNG được coi là đã-neo-rồi");
+    assert!(
+        matches!(
+            err,
+            AnchorError::AnchorDivergence {
+                field: "mmr_root",
+                ..
+            }
+        ),
+        "phải là AnchorDivergence trên mmr_root, nhận: {err:?}"
+    );
+}
+
+/// Cùng đường đó với `head_version_hash` — trường thứ hai, để bản vá không chỉ phủ một nửa
+/// vị ngữ. (Một gác chỉ so `mmr_root` vẫn làm bài trên xanh.)
+#[test]
+fn publish_batch_cung_seq_khac_head_version_hash_thi_bao_phan_ky() {
+    let s = sink("addr_pub");
+    let chain = chain_of(1);
+    let a = chain.anchor();
+    s.publish_batch(std::slice::from_ref(&a))
+        .expect("neo lần đầu phải chạy");
+
+    let forked = StrataAnchor {
+        head_version_hash: [0xEE; 32],
+        ..a
+    };
+    let err = s
+        .publish_batch(&[forked])
+        .expect_err("lệch head_version_hash cũng là phân kỳ");
+    assert!(
+        matches!(
+            err,
+            AnchorError::AnchorDivergence {
+                field: "head_version_hash",
+                ..
+            }
+        ),
+        "phải là AnchorDivergence trên head_version_hash, nhận: {err:?}"
+    );
+}
+
+/// Đối chứng DƯƠNG: neo **lại y hệt** vẫn là no-op idempotent, không bị gác mới bắt nhầm.
+/// Thiếu bài này thì một gác chặn-mọi-lượt-neo-lại cũng làm hai bài trên xanh.
+#[test]
+fn publish_batch_neo_lai_y_het_van_la_no_op_idempotent() {
+    let s = sink("addr_pub");
+    let chain = chain_of(1);
+    let a = chain.anchor();
+    s.publish_batch(std::slice::from_ref(&a))
+        .expect("neo lần đầu phải chạy");
+
+    let out = s
+        .publish_batch(std::slice::from_ref(&a))
+        .expect("neo lại y hệt phải là no-op, không phải lỗi");
+    assert!(
+        out.is_none(),
+        "no-op idempotent thì không dựng tx mới: {out:?}"
+    );
 }

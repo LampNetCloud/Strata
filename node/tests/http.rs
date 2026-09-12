@@ -1470,3 +1470,97 @@ async fn backend_khong_quet_duoc_slot_thi_khong_gia_vo_chu_ky_rong() {
     .await;
     assert_ne!(st, StatusCode::OK, "{v}");
 }
+
+// ── §8.1(c): anchor on-chain phải khớp lịch sử LOCAL (issue #79) ─────────────
+
+/// Anchor on-chain đúng `ref_id`, `seq` **không** vượt head local, nhưng cam kết trỏ vào
+/// một lịch sử khác ⇒ daemon phải TỪ CHỐI neo tiếp.
+///
+/// Trước bản vá: daemon không hỏi chuỗi câu nào trước khi đẩy — nó chỉ so gương
+/// `anchored.seq` trong tiến trình. Gương rỗng sau restart ⇒ không gác nào chạy, và daemon
+/// nối tiếp một lineage mà nó **không giữ lịch sử**. `verify_resolved` đã có đủ mã và đủ
+/// ca kiểm từ lâu; thứ thiếu là một lời gọi.
+#[tokio::test]
+async fn neo_bi_tu_choi_khi_anchor_on_chain_khong_khop_lich_su_local() {
+    let sink = Arc::new(MemorySink::new());
+    let (app, policy) = app_with(sink.clone());
+    let (r, _) = create_ok(&app, &policy).await;
+
+    // seq 0 = đúng head local, nên KHÔNG phải rollback và KHÔNG phải nhảy bậc — hai gác
+    // cũ đều cho qua. Chỉ có nội dung cam kết là của một lịch sử khác.
+    let raw = lampnet_strata::refid::decode_ref_id(&r).unwrap();
+    sink.seed(lampnet_strata::StrataAnchor {
+        ref_id: raw,
+        head_version_hash: [0xAA; 32],
+        mmr_root: [0xBB; 32],
+        seq: 0,
+    });
+
+    let (st, body) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/anchor"),
+        Some(json!({ "priority": "immediate" })),
+    )
+    .await;
+    assert_ne!(
+        st,
+        StatusCode::OK,
+        "neo tiếp lên một lịch sử daemon KHÔNG giữ phải bị chặn, không được trả OK: {body}"
+    );
+    let detail = body.to_string();
+    assert!(
+        detail.contains("8.1(c)"),
+        "lý do phải nói rõ là gác §8.1(c), để người vận hành biết đi đồng bộ lại chứ không \
+         thử lại: {body}"
+    );
+    assert_eq!(
+        sink.pushes(),
+        0,
+        "đã từ chối thì KHÔNG được đẩy gì lên chuỗi"
+    );
+}
+
+/// Đối chứng DƯƠNG cho bài trên: cùng đúng đường đó, anchor on-chain **khớp** lịch sử local
+/// thì neo chạy bình thường. Thiếu bài này thì một gác chặn-tất-cả cũng làm bài trên xanh.
+#[tokio::test]
+async fn neo_van_chay_khi_anchor_on_chain_khop_lich_su_local() {
+    let sink = Arc::new(MemorySink::new());
+    let (app, policy) = app_with(sink.clone());
+    let (r, vh0) = create_ok(&app, &policy).await;
+
+    // Lượt neo thứ nhất ghi anchor thật của chính chain này lên sink.
+    let (st, a) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/anchor"),
+        Some(json!({ "priority": "immediate" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "lượt neo đầu phải chạy: {a}");
+
+    // Thêm một version rồi neo lại: lúc này `resolve()` trả anchor seq 0 THẬT, gác §8.1(c)
+    // chạy đủ (dựng bảng + verify inclusion dưới mmr_root đã neo) và phải cho qua.
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/version"),
+        Some(append_body(1, DID, 0, vh0, 2_000, &policy, V_B)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "append phải chạy");
+
+    let (st, a) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/anchor"),
+        Some(json!({ "priority": "immediate" })),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "anchor on-chain khớp lịch sử local thì gác phải cho qua: {a}"
+    );
+    assert_eq!(a["seq"], 1);
+}

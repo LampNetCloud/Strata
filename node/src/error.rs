@@ -100,6 +100,24 @@ impl From<AnchorError> for ApiError {
             // mặt client học thuộc, thêm tên vào đó là việc của spec + anh Đức (bảng §3.1
             // `Strata-API.md`), không phải việc của một bản vá lỗi vận hành. Lý do vẫn
             // đọc được nguyên vẹn ở `detail.reason`.
+            // **Cùng seq, khác cam kết** (issue #79). Không phải lỗi client (thân yêu cầu
+            // không có gì sai), không phải lỗi mạng (retry vẫn lệch y hệt), và chuỗi cũng
+            // KHÔNG từ chối gì — daemon tự dừng trước khi đẩy. Đường ra duy nhất là người
+            // vận hành đi đồng bộ lại lịch sử local.
+            //
+            // Dùng `AnchorRejected` (502) theo đúng tiền lệ ngay dưới đây: **bộ tên lỗi trên
+            // dây là bề mặt client học thuộc**, thêm một tên vào đó là việc của spec (bảng
+            // §3.1 `Strata-API.md`), không phải của một bản vá. ⚠️ Nhưng ghi rõ chỗ chưa
+            // khớp, đừng để nó trôi: 502 nói *"upstream từ chối, thử lại xem"* — sai cả hai
+            // vế ở đây. Tên đúng là một mã 409 riêng; đã nêu ở issue #79 để chủ spec chốt.
+            AnchorError::AnchorDivergence { ref_id, seq, field } => {
+                ApiError::AnchorRejected(format!(
+                    "PHÂN KỲ tại ref_id {} seq {seq}: anchor on-chain và lịch sử local lệch \
+                     `{field}`. Thứ đang nằm trên chuỗi cam kết một lịch sử daemon này KHÔNG \
+                     giữ — KHÔNG neo tiếp, KHÔNG thử lại; đồng bộ lại lịch sử local trước",
+                    h(&ref_id)
+                ))
+            }
             AnchorError::DuplicateRefIdInBatch { ref_id } => ApiError::Malformed(format!(
                 "lô có hai anchor cùng ref_id {} — một tx không được mang hai seq cho cùng \
                  một lineage; gộp chúng lại rồi gửi một anchor duy nhất cho ref đó",
