@@ -68,3 +68,27 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+      # `node/tests/field_proof_fixture.rs` khoá fixture theo MÃ (dựng lại proof, so hình dạng dây),
+      # nhưng không bắt được bộ SINH đổi mà quên chạy lại: tệp trôi khỏi bộ sinh mà vẫn xanh.
+      # Sinh lại rồi `diff` rỗng thì mới chắc tệp đã commit là thứ bộ sinh hôm nay ra.
+      - name: field-proof fixture sinh lại khớp tệp đã commit
+        run: |
+          cargo run -q -p lampnet-strata-node --example dump_field_proof_fixture > "$RUNNER_TEMP/field-proof-vectors.json"
+          diff -u apis/field-proof-vectors.json "$RUNNER_TEMP/field-proof-vectors.json"
+
+  # Bộ kiểm độc lập — KHÔNG dùng mã Strata. Chạy riêng job để một lỗi cài Python không bị đọc
+  # thành lỗi mã Rust, và ngược lại. Phía Rust ra đề (`apis/field-proof-vectors.json`); job này
+  # đòi bộ kiểm cho ĐÚNG kết quả ở mọi vector và từ chối ĐÚNG TẦNG ở mọi ca `must_reject`.
+  field-proof-python:
+    name: field-proof (verify_field_proof.py trên fixture)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: blake3 (ghim phiên bản)
+        run: pip install "blake3==1.0.9"
+      - name: verify_field_proof.py --fixture
+        run: python scripts/verify_field_proof.py --fixture apis/field-proof-vectors.json
+
