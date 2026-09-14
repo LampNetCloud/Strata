@@ -2872,3 +2872,78 @@ ký trước đó thành không kiểm lại được — **và không phép ki�
 
 Biến mới `STRATA_NODE_EXPOSED` được khai ở **đầu tệp** cùng các biến khác — một cổng mà chỉ
 người viết nó biết cách mở thì lần đầu nó chặn ai đó sẽ trông như một lỗi khởi động.
+
+---
+
+## §25. Phiên `14/09` — lượt nối bằng mã của OriLife, và đi tới checkpoint
+
+Nửa VeData (đầy đủ số đo, txid, bộ kiểm độc lập): `VeDataIO/Core:
+docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md §20`. Chương này chỉ giữ phần thuộc daemon.
+
+Bin build lại từ `main` `93766a4` (`cargo build --release -p lampnet-strata-node`, `pipefail`,
+mtime bin 09-14 09:31 > mtime `node/src` 09-12). Nhật ký 09-07 replay thử trên **bản sao**
+trước (`4 bản ghi · 1 ref · 2 version · 1 neo`) — định dạng ghi 09-07 đọc được bằng mã 09-12.
+
+### 25.1 Bản cài thứ hai trùng byte với `_canonical` — lần này là mã của OriLife
+
+Client dùng lượt này là lớp thư viện `OriLife-Core: MassTreeIdentify/core/strata_client.py`
+(`30556e8`), import nguyên. Trước khi ký, cùng đầu vào gửi `_canonical`:
+
+| | append seq 2 | genesis |
+|---|---|---|
+| `canonical_core` 180 B | trùng byte | trùng byte |
+| `state_root` | trùng | trùng |
+| `version_hash` (`PinnedHasher`) | trùng | trùng |
+| `ref_id` | — | trùng |
+
+Sau đó `create` · `version` ×2 đều `200`; `verify_strict` nhận chữ ký của họ.
+
+### 25.2 `policy_hash` — ca một cặp nền tảng dẫn được phía client
+
+`h_dom("LN/STRATA/policy/v1", did ‖ pk)` tính phía client **trùng** giá trị daemon ghi ở head;
+đảo `pk ‖ did` lệch. Với mô hình khoá ở `OriLife#151` (một cặp nền tảng), client cầm sẵn
+`pk` của chính nó. Đây là dữ kiện cho `#84`, không đổi kết luận của anh Đức cho ca nhiều tác
+giả (client cầm DID của tác giả khác thì chưa cầm `pk`).
+
+### 25.3 Route không tồn tại trả `404` thân rỗng — và một client đọc nó thành "chưa có"
+
+Client OriLife gọi `GET /v1/strata/resolve?did=…&external_key=…`. Router có 11 route, không
+route nào như vậy, và `Strata-API.md` cũng không đặc tả. Đo:
+
+| Yêu cầu | Trả |
+|---|---|
+| `/v1/strata/resolve?…` | `404`, **0 B** |
+| ref sai khuôn trên route có thật (`/…/head`) | `400` + JSON `{"error":"MalformedRequest",…}` |
+
+Client đọc mọi `404` thành *"chưa map"* ⇒ `None`, kể cả ngay sau `create` thành công. Lỗi nằm
+ở phía client (gọi route không có), nhưng một `404` không mang thân JSON thì bên gọi **không
+phân biệt được** *"không có route"* với *"không có tài nguyên"*. Ghi lại như một ứng viên cho
+fallback handler trả JSON riêng — **chưa làm**, không thuộc việc phiên này.
+
+Kèm một hành vi đo được: `create` lần hai cùng `genesis_nonce` ⇒ `409 RefExists` (không dedup
+về `200`).
+
+### 25.4 `scan_window` trên cửa sổ 1,72 triệu slot — fail-closed không kích
+
+Lượt chốt checkpoint epoch 9 hỏi `_settlement_window` cho `[131977406, 133696398)` (~20 ngày):
+quét **5 tx** của ví publisher, trả **3 anchor**, chạm tx dưới `from_slot` trước trần 500 ⇒
+nhánh *"CHƯA quét hết"* không kích. Một bộ kiểm Python tự quét Blockfrost (không qua route
+này) ra **cùng 3 lá** và cùng root với datum on-chain (nửa VeData §20.7).
+
+### 25.5 Replay lần hai
+
+```
+nhật ký: …/strata-live-0907.jsonl — replay 9 bản ghi trong 1.401214ms:
+         2 ref · 5 version · 0 audit · 3 neo
+```
+
+`GET /head` hai ref trước/sau restart trùng từng byte; `_dirty` rỗng.
+
+### 25.6 Nợ mở sau phiên này
+
+| Mục | Ghi chú |
+|---|---|
+| fallback `404` không có thân JSON (§25.3) | ứng viên, chưa mở issue |
+| `#84` ca nhiều tác giả | chờ hình dạng API |
+| `#41` mục 1 (one-shot policy thread-token) | chưa đụng |
+| `#81` | chờ `scan_window` |
