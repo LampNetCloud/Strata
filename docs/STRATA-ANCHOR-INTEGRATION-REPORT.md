@@ -2945,5 +2945,5 @@ nhật ký: …/strata-live-0907.jsonl — replay 9 bản ghi trong 1.401214ms:
 |---|---|
 | fallback `404` không có thân JSON (§25.3) | ứng viên, chưa mở issue |
 | `#84` ca nhiều tác giả | chờ hình dạng API |
-| `#41` mục 1 (one-shot policy thread-token) | chưa đụng |
+| `#41` mục 1 (one-shot policy thread-token) | đạt điều kiện đóng — policy one-shot có thật ở `VeDataIO/Core: validators/strata_thread.ak` (`Core#104`), đo local 281 pass, bỏ gác M2 ⇒ đỏ đúng một bài; đã đề nghị đóng `#41` (09-14) |
 | `#81` | chờ `scan_window` |
