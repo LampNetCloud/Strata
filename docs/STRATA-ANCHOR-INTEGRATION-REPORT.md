@@ -2947,3 +2947,46 @@ nhật ký: …/strata-live-0907.jsonl — replay 9 bản ghi trong 1.401214ms:
 | `#84` ca nhiều tác giả | chờ hình dạng API |
 | `#41` mục 1 (one-shot policy thread-token) | đạt điều kiện đóng — policy one-shot có thật ở `VeDataIO/Core: validators/strata_thread.ak` (`Core#104`), đo local 281 pass, bỏ gác M2 ⇒ đỏ đúng một bài; đã đề nghị đóng `#41` (09-14) |
 | `#81` | chờ `scan_window` |
+
+### 25.7 Bộ kiểm field-proof độc lập vào kho — `scripts/verify_field_proof.py`
+
+Bộ kiểm dùng ở `SEAM §20.4` là một tệp của lượt chạy (đường dẫn cứng, đọc `.env`, gọi
+Blockfrost). Đưa vào kho dưới dạng có cổng giữ, không chép nguyên:
+
+| Mảnh | Vai |
+|---|---|
+| `node/examples/dump_field_proof_fixture.rs` | Rust ra đề → `apis/field-proof-vectors.json`: 5 vector (4 lá · 3 lá carry · 1 lá · có salt · 5 lá) + 9 ca `must_reject`, mỗi ca khai **tầng** phải hỏng (`fvh` · `state_root` · `version_hash`) |
+| `node/tests/field_proof_fixture.rs` | khoá phía Rust: dựng lại proof từ tập trường, so **nguyên object** `FieldProofResp::new` với fixture, và mỗi ca từ chối hỏng đúng tầng |
+| `scripts/verify_field_proof.py` | bộ kiểm độc lập (stdlib + `blake3`), không dùng mã Strata; đi `proof → state_root → version_hash` rồi so với giá trị neo người dùng đọc từ label 1234 |
+| CI | job `rust` thêm bước sinh lại fixture + `diff` rỗng; job riêng `field-proof-python` chạy script trên fixture, `blake3==1.0.9` |
+
+**Ba chỗ đo được trong lúc làm, đều đổi thiết kế:**
+
+1. 🪤 **Fixture tự chép hình dạng proof thì khớp bộ kiểm mà lệch dây.** Bản đầu ghi `key` dạng
+   hex; `FieldProofResp::new` trả `key` là `String::from_utf8_lossy`. Script xanh trên fixture,
+   rồi **traceback** trên proof lấy thật từ route. ⇒ bộ sinh và bài khoá chuyển sang crate node,
+   phần `proof`/`version` sinh bằng **chính** `FieldProofResp`/`VersionDto`; bài khoá so nguyên
+   object, nên đổi DTO mà không sinh lại fixture là đỏ (đã đảo mã: `key` → hex ⇒ đỏ đúng bài).
+2. **Tên tầng là hợp đồng chung.** Script bản đầu có thêm tầng `version_state_root` chạy trước
+   `version_hash`; ca `R8` bị từ chối ở tầng khác tầng fixture khai. Hai bên cùng từ chối nhưng
+   đặt tên khác nhau thì một bên hỏng vì lý do khác vẫn khớp phía kia ⇒ về đúng ba tầng.
+3. **Đầu vào cụt phải bị chặn trước khi băm.** `--expect-version-hash` cụt 16 hex vẫn bị từ chối
+   ở `version_hash`, nhưng thông báo in hai tiền tố **giống hệt** kèm "≠" (đúng bẫy `unit[:80]`).
+   Nay: sai khuôn ⇒ `exit 2` trước khi băm; thân lỗi của daemon (`{"error":…}`) cũng `exit 2`,
+   tách khỏi "không đạt" (`exit 1`). Thiếu giá trị neo mà không khai `--no-chain` ⇒ `exit 2` —
+   không có đường ra một ✅ "chưa so với chuỗi" trông như đã kiểm.
+
+**Đo:**
+
+| | |
+|---|---|
+| `cargo test --workspace` | **307 → 309 pass / 0 fail** |
+| `clippy --all-targets -D warnings` · `fmt --check` | 0 · sạch |
+| fixture sinh lại | `diff` rỗng |
+| script trên fixture | 5 vector đạt · 9 ca từ chối đúng tầng |
+| script trên dữ liệu thật 09-14 (bản sao nhật ký, route thật) | SIMULATED-0001 seq 2 + giá trị neo tx `c1955984…` ⇒ **đạt**; giá trị neo seq 1 ⇒ hỏng ở `version_hash` |
+| đảo mã script | bỏ `0x00` ⇒ 5/5 vector đỏ · bỏ qua salt ⇒ đỏ đúng P4 · bỏ cờ chiều ⇒ đỏ 3 vector có sibling trái · bỏ `ts` ⇒ 5/5 đỏ ở `version_hash` |
+| đảo mã bài khoá Rust | DTO `key` → hex ⇒ đỏ "hình dạng dây" · sửa tay `must_fail_at` của R4 ⇒ đỏ "hỏng sai tầng" |
+
+Chưa phủ: proof có `salt` trên **dữ liệu thật** (đường ghi hôm nay chưa sinh trường có salt —
+ca đó mới có ở fixture P4).

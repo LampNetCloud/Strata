@@ -1,0 +1,580 @@
+{
+  "_note": "Test-vector CHUNG cho field-proof. SINH TỰ ĐỘNG bởi `cargo run -p lampnet-strata-node --example dump_field_proof_fixture` — đừng sửa tay. Bên Rust khoá bằng node/tests/field_proof_fixture.rs; bên kiểm độc lập là scripts/verify_field_proof.py.",
+  "must_reject": [
+    {
+      "must_fail_at": "fvh",
+      "name": "R1-sua-value-giu-fvh",
+      "proof": {
+        "fvh": "3db8d593198b05a76e1a9c792e5e4fe4ceb46532808ad98d2428a5650e87eaa2",
+        "key": "giai_doan",
+        "salt": "",
+        "siblings": [
+          [
+            "36433db3923a711f085247ed79cda820825681f4554e66a5d76ad41f4e7932b4",
+            false
+          ],
+          [
+            "ed79be72dc21b353109e49dd85a3e04062a45932d8270e3aa9c7e976d1b22c27",
+            true
+          ]
+        ],
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "value": "30c5a7f4bb173b07e6512261368aed976079b26967d9d221d08cc4c7920cd3df",
+        "version_seq": 2
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "e4c0d7654f37431b549202b5cdb4cd9fddbdf5b24f48e9b0094da2d1e29d0dc9",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 2,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "ts": 1789000002,
+        "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e"
+      },
+      "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e",
+      "why": "đổi giá trị khai, giữ fvh cũ — bên kiểm không băm lại value sẽ nhận"
+    },
+    {
+      "must_fail_at": "state_root",
+      "name": "R2-sua-value-tinh-lai-fvh",
+      "proof": {
+        "fvh": "7136ae080c8110bd55cdc00d1e612f1fb6d010b042e9345aa687e868a55d2112",
+        "key": "giai_doan",
+        "salt": "",
+        "siblings": [
+          [
+            "36433db3923a711f085247ed79cda820825681f4554e66a5d76ad41f4e7932b4",
+            false
+          ],
+          [
+            "ed79be72dc21b353109e49dd85a3e04062a45932d8270e3aa9c7e976d1b22c27",
+            true
+          ]
+        ],
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "value": "30c5a7f4bb173b07e6512261368aed976079b26967d9d221d08cc4c7920cd3df",
+        "version_seq": 2
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "e4c0d7654f37431b549202b5cdb4cd9fddbdf5b24f48e9b0094da2d1e29d0dc9",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 2,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "ts": 1789000002,
+        "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e"
+      },
+      "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e",
+      "why": "đổi giá trị VÀ tính lại fvh cho khớp — chỉ cây mới bắt được"
+    },
+    {
+      "must_fail_at": "state_root",
+      "name": "R3-sua-key",
+      "proof": {
+        "fvh": "3db8d593198b05a76e1a9c792e5e4fe4ceb46532808ad98d2428a5650e87eaa2",
+        "key": "giong",
+        "salt": "",
+        "siblings": [
+          [
+            "36433db3923a711f085247ed79cda820825681f4554e66a5d76ad41f4e7932b4",
+            false
+          ],
+          [
+            "ed79be72dc21b353109e49dd85a3e04062a45932d8270e3aa9c7e976d1b22c27",
+            true
+          ]
+        ],
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "value": "b856e46605ac4b86b94f87dcbb7ea74872fd0e6b17c4a2575bb3ff8ff64cc68f",
+        "version_seq": 2
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "e4c0d7654f37431b549202b5cdb4cd9fddbdf5b24f48e9b0094da2d1e29d0dc9",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 2,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "ts": 1789000002,
+        "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e"
+      },
+      "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e",
+      "why": "giữ value/fvh, khai sang tên trường khác — key nằm trong lá"
+    },
+    {
+      "must_fail_at": "state_root",
+      "name": "R4-dao-chieu-sibling",
+      "proof": {
+        "fvh": "3db8d593198b05a76e1a9c792e5e4fe4ceb46532808ad98d2428a5650e87eaa2",
+        "key": "giai_doan",
+        "salt": "",
+        "siblings": [
+          [
+            "36433db3923a711f085247ed79cda820825681f4554e66a5d76ad41f4e7932b4",
+            true
+          ],
+          [
+            "ed79be72dc21b353109e49dd85a3e04062a45932d8270e3aa9c7e976d1b22c27",
+            true
+          ]
+        ],
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "value": "b856e46605ac4b86b94f87dcbb7ea74872fd0e6b17c4a2575bb3ff8ff64cc68f",
+        "version_seq": 2
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "e4c0d7654f37431b549202b5cdb4cd9fddbdf5b24f48e9b0094da2d1e29d0dc9",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 2,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "ts": 1789000002,
+        "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e"
+      },
+      "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e",
+      "why": "đảo cờ trái/phải của sibling đầu — bên kiểm bỏ qua cờ chiều sẽ nhận"
+    },
+    {
+      "must_fail_at": "state_root",
+      "name": "R5-bot-sibling",
+      "proof": {
+        "fvh": "3db8d593198b05a76e1a9c792e5e4fe4ceb46532808ad98d2428a5650e87eaa2",
+        "key": "giai_doan",
+        "salt": "",
+        "siblings": [
+          [
+            "36433db3923a711f085247ed79cda820825681f4554e66a5d76ad41f4e7932b4",
+            false
+          ]
+        ],
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "value": "b856e46605ac4b86b94f87dcbb7ea74872fd0e6b17c4a2575bb3ff8ff64cc68f",
+        "version_seq": 2
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "e4c0d7654f37431b549202b5cdb4cd9fddbdf5b24f48e9b0094da2d1e29d0dc9",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 2,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "ts": 1789000002,
+        "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e"
+      },
+      "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e",
+      "why": "bỏ sibling cuối — đường ngắn hơn cây"
+    },
+    {
+      "must_fail_at": "fvh",
+      "name": "R6-bo-salt-bam-nham-mien",
+      "proof": {
+        "fvh": "105176fe76f9047f4abb8dd390e072ced6cae1522f1f113cf225d76e602beb80",
+        "key": "giai_doan",
+        "salt": "",
+        "siblings": [
+          [
+            "475bfacd1b34870e45b21f177a2b8ddcc1a0e46a49d1dba0ea01e29e9270047c",
+            true
+          ],
+          [
+            "e9ebe9d1b2de575004b59af165d9c3c5cf45f489b6e08544d2a3e52cd2814b7e",
+            true
+          ]
+        ],
+        "state_root": "75115fada1b3d74349a30ffceb32678e4ff395e86408d4f06e7d64b445d17493",
+        "value": "74b26a845ce19569dfb11ef58b96f682705295af5fa8060690f207ecd6f6874f",
+        "version_seq": 3
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "f3010b6805a652405e44c7a2419e21901c8a79495d9bd3e62b6843da7e336ff6",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 3,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "75115fada1b3d74349a30ffceb32678e4ff395e86408d4f06e7d64b445d17493",
+        "ts": 1789000003,
+        "version_hash": "a1dfb6929d01824c2712ae953aa4bf8b2845b841a245cdf255d141cfdc2eb913"
+      },
+      "version_hash": "a1dfb6929d01824c2712ae953aa4bf8b2845b841a245cdf255d141cfdc2eb913",
+      "why": "proof có salt mà khai salt rỗng ⇒ fvh phải tính ở miền không salt và lệch (Strata#71)"
+    },
+    {
+      "must_fail_at": "state_root",
+      "name": "R7-bo-salt-tinh-lai-fvh",
+      "proof": {
+        "fvh": "60d0ae9569492bc027afd5286b170fb165a6230d627c463d73900a4423ac8f13",
+        "key": "giai_doan",
+        "salt": "",
+        "siblings": [
+          [
+            "475bfacd1b34870e45b21f177a2b8ddcc1a0e46a49d1dba0ea01e29e9270047c",
+            true
+          ],
+          [
+            "e9ebe9d1b2de575004b59af165d9c3c5cf45f489b6e08544d2a3e52cd2814b7e",
+            true
+          ]
+        ],
+        "state_root": "75115fada1b3d74349a30ffceb32678e4ff395e86408d4f06e7d64b445d17493",
+        "value": "74b26a845ce19569dfb11ef58b96f682705295af5fa8060690f207ecd6f6874f",
+        "version_seq": 3
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "f3010b6805a652405e44c7a2419e21901c8a79495d9bd3e62b6843da7e336ff6",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 3,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "75115fada1b3d74349a30ffceb32678e4ff395e86408d4f06e7d64b445d17493",
+        "ts": 1789000003,
+        "version_hash": "a1dfb6929d01824c2712ae953aa4bf8b2845b841a245cdf255d141cfdc2eb913"
+      },
+      "version_hash": "a1dfb6929d01824c2712ae953aa4bf8b2845b841a245cdf255d141cfdc2eb913",
+      "why": "bỏ salt VÀ tính lại fvh không salt — lá đổi nên cây phải lệch"
+    },
+    {
+      "must_fail_at": "version_hash",
+      "name": "R8-proof-dung-version-khac",
+      "proof": {
+        "fvh": "a4db04b5e54a1774525070c14f20ad1c2808a3c4da3da178cade74e39735951d",
+        "key": "c",
+        "salt": "",
+        "siblings": [
+          [
+            "7e22378fd4e443d7a5de5d5ea2cfa14b8f845966b6ab3a19b667d2c308063941",
+            false
+          ]
+        ],
+        "state_root": "c6dd519a237b86e0be5b2d7b372dc3fb8b93f46e3e19f865eb5930320e885979",
+        "value": "33",
+        "version_seq": 4
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "3cbae5ee0fe61e3c4b873c517f7901767a836dd5c19a40db0d59e9384836420a",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 4,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "6c2f9938237bd798d43422f692e173cd490d1e0fe2fd0864c33a9cce485266f3",
+        "ts": 1789000004,
+        "version_hash": "4b2ac28d440393db06600889c14106342b5e79367579ef0f0d2dac06f50829c2"
+      },
+      "version_hash": "4b2ac28d440393db06600889c14106342b5e79367579ef0f0d2dac06f50829c2",
+      "why": "proof hợp lệ nhưng ghép với version của một hồ sơ khác: state_root proof đưa vào canonical_core không ra version_hash đã neo"
+    },
+    {
+      "must_fail_at": "version_hash",
+      "name": "R9-version-sua-ts",
+      "proof": {
+        "fvh": "3db8d593198b05a76e1a9c792e5e4fe4ceb46532808ad98d2428a5650e87eaa2",
+        "key": "giai_doan",
+        "salt": "",
+        "siblings": [
+          [
+            "36433db3923a711f085247ed79cda820825681f4554e66a5d76ad41f4e7932b4",
+            false
+          ],
+          [
+            "ed79be72dc21b353109e49dd85a3e04062a45932d8270e3aa9c7e976d1b22c27",
+            true
+          ]
+        ],
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "value": "b856e46605ac4b86b94f87dcbb7ea74872fd0e6b17c4a2575bb3ff8ff64cc68f",
+        "version_seq": 2
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "e4c0d7654f37431b549202b5cdb4cd9fddbdf5b24f48e9b0094da2d1e29d0dc9",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 2,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "ts": 1789000003,
+        "version_hash": "ff7838858d105a4fe2e50c0cdabc6d417b3b5ee6365ff2ac8e2f9513671d9b44"
+      },
+      "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e",
+      "why": "proof đúng, version khai lệch ts 1 giây so với bản đã neo — version_hash kỳ vọng vẫn là bản neo"
+    }
+  ],
+  "rules": {
+    "canonical_core": "seq u64_be || prev_hash 32 || u32_be(len(content_cid)) || content_cid || state_root 32 || author_did 32 || policy_hash 32 || ts u64_be",
+    "fvh_salt_khac_rong": "H_dom(LN/STRATA/state/fval/salted/v1, u32_be(len(salt)) || salt || value)",
+    "fvh_salt_rong": "H_dom(LN/STRATA/state/fval/v1, value)",
+    "h_dom": "BLAKE3(UTF-8(tag) || 0x00 || x)",
+    "leaf": "H_dom(LN/STRATA/state/leaf/v1, u32_be(len(key)) || key || fvh)",
+    "node": "H_dom(LN/STRATA/state/node/v1, left || right)",
+    "sibling": "[hash, sibling_is_right]: true ⇒ nút hiện tại là con TRÁI ⇒ node(acc, hash); false ⇒ node(hash, acc)",
+    "version_hash": "H_dom(LN/STRATA/ver/v1, canonical_core) — state_root đưa vào đây là state_root DỰNG LẠI TỪ PROOF"
+  },
+  "vectors": [
+    {
+      "fields": [
+        {
+          "key": "676961695f646f616e",
+          "salt": "",
+          "value": "b856e46605ac4b86b94f87dcbb7ea74872fd0e6b17c4a2575bb3ff8ff64cc68f"
+        },
+        {
+          "key": "67696f6e67",
+          "salt": "",
+          "value": "cced8af42cdefc731ec17a4200be716c7d5808c8767d1786ef6adb6d96c4cbf9"
+        },
+        {
+          "key": "686f5f736f5f636875",
+          "salt": "",
+          "value": "7ca8f6eea0ea7c2674a2e8e0b45f53a92fe71887021f6b0c7eb3b36da87c45fd"
+        },
+        {
+          "key": "64615f7068756e5f7468756f63",
+          "salt": "",
+          "value": "636f"
+        }
+      ],
+      "name": "P1-4-truong",
+      "proof": {
+        "fvh": "3db8d593198b05a76e1a9c792e5e4fe4ceb46532808ad98d2428a5650e87eaa2",
+        "key": "giai_doan",
+        "salt": "",
+        "siblings": [
+          [
+            "36433db3923a711f085247ed79cda820825681f4554e66a5d76ad41f4e7932b4",
+            false
+          ],
+          [
+            "ed79be72dc21b353109e49dd85a3e04062a45932d8270e3aa9c7e976d1b22c27",
+            true
+          ]
+        ],
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "value": "b856e46605ac4b86b94f87dcbb7ea74872fd0e6b17c4a2575bb3ff8ff64cc68f",
+        "version_seq": 2
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "e4c0d7654f37431b549202b5cdb4cd9fddbdf5b24f48e9b0094da2d1e29d0dc9",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 2,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "e4b90a993c8f67d7ff06fea04645f534f10422c8b8c41d558f4cd63ea5b7669e",
+        "ts": 1789000002,
+        "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e"
+      },
+      "version_hash": "620d57022ebc0a52adbf9eb54dbe4ff95516c7089138ff753366166aca72be7e",
+      "why": "4 lá chẵn — đường hay gặp nhất: 2 sibling, không carry"
+    },
+    {
+      "fields": [
+        {
+          "key": "61",
+          "salt": "",
+          "value": "31"
+        },
+        {
+          "key": "62",
+          "salt": "",
+          "value": "32"
+        },
+        {
+          "key": "63",
+          "salt": "",
+          "value": "33"
+        }
+      ],
+      "name": "P2-3-truong-la-le-carry",
+      "proof": {
+        "fvh": "a4db04b5e54a1774525070c14f20ad1c2808a3c4da3da178cade74e39735951d",
+        "key": "c",
+        "salt": "",
+        "siblings": [
+          [
+            "7e22378fd4e443d7a5de5d5ea2cfa14b8f845966b6ab3a19b667d2c308063941",
+            false
+          ]
+        ],
+        "state_root": "c6dd519a237b86e0be5b2d7b372dc3fb8b93f46e3e19f865eb5930320e885979",
+        "value": "33",
+        "version_seq": 1
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "989b6ee559bf227cd841b806be28791a2ff922004909195e47a750b94a302439",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 1,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "c6dd519a237b86e0be5b2d7b372dc3fb8b93f46e3e19f865eb5930320e885979",
+        "ts": 1789000001,
+        "version_hash": "8215bb128ae4a2f0d026fe25115cd9ad80053b21ffaacc95b215e68ec2b23a02"
+      },
+      "version_hash": "8215bb128ae4a2f0d026fe25115cd9ad80053b21ffaacc95b215e68ec2b23a02",
+      "why": "3 lá, chứng minh lá CUỐI: nó được carry nguyên lên tầng trên nên chỉ có 1 sibling — bên kiểm tự thêm sibling 'nhân đôi' sẽ đỏ ở đây"
+    },
+    {
+      "fields": [
+        {
+          "key": "676961695f646f616e",
+          "salt": "",
+          "value": "30c5a7f4bb173b07e6512261368aed976079b26967d9d221d08cc4c7920cd3df"
+        }
+      ],
+      "name": "P3-1-truong",
+      "proof": {
+        "fvh": "7136ae080c8110bd55cdc00d1e612f1fb6d010b042e9345aa687e868a55d2112",
+        "key": "giai_doan",
+        "salt": "",
+        "siblings": [],
+        "state_root": "c54a8cfb81f94a1b5bc0e624c57d42798eb30908beb13823d16dc6884336e15c",
+        "value": "30c5a7f4bb173b07e6512261368aed976079b26967d9d221d08cc4c7920cd3df",
+        "version_seq": 0
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "4dd2ec754ea3a8417511b17f5fc9a5c65fd7c6df97a1ff430e1ee8b725ae6f32",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 0,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "c54a8cfb81f94a1b5bc0e624c57d42798eb30908beb13823d16dc6884336e15c",
+        "ts": 1789000000,
+        "version_hash": "0766713cf0f00969478aeb63e05ce96157c1132a8dc7a77fe4e61be60bca79e8"
+      },
+      "version_hash": "0766713cf0f00969478aeb63e05ce96157c1132a8dc7a77fe4e61be60bca79e8",
+      "why": "1 lá: 0 sibling, state_root BẰNG lá — vòng lặp sibling không chạy lần nào"
+    },
+    {
+      "fields": [
+        {
+          "key": "676961695f646f616e",
+          "salt": "73616c742d6e6761752d6e6869656e2d63686f2d766563746f722d5034",
+          "value": "74b26a845ce19569dfb11ef58b96f682705295af5fa8060690f207ecd6f6874f"
+        },
+        {
+          "key": "67696f6e67",
+          "salt": "",
+          "value": "142a9ab9d33c69a94beaac8ff8a448e75b5c987430e5214a845509b79381a1d4"
+        },
+        {
+          "key": "686f5f736f5f636875",
+          "salt": "73616c742d6b686163",
+          "value": "7ca8f6eea0ea7c2674a2e8e0b45f53a92fe71887021f6b0c7eb3b36da87c45fd"
+        },
+        {
+          "key": "76756e67",
+          "salt": "",
+          "value": "7469656e2d6769616e67"
+        }
+      ],
+      "name": "P4-salt-khac-rong",
+      "proof": {
+        "fvh": "105176fe76f9047f4abb8dd390e072ced6cae1522f1f113cf225d76e602beb80",
+        "key": "giai_doan",
+        "salt": "73616c742d6e6761752d6e6869656e2d63686f2d766563746f722d5034",
+        "siblings": [
+          [
+            "475bfacd1b34870e45b21f177a2b8ddcc1a0e46a49d1dba0ea01e29e9270047c",
+            true
+          ],
+          [
+            "e9ebe9d1b2de575004b59af165d9c3c5cf45f489b6e08544d2a3e52cd2814b7e",
+            true
+          ]
+        ],
+        "state_root": "75115fada1b3d74349a30ffceb32678e4ff395e86408d4f06e7d64b445d17493",
+        "value": "74b26a845ce19569dfb11ef58b96f682705295af5fa8060690f207ecd6f6874f",
+        "version_seq": 3
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "f3010b6805a652405e44c7a2419e21901c8a79495d9bd3e62b6843da7e336ff6",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 3,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "75115fada1b3d74349a30ffceb32678e4ff395e86408d4f06e7d64b445d17493",
+        "ts": 1789000003,
+        "version_hash": "a1dfb6929d01824c2712ae953aa4bf8b2845b841a245cdf255d141cfdc2eb913"
+      },
+      "version_hash": "a1dfb6929d01824c2712ae953aa4bf8b2845b841a245cdf255d141cfdc2eb913",
+      "why": "trường được chứng minh có salt ⇒ fvh ở miền `fval/salted` (Strata#71); các trường khác trộn có salt và không salt"
+    },
+    {
+      "fields": [
+        {
+          "key": "65",
+          "salt": "",
+          "value": "35"
+        },
+        {
+          "key": "64",
+          "salt": "",
+          "value": "34"
+        },
+        {
+          "key": "63",
+          "salt": "",
+          "value": "33"
+        },
+        {
+          "key": "62",
+          "salt": "",
+          "value": "32"
+        },
+        {
+          "key": "61",
+          "salt": "",
+          "value": "31"
+        }
+      ],
+      "name": "P5-5-truong-giua",
+      "proof": {
+        "fvh": "a4db04b5e54a1774525070c14f20ad1c2808a3c4da3da178cade74e39735951d",
+        "key": "c",
+        "salt": "",
+        "siblings": [
+          [
+            "b9185ec7846284164be45b8a5e45a848f41557902ec91b66932e73baed815f80",
+            true
+          ],
+          [
+            "7e22378fd4e443d7a5de5d5ea2cfa14b8f845966b6ab3a19b667d2c308063941",
+            false
+          ],
+          [
+            "79494f2c1e39efd45441456ac190539f27c072ce99bfca46ee163c3228154435",
+            true
+          ]
+        ],
+        "state_root": "6c2f9938237bd798d43422f692e173cd490d1e0fe2fd0864c33a9cce485266f3",
+        "value": "33",
+        "version_seq": 4
+      },
+      "version": {
+        "author_did": "2222222222222222222222222222222222222222222222222222222222222222",
+        "content_cid": "3cbae5ee0fe61e3c4b873c517f7901767a836dd5c19a40db0d59e9384836420a",
+        "policy_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "prev_hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "seq": 4,
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "state_root": "6c2f9938237bd798d43422f692e173cd490d1e0fe2fd0864c33a9cce485266f3",
+        "ts": 1789000004,
+        "version_hash": "4b2ac28d440393db06600889c14106342b5e79367579ef0f0d2dac06f50829c2"
+      },
+      "version_hash": "4b2ac28d440393db06600889c14106342b5e79367579ef0f0d2dac06f50829c2",
+      "why": "5 lá, chứng minh lá thứ 3 sau sort: sibling đổi chiều giữa các tầng và đi qua một tầng có carry"
+    }
+  ]
+}

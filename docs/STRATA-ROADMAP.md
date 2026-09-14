@@ -112,7 +112,7 @@ Mô tả trong comment issue lệch với `spec/_CONTRACT.md` hiện tại — c
 | **`#84`** `policy_hash` không lấy được | 🟡 mục 5 xong (`#95`) | **spec**: đường khô *tập author → `policy_hash`* |
 | **`#81`** record không có trường phiên bản | ⬜ mở — nửa còn lại | chờ chủ spec chốt hành vi `scan_window` (xem dưới) |
 
-> **Cập nhật `14/09`** (`STRATA-ANCHOR-INTEGRATION-REPORT.md` **§25**) — không đổi trạng thái sáu issue trên. Lượt nối chạy bằng lớp thư viện của OriLife (`strata_client.py`): bản cài của họ **trùng byte** `_canonical` ở cả genesis lẫn append, lô 2 ref lên Preprod, checkpoint epoch 9 gom 3 lá. Hai dữ kiện đi vào hàng chờ: (1) **`#84`** — ca một cặp khoá nền tảng dẫn được `policy_hash` phía client (đã đo trùng giá trị daemon), ca nhiều tác giả vẫn chờ; (2) route không tồn tại trả `404` **thân rỗng**, và client OriLife đọc nó thành *"chưa có"* — ứng viên fallback JSON, **chưa mở issue**.
+> **Cập nhật `14/09`** (`STRATA-ANCHOR-INTEGRATION-REPORT.md` **§25**) — không đổi trạng thái sáu issue trên. Lượt nối chạy bằng lớp thư viện của OriLife (`strata_client.py`): bản cài của họ **trùng byte** `_canonical` ở cả genesis lẫn append, lô 2 ref lên Preprod, checkpoint epoch 9 gom 3 lá. Hai dữ kiện đi vào hàng chờ: (1) **`#84`** — ca một cặp khoá nền tảng dẫn được `policy_hash` phía client (đã đo trùng giá trị daemon), ca nhiều tác giả vẫn chờ; (2) route không tồn tại trả `404` **thân rỗng**, và client OriLife đọc nó thành *"chưa có"* — ứng viên fallback JSON, **chưa mở issue**. Cùng ngày: bộ kiểm field-proof độc lập vào kho (`scripts/verify_field_proof.py` + fixture `apis/field-proof-vectors.json` do Rust sinh bằng DTO của daemon + hai bước CI) — §25.7.
 
 ### Ba luật rút ra, áp cho mọi milestone sau
 
