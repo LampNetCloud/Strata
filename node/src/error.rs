@@ -24,6 +24,13 @@ pub enum ApiError {
     Malformed(String),
     /// `ref` / `seq` / `key` không tồn tại. 404.
     NotFound(&'static str),
+    /// Không route nào khớp `path` (router fallback) — 404 cùng tên `NotFound`,
+    /// `detail.what = "route"`. Tách khỏi [`ApiError::NotFound`] để bên gọi phân biệt
+    /// được *"không có đường"* với *"không có vật"* (issue #100).
+    RouteNotFound { method: String, path: String },
+    /// Route có, method không — **405**, tên `MalformedRequest` (không thêm tên lỗi mới:
+    /// bộ tên trên dây là việc của bảng §3.1).
+    MethodNotAllowed { method: String, path: String },
     /// `create` trên ref_id đã tồn tại (cùng `author_did`+`genesis_nonce`). 409.
     RefExists(Hash32),
     /// Backend neo chưa cấu hình (`AnchorError::NotConfigured`). 501.
@@ -215,6 +222,20 @@ fn split(e: &ApiError) -> (StatusCode, &'static str, Value) {
             json!({ "reason": m }),
         ),
         ApiError::NotFound(what) => (StatusCode::NOT_FOUND, "NotFound", json!({ "what": what })),
+        ApiError::RouteNotFound { method, path } => (
+            StatusCode::NOT_FOUND,
+            "NotFound",
+            json!({ "what": "route", "method": method, "path": path }),
+        ),
+        ApiError::MethodNotAllowed { method, path } => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            "MalformedRequest",
+            json!({
+                "reason": format!("route có nhưng không nhận method {method}"),
+                "method": method,
+                "path": path,
+            }),
+        ),
         ApiError::RefExists(r) => (StatusCode::CONFLICT, "RefExists", json!({ "ref_id": h(r) })),
         ApiError::AnchorNotConfigured => (
             StatusCode::NOT_IMPLEMENTED,

@@ -2943,7 +2943,7 @@ nhật ký: …/strata-live-0907.jsonl — replay 9 bản ghi trong 1.401214ms:
 
 | Mục | Ghi chú |
 |---|---|
-| fallback `404` không có thân JSON (§25.3) | ứng viên, chưa mở issue |
+| fallback `404` không có thân JSON (§25.3) | mở `#100` cùng ngày; vá ở §26 |
 | `#84` ca nhiều tác giả | chờ hình dạng API |
 | `#41` mục 1 (one-shot policy thread-token) | đạt điều kiện đóng — policy one-shot có thật ở `VeDataIO/Core: validators/strata_thread.ak` (`Core#104`), đo local 281 pass, bỏ gác M2 ⇒ đỏ đúng một bài; đã đề nghị đóng `#41` (09-14) |
 | `#81` | chờ `scan_window` |
@@ -2990,3 +2990,67 @@ Blockfrost). Đưa vào kho dưới dạng có cổng giữ, không chép nguyê
 
 Chưa phủ: proof có `salt` trên **dữ liệu thật** (đường ghi hôm nay chưa sinh trường có salt —
 ca đó mới có ở fixture P4).
+
+## §26. Vòng `17/09` — `#100` thân lỗi trước handler, và dọn hàng issue
+
+Đo đầu vòng trên `main` `0117b75`: **8 issue mở, 0 PR mở**. Mỗi issue được đo lại điều kiện đóng
+thay vì tin comment cuối.
+
+### 26.1 Hai issue đã đủ điều kiện từ lâu, đóng
+
+| issue | vì sao đóng được | chỗ đo |
+|---|---|---|
+| `#18` trần `< 2³²` | mã land `#21` `4e9b200`; câu spec land `#27` (merged `14/08`) — issue chỉ còn chờ đúng PR đó | `spec/Strata-Tech.md:279` |
+| `#14` flood làm mù `resolve()` | bản vá `beacon_mode` land `#19`; mặc định quét-địa-chỉ bị flood làm mù đã thành **hợp đồng** *best-effort* trong spec; nhánh fail-open của chính bản vá beacon đóng ở `#78` | `tests/regression_resolve_flood.rs` · `spec/Strata-API.md:835,880` |
+
+Phần dư **không** thuộc `#14` và có chỗ theo dõi riêng: record `t` lạ trên đường quét (`#81`), beacon
+nằm trong UTxO ví publisher tự chi được (roadmap dòng S1).
+
+### 26.2 `#100` — lỗi sinh trước handler trả thân rỗng / `text/plain`
+
+Ba chỗ, ba cách vá:
+
+| lỗi | trước | sau |
+|---|---|---|
+| path không khớp route (gồm dư `/` cuối) | 404 · 0 B | 404 `NotFound`, `detail = {what:"route", method, path}` |
+| route có, method không | 405 · 0 B | 405 `MalformedRequest`, `detail = {reason, method, path}` |
+| `Path` rejection (`seq` không phải số) | 400 · `text/plain` | 400 `MalformedRequest` |
+
+**Không thêm tên lỗi mới.** Bộ tên trên dây là bề mặt client học thuộc và thuộc bảng §3.1 — cùng
+tiền lệ đã ghi trong `node/src/error.rs`. `"route"` là thêm một **giá trị** của `detail.what`; 405
+dùng lại `MalformedRequest`. Câu spec đi PR riêng.
+
+🪤 **Fallback cấp router không mount được.** `router()` được khai là *mountable*. Đo trong mã axum
+`0.7.9`: `merge` hai router cùng có fallback ⇒ `panic!("Cannot merge two Routers that both have a
+fallback")`; chủ không có fallback thì fallback của Strata **nuốt luôn 404 của các route bên chủ**.
+⇒ tách hai tầng:
+
+- `router()` — giữ mountable: chỉ thêm `method_not_allowed_fallback` (gắn vào từng route, không đụng
+  fallback cấp router) và bọc `Path`;
+- `daemon_router()` = `router()` + fallback 404 — binary `strata-node` dùng cái này.
+
+Bài `router_mountable_merge_vao_cay_chu_co_fallback` ghim cả hai vế: merge vào cây có fallback riêng
+không panic, 404 của cây chủ vẫn là của chủ, 405 của route Strata vẫn JSON.
+
+### 26.3 Đo
+
+| | |
+|---|---|
+| `cargo test --workspace` | **309 → 314 pass / 0 fail** |
+| `clippy --all-targets -D warnings` · `fmt --check` | 0 · sạch |
+| đột biến M1: bỏ fallback của `daemon_router` | 1 đỏ (40 ca, tổng không tụt) |
+| đột biến M2: bỏ `method_not_allowed_fallback` | 2 đỏ (405 + bài mount) |
+| đột biến M3: `proof_version` về `Path` mặc định | 1 đỏ |
+| binary thật, đúng bảng của `#100` (`STRATA_NODE_JOURNAL=none`, backend `disabled`) | 8/8 dòng `application/json`; hai đối chứng (`what:"ref"`, ref sai khuôn 400) giữ thân cũ |
+
+Mọi ca của bảng kiểm `content-type` + thân parse được JSON — helper `call` cũ đổi thân không phải JSON
+thành `Null` im lặng, nên bài mới dùng helper riêng đỏ ngay tại chỗ.
+
+### 26.4 Hàng chờ sau vòng này
+
+| issue | chờ gì |
+|---|---|
+| `#39` điểm 2 (`build_state_root` → `Result`) | chủ spec chọn (a)/(b)/(c) — comment `11/09` |
+| `#77` · `#80` · `#84` | nửa mã đã land `#95`; nửa còn lại là quyết định spec |
+| `#81` | chốt hành vi `scan_window` gặp record không hiểu |
+

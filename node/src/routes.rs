@@ -16,8 +16,9 @@ use crate::registry::KeyRegistry;
 use crate::store::{AnchorState, ChainEntry, ChainStore, lock};
 use axum::Json;
 use axum::Router;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, Query, State};
+use axum::http::{Method, Uri};
 use axum::routing::{get, post};
 use ed25519_dalek::Signature;
 use lampnet_strata::chain::{Policy, StrataChain, StrataError};
@@ -73,7 +74,35 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/strata/_dirty", get(dirty))
         // Nguồn LÁ của luồng checkpoint toàn cục (`Specs#32` mục 10).
         .route("/v1/strata/_settlement_window", get(settlement_window))
+        // Đặt SAU mọi `.route`: axum gắn fallback này vào các route đã có. Không đụng
+        // fallback cấp router nên vẫn `merge` được vào cây của tiến trình chủ.
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
+}
+
+/// Router của **daemon đứng riêng**: [`router`] + fallback 404 JSON cho path không khớp.
+///
+/// Không gộp vào [`router`] vì fallback cấp router **không mount được**: axum 0.7
+/// `merge` hai router cùng có fallback thì panic, và nếu chủ không có fallback thì fallback
+/// này nuốt luôn 404 của các route bên chủ. Tiến trình chủ tự quyết 404 của cây nó.
+pub fn daemon_router(state: AppState) -> Router {
+    router(state).fallback(route_not_found)
+}
+
+/// Path không khớp route nào (kể cả dư `/` cuối) ⇒ 404 `NotFound`, `what = "route"` —
+/// thân rỗng làm bên gọi đọc *"không có đường"* thành *"không có vật"* (issue #100).
+async fn route_not_found(method: Method, uri: Uri) -> ApiError {
+    ApiError::RouteNotFound {
+        method: method.to_string(),
+        path: uri.path().to_string(),
+    }
+}
+
+async fn method_not_allowed(method: Method, uri: Uri) -> ApiError {
+    ApiError::MethodNotAllowed {
+        method: method.to_string(),
+        path: uri.path().to_string(),
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -113,6 +142,13 @@ fn parse_ref(s: &str) -> ApiResult<Hash32> {
 /// mặc định của axum (client chỉ phải hiểu MỘT format).
 fn body<T>(r: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
     r.map(|Json(v)| v)
+        .map_err(|e| ApiError::Malformed(e.body_text()))
+}
+
+/// Tham số path không giải mã được (`seq` không phải số…) → **400 `MalformedRequest`**,
+/// cùng lý do với [`body`]: mặc định của axum là `text/plain`.
+fn path<T>(r: Result<Path<T>, PathRejection>) -> ApiResult<T> {
+    r.map(|Path(v)| v)
         .map_err(|e| ApiError::Malformed(e.body_text()))
 }
 
@@ -423,9 +459,10 @@ pub(crate) fn append_inner(e: &mut ChainEntry, req: &AppendReq) -> ApiResult<App
 
 async fn append(
     State(st): State<AppState>,
-    Path(r): Path<String>,
+    r: Result<Path<String>, PathRejection>,
     req: Result<Json<AppendReq>, JsonRejection>,
 ) -> ApiResult<Json<AppendResp>> {
+    let r = path(r)?;
     let req = body(req)?;
     let ref_id = parse_ref(&r)?;
     let entry = st.store.get(&ref_id).ok_or(ApiError::NotFound("ref"))?;
@@ -509,9 +546,10 @@ pub(crate) fn audit_inner(
 
 async fn event(
     State(st): State<AppState>,
-    Path(r): Path<String>,
+    r: Result<Path<String>, PathRejection>,
     req: Result<Json<EventReq>, JsonRejection>,
 ) -> ApiResult<axum::response::Response> {
+    let r = path(r)?;
     use axum::response::IntoResponse;
     let req = body(req)?;
     let ref_id = parse_ref(&r)?;
@@ -550,7 +588,11 @@ async fn event(
 // GET /v1/strata/:ref/head — §2.3
 // ────────────────────────────────────────────────────────────────────────────
 
-async fn head(State(st): State<AppState>, Path(r): Path<String>) -> ApiResult<Json<HeadResp>> {
+async fn head(
+    State(st): State<AppState>,
+    r: Result<Path<String>, PathRejection>,
+) -> ApiResult<Json<HeadResp>> {
+    let r = path(r)?;
     let ref_id = parse_ref(&r)?;
     let entry = st.store.get(&ref_id).ok_or(ApiError::NotFound("ref"))?;
     let g = lock(&entry);
@@ -581,9 +623,10 @@ struct AtQuery {
 
 async fn version_at(
     State(st): State<AppState>,
-    Path(r): Path<String>,
+    r: Result<Path<String>, PathRejection>,
     q: Result<Query<AtQuery>, axum::extract::rejection::QueryRejection>,
 ) -> ApiResult<Json<VersionAtResp>> {
+    let r = path(r)?;
     let Query(q) =
         q.map_err(|e| ApiError::Malformed(format!("thiếu/sai `at`: {}", e.body_text())))?;
     let ref_id = parse_ref(&r)?;
@@ -607,8 +650,9 @@ async fn version_at(
 
 async fn proof_version(
     State(st): State<AppState>,
-    Path((r, seq)): Path<(String, u64)>,
+    p: Result<Path<(String, u64)>, PathRejection>,
 ) -> ApiResult<Json<ProofDto>> {
+    let (r, seq) = path(p)?;
     let ref_id = parse_ref(&r)?;
     let entry = st.store.get(&ref_id).ok_or(ApiError::NotFound("ref"))?;
     let g = lock(&entry);
@@ -631,9 +675,10 @@ struct SeqQuery {
 
 async fn proof_field(
     State(st): State<AppState>,
-    Path((r, key)): Path<(String, String)>,
+    p: Result<Path<(String, String)>, PathRejection>,
     q: Result<Query<SeqQuery>, axum::extract::rejection::QueryRejection>,
 ) -> ApiResult<Json<FieldProofResp>> {
+    let (r, key) = path(p)?;
     // Bọc `Result` như `version_at`: `?seq=abc` phải ra ĐÚNG format lỗi của ta, không rơi
     // về format mặc định của axum (client chỉ phải hiểu MỘT format).
     let Query(q) =
@@ -653,9 +698,10 @@ async fn proof_field(
 
 async fn anchor(
     State(st): State<AppState>,
-    Path(r): Path<String>,
+    r: Result<Path<String>, PathRejection>,
     req: Result<Json<AnchorReq>, JsonRejection>,
 ) -> ApiResult<Json<AnchorResp>> {
+    let r = path(r)?;
     let req = body(req)?;
     let ref_id = parse_ref(&r)?;
     // `sink.publish` là I/O đồng bộ (có thể chờ mạng/chuỗi) và ta phải giữ khoá của ref

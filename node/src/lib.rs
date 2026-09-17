@@ -35,6 +35,6 @@ pub use error::{ApiError, ApiResult};
 pub use journal::{Journal, JournalError, JournalRecord, ReplayError, read_records};
 pub use registry::{InMemoryRegistry, KeyRegistry};
 pub use replay::{ReplayStats, replay_into};
-pub use routes::{AppState, router};
+pub use routes::{AppState, daemon_router, router};
 pub use sink_config::{SinkChoice, build_sink};
 pub use store::{ChainEntry, ChainStore, StoreError};
