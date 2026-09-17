@@ -491,7 +491,8 @@ không ai nhầm chúng là `StrataError`:
 
 | HTTP | `error` | Khi nào |
 |---|---|---|
-| 400 Bad Request | *(Malformed)* | body/param không giải mã được: hex sai độ dài, enum lạ, **khoá trùng trong `state_fields`** (INV-E6), `limit=0`, cửa sổ rỗng/lùi |
+| 400 Bad Request | *(Malformed)* | body/param/**tham số path** không giải mã được: hex sai độ dài, enum lạ, **khoá trùng trong `state_fields`** (INV-E6), `limit=0`, cửa sổ rỗng/lùi |
+| 405 Method Not Allowed | `MalformedRequest` | route có nhưng không nhận method đó; `detail = {reason, method, path}` |
 | 409 Conflict | `RefExists` | `create` lần hai trên cùng `(author_did, genesis_nonce)` — **KHÔNG** ghi đè lịch sử |
 | 422 | `TimestampTooFarFuture` | 🔴 gần như chắc chắn client gửi **mili giây** thay vì giây — xem dưới |
 | 501 Not Implemented | `AnchorNotConfigured` | daemon chưa cắm `AnchorSink` |
@@ -768,6 +769,7 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
 - Body lỗi HTTP: `{ "error":"<variant>", "detail":{ <các trường payload hex/số> } }`. VD `HashLinkBroken` → `detail:{ "expected":"<hex32>", "got":"<hex32>" }`; `FieldPolicyDenied` → `detail:{ "field_key":"<hex>" }`.
 - **Case biên bắt buộc xử lý ở daemon (không phải `StrataError` core, nhưng phải trả lỗi rõ, KHÔNG panic):**
   - `ref`/`seq`/`key` không tồn tại (core trả `None` từ `version`/`prove_version`/`prove_field`/`version_at`) → 404 `{ "error":"NotFound", "detail":{ "what": "ref"|"seq"|"field key"|"version tại t" } }`. (Daemon phân biệt bằng `detail.what`, KHÔNG bằng tên biến thể riêng — code `node/src/error.rs` KHÔNG có `RefNotFound`.)
+  - Path không khớp route nào (kể cả dư `/` cuối) → 404 `{ "error":"NotFound", "detail":{ "what":"route", "method", "path" } }` — `what:"route"` là *"không có đường"*, mọi giá trị còn lại là *"không có vật"*. Chỉ daemon đứng riêng (`daemon_router()`) trả thân này; `router()` mount vào tiến trình chủ thì 404 của path lạ là việc của cây chủ.
   - `version_at(t)` với `t < ts(genesis)` → core trả `None` → 404 (KHÔNG 500).
   - Body sai schema / hex sai độ dài (H32 ≠ 64 hex char, sig ≠ 128 hex char) → 400 `{ "error":"MalformedRequest", "detail":{...} }` TRƯỚC khi vào core. (Tên biến thể cửa lấy theo `node/src/error.rs`; danh sách đóng nằm ở **bảng §3.1** — không liệt lại ở đây để một sự thật chỉ có một chỗ khai. Điểm cần nhớ tại chỗ này: tên là `MalformedRequest`, **KHÔNG** phải `BadRequest`.)
   - `state_fields` có `key` trùng → daemon từ chối 400 (core `prove_field` chỉ trả lần xuất hiện đầu sau sort; trùng key = ngữ nghĩa mơ hồ). **Chốt INV key-duy-nhất:** key trong một version PHẢI duy nhất. Ba vế dưới tách bạch **cái đã đóng** khỏi **cái còn nợ**, vì trước đây chúng viết chung một câu và câu đó đọc được thành "lõi đã cưỡng chế":
