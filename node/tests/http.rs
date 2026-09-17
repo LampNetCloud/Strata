@@ -17,7 +17,7 @@ use lampnet_strata::state::{FieldProof, build_state_root, verify_field_proof};
 use lampnet_strata::version::{Hash32, StrataVersion};
 use lampnet_strata::{Policy, StrataChain};
 use lampnet_strata_node::{
-    AppState, ChainStore, FailingSink, InMemoryRegistry, MemorySink, router,
+    AppState, ChainStore, FailingSink, InMemoryRegistry, MemorySink, daemon_router, router,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -1563,4 +1563,146 @@ async fn neo_van_chay_khi_anchor_on_chain_khop_lich_su_local() {
         "anchor on-chain khớp lịch sử local thì gác phải cho qua: {a}"
     );
     assert_eq!(a["seq"], 1);
+}
+
+// ── Lỗi sinh TRƯỚC handler (issue #100) ─────────────────────────────────────
+//
+// Router fallback, sai method và `Path` rejection từng trả thân rỗng / `text/plain`, nên bên
+// gọi không phân biệt được *"không có đường"* với *"không có vật"*. Mỗi dòng của bảng đo trong
+// issue là một ca; đối chứng dương giữ các lỗi vốn đã đúng khuôn không đổi thân.
+
+/// Gọi thô: `(status, content-type, thân JSON)` — thân không phải JSON thì test đỏ tại đây,
+/// không lặng lẽ thành `Null` như [`call`].
+async fn call_json(app: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap().to_string());
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        ct.as_deref(),
+        Some("application/json"),
+        "{method} {uri} → {status}: content-type phải là JSON, thân = {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+        panic!("{method} {uri} → {status}: thân không phải JSON ({e}): {bytes:?}")
+    });
+    (status, v)
+}
+
+fn daemon_app() -> (Router, Policy) {
+    let reg = InMemoryRegistry::new();
+    reg.register(DID, sk(1).verifying_key());
+    let mut policy = Policy::new();
+    policy.allow(DID, sk(1).verifying_key());
+    let state = AppState::new(
+        Arc::new(ChainStore::new()),
+        Arc::new(reg),
+        Arc::new(MemorySink::new()),
+    );
+    (daemon_router(state), policy)
+}
+
+#[tokio::test]
+async fn route_khong_ton_tai_tra_404_notfound_what_route() {
+    let (app, policy) = daemon_app();
+    let (r, _) = create_ok(&app, &policy).await;
+    for uri in [
+        "/v1/strata/resolve?author_did=aa".to_string(),
+        "/khong-co".to_string(),
+        // Dư `/` cuối: không có ca này thì một client ghép URL lệch thấy mọi ref "không có".
+        format!("/v1/strata/{r}/head/"),
+    ] {
+        let (st, v) = call_json(&app, "GET", &uri).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{uri}: {v}");
+        assert_eq!(v["error"], "NotFound", "{uri}: {v}");
+        assert_eq!(v["detail"]["what"], "route", "{uri}: {v}");
+        assert_eq!(v["detail"]["method"], "GET", "{uri}: {v}");
+    }
+    // `path` không mang query — chỉ đường đã đi lệch.
+    let (_, v) = call_json(&app, "GET", "/v1/strata/resolve?author_did=aa").await;
+    assert_eq!(v["detail"]["path"], "/v1/strata/resolve");
+}
+
+#[tokio::test]
+async fn sai_method_tra_405_json() {
+    let (app, policy) = daemon_app();
+    let (r, _) = create_ok(&app, &policy).await;
+    for (m, uri) in [
+        ("GET", "/v1/strata/create".to_string()),
+        ("DELETE", format!("/v1/strata/{r}/head")),
+    ] {
+        let (st, v) = call_json(&app, m, &uri).await;
+        assert_eq!(st, StatusCode::METHOD_NOT_ALLOWED, "{m} {uri}: {v}");
+        assert_eq!(v["error"], "MalformedRequest", "{m} {uri}: {v}");
+        assert_eq!(v["detail"]["method"], m, "{m} {uri}: {v}");
+        assert_eq!(v["detail"]["path"], uri.as_str(), "{m} {uri}: {v}");
+    }
+}
+
+#[tokio::test]
+async fn path_rejection_tra_400_malformed_json() {
+    let (app, policy) = daemon_app();
+    let (r, _) = create_ok(&app, &policy).await;
+    let (st, v) = call_json(&app, "GET", &format!("/v1/strata/{r}/proof/version/abc")).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"], "MalformedRequest", "{v}");
+}
+
+/// Đối chứng dương: lỗi vốn đã đi qua handler giữ nguyên thân, và route có thật vẫn chạy.
+#[tokio::test]
+async fn loi_trong_handler_giu_nguyen_than_cu() {
+    let (app, policy) = daemon_app();
+    let (r, _) = create_ok(&app, &policy).await;
+
+    let (st, v) = call_json(&app, "GET", &format!("/v1/strata/{r}/proof/field/khong_co")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(
+        v,
+        json!({ "error": "NotFound", "detail": { "what": "field key" } })
+    );
+
+    let (st, v) = call_json(&app, "GET", "/v1/strata/abc/head").await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"], "MalformedRequest");
+
+    let (st, v) = call_json(&app, "GET", &format!("/v1/strata/{r}/head")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = call_json(&app, "GET", &format!("/v1/strata/{r}/proof/version/0")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+/// `router()` vẫn MOUNT được: không mang fallback cấp router, nên `merge` vào cây có fallback
+/// riêng không panic, 404 của cây chủ vẫn là của chủ — còn 405 của route Strata vẫn JSON.
+#[tokio::test]
+async fn router_mountable_merge_vao_cay_chu_co_fallback() {
+    use axum::routing::get as host_get;
+    let (strata, policy) = app();
+    let host: Router = Router::new()
+        .route("/host/ping", host_get(|| async { "pong" }))
+        .fallback(|| async { (StatusCode::IM_A_TEAPOT, "host fallback") })
+        .merge(strata);
+
+    let req = Request::builder()
+        .uri("/khong-co")
+        .body(Body::empty())
+        .unwrap();
+    let resp = host.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::IM_A_TEAPOT,
+        "404 của cây chủ phải là của chủ"
+    );
+
+    let (r, _) = create_ok(&host, &policy).await;
+    let (st, v) = call_json(&host, "DELETE", &format!("/v1/strata/{r}/head")).await;
+    assert_eq!(st, StatusCode::METHOD_NOT_ALLOWED, "{v}");
 }

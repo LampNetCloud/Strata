@@ -114,6 +114,8 @@ Mô tả trong comment issue lệch với `spec/_CONTRACT.md` hiện tại — c
 
 > **Cập nhật `14/09`** (`STRATA-ANCHOR-INTEGRATION-REPORT.md` **§25**) — không đổi trạng thái sáu issue trên. Lượt nối chạy bằng lớp thư viện của OriLife (`strata_client.py`): bản cài của họ **trùng byte** `_canonical` ở cả genesis lẫn append, lô 2 ref lên Preprod, checkpoint epoch 9 gom 3 lá. Hai dữ kiện đi vào hàng chờ: (1) **`#84`** — ca một cặp khoá nền tảng dẫn được `policy_hash` phía client (đã đo trùng giá trị daemon), ca nhiều tác giả vẫn chờ; (2) route không tồn tại trả `404` **thân rỗng**, và client OriLife đọc nó thành *"chưa có"* — ứng viên fallback JSON, **chưa mở issue**. Cùng ngày: bộ kiểm field-proof độc lập vào kho (`scripts/verify_field_proof.py` + fixture `apis/field-proof-vectors.json` do Rust sinh bằng DTO của daemon + hai bước CI) — §25.7.
 
+> **Cập nhật `17/09`** (`STRATA-ANCHOR-INTEGRATION-REPORT.md` **§26**) — ĐÓNG `#18` (câu spec `#27` đã merged `14/08`, issue chỉ còn chờ nó) và `#14` (beacon `#19` + hợp đồng *best-effort* của đường quét ở `Strata-API.md:835`); vá `#100` — lỗi trước handler nay đúng khuôn `{error, detail}`, **không thêm tên lỗi mới**; fallback 404 chỉ ở `daemon_router()` vì fallback cấp router làm `router()` hết mount được (axum `merge` panic). **314 pass.** Hàng chờ còn lại toàn câu spec: `#39` điểm 2 · `#77` · `#80` · `#84` · `#81`.
+
 ### Ba luật rút ra, áp cho mọi milestone sau
 
 1. **Gác có mã + có test vẫn có thể chưa bao giờ chạy.** `verify_resolved` có 5 ca kiểm và **0** call site sản xuất trong nhiều tháng. Lớp lỗi này không phát hiện được bằng đọc mã từng tệp — mỗi tệp đều đúng, mỗi test đều xanh. Phép đo rẻ: **đếm call site ngoài `tests/`**.

@@ -21,8 +21,8 @@
 
 use ed25519_dalek::VerifyingKey;
 use lampnet_strata_node::{
-    AppState, ChainStore, InMemoryRegistry, Journal, KeyRegistry, build_sink, read_records,
-    replay_into, router,
+    AppState, ChainStore, InMemoryRegistry, Journal, KeyRegistry, build_sink, daemon_router,
+    read_records, replay_into,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -219,7 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "strata-node nghe tại http://{addr} — route §3 dưới /v1/strata, {n_keys} khoá \
                  trong registry"
             );
-            axum::serve(listener, router(state)).await?;
+            axum::serve(listener, daemon_router(state)).await?;
             Ok::<_, Box<dyn std::error::Error>>(())
         })
 }
