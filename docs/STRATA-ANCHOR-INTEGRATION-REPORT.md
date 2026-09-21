@@ -3054,3 +3054,57 @@ thành `Null` im lặng, nên bài mới dùng helper riêng đỏ ngay tại ch
 | `#77` · `#80` · `#84` | nửa mã đã land `#95`; nửa còn lại là quyết định spec |
 | `#81` | chốt hành vi `scan_window` gặp record không hiểu |
 
+
+## §27. Phiên `21/09` — `mmr_root` kiểm độc lập, vào kho có cổng giữ
+
+Bản đầy đủ phía VeData: `VeDataIO/Core: docs/VEDATA-MOSAIC-STRATA-SEAM-REPORT.md §21`.
+
+### 27.1 Vế nợ cuối của chuỗi bằng chứng §25
+
+§25 kiểm độc lập `state_root` và `version_hash` tới label 1234, và root checkpoint; `mmr_root` —
+trường cam kết **toàn bộ** lịch sử version 0..seq, không chỉ đỉnh — mới so bằng với daemon.
+
+**Luật đo từ mã:** crate `lampnet-merkle-anchor` đúng rev ghim `f864fa3` (`src/mmr.rs`,
+`src/hash.rs`) và `src/chain.rs` (`mmr.append(&v.version_hash())`): lá `H_dom(mmr/leaf, 0x00 ‖
+version_hash)`, nút `H_dom(mmr/node, 0x01 ‖ l ‖ r)`, đỉnh theo khai triển nhị phân của n
+lớn→nhỏ, bag fold-right, root `H_dom(mmr/root, u64_be(n) ‖ bag)`.
+
+**Trên dữ liệu thật:** `version_hash` dựng lại từ **request thô** trong nhật ký (không đọc
+daemon), rồi MMR, so với label 1234 ⇒ **3/3 anchor khớp** (tx `f5a067ee…` seq 1 · tx
+`c1955984…` hai ref), 26 ca âm lệch.
+
+**Chỗ dữ liệu chuỗi không phủ được:** mọi anchor hôm nay có n ≤ 3 ⇒ ≤ 2 đỉnh, ở đó bag
+fold-left **trùng** fold-right. Chiều bag chỉ kiểm được ở n có ≥ 3 đỉnh ⇒ phủ bằng fixture.
+
+### 27.2 Vào kho — cùng khuôn §25.7
+
+| Mảnh | Vai |
+|---|---|
+| `node/examples/dump_mmr_root_fixture.rs` | ra đề → `apis/mmr-root-vectors.json`: n = 1..16, mỗi vector là một `StrataChain` **thật** (khoá tất định), `mmr_root` lấy từ `StrataChain::mmr_root` — không từ `Mmr` trần, để fixture bắt được chain đổi thứ làm lá |
+| `node/tests/mmr_root_fixture.rs` | khoá phía Rust, hai vế tách: `Mmr` của crate trên lá trong tệp ra đúng root · chain dựng lại ra đúng lá và đúng root; ≥ 16 vector, bắt buộc có vector ≥ 3 đỉnh |
+| `scripts/verify_mmr_root.py` | bộ kiểm độc lập (stdlib + `blake3`): `--fixture`, hoặc tệp `version_hash` + `--expect-mmr-root` đọc từ chuỗi. Mỗi vector chạy các ca âm áp dụng được (điều kiện áp dụng là chỗ hai luật trùng về toán, không phải chỗ bỏ qua cho tiện); tự đỏ nếu fixture không có vector ≥ 3 đỉnh |
+| CI | job `rust` thêm bước sinh lại + `diff` rỗng; job riêng `mmr-root-python`, `blake3==1.0.9` |
+
+**Đo:**
+
+| | |
+|---|---|
+| `cargo test --workspace` | **314 → 317 pass / 0 fail** |
+| `clippy --all-targets -D warnings` · `fmt --check` | 0 · sạch |
+| fixture sinh lại | `diff` rỗng |
+| script trên fixture | 16/16 vector; ca âm lệch 3–9 mỗi vector |
+| script trên dữ liệu thật | seq 2 `c1955984…` **khớp** · seq 1 `f5a067ee…` **khớp** · 2 lá so root của 3 lá ⇒ **lệch** · root cụt 16 hex ⇒ `exit 2` trước khi băm |
+| đảo mã script | bag mặc định fold-left ⇒ đỏ **đúng 5** vector ≥ 3 đỉnh · bỏ commit n ⇒ 16/16 đỏ · bỏ `0x00` lá ⇒ 16/16 đỏ · nhân đôi lá lẻ ⇒ đỏ **đúng 11** n không phải luỹ thừa 2 · fixture bỏ mọi vector ≥ 3 đỉnh ⇒ đỏ |
+| đảo mã bài khoá Rust | lật 1 nibble `mmr_root` n7 trong tệp ⇒ đỏ vế 1 + 2 · `chain.rs` append `state_root` thay `version_hash` ⇒ đỏ **đúng** vế 2 |
+
+🪤 **Bẫy tự mắc trong lúc đo:** tệp fixture chưa track ⇒ `git checkout` sau mũi đảo tệp **không
+khôi phục**, và mũi đảo mã kế tiếp chạy trên tệp còn hỏng — vế 1 đỏ vì tệp, không vì mã. Sinh lại
+rồi đo lại mũi đó cho sạch (con số ở bảng trên là lượt sạch). Tệp chưa track phải khôi phục bằng
+bộ sinh, không bằng git.
+
+### 27.3 Một phát hiện đi kèm — chữ ký genesis không bọc `genesis_nonce`
+
+Đo trên daemon bản sao: body `create` đổi `genesis_nonce` vẫn **200**, `ref_id` khác mà
+`head_version_hash` trùng khít; bản gốc sau đó cũng 200. Đúng spec `Strata-Tech §3.1` (`vh0` không
+chứa nonce/`ref_id`; genesis `prev_hash = 0`). Hệ quả và lý do không tự sửa: `SEAM §21.4`. Câu
+phạm vi chữ ký thuộc spec.
