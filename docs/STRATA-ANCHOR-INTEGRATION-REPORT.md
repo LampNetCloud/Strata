@@ -3108,3 +3108,53 @@ bộ sinh, không bằng git.
 `head_version_hash` trùng khít; bản gốc sau đó cũng 200. Đúng spec `Strata-Tech §3.1` (`vh0` không
 chứa nonce/`ref_id`; genesis `prev_hash = 0`). Hệ quả và lý do không tự sửa: `SEAM §21.4`. Câu
 phạm vi chữ ký thuộc spec.
+
+---
+
+## §28. Vòng `22/09` — đo lại bảng milestone: hai ô đã cũ, và hàng mã tự làm được đã cạn
+
+Đo trên `main` `734de40` (không đổi mã). Sáu issue mở (`#39` `#77` `#80` `#81` `#84` `#104`) không
+có hoạt động mới từ `21/09`; cả sáu chờ chủ spec.
+
+### 28.1 Ô S6 ghi "CHƯA BẮT ĐẦU" 28 ngày sau khi phần (a) land
+
+`#69` (`042f99b`, 25/08) đã làm daemon bền vững: nhật ký ghi **request**, replay chạy lại chính
+đường ghi (`node/src/journal.rs`). Tiêu chí *"kill + restart giữ nguyên head/proof"* của ô S6 có
+bài kiểm: `node/tests/journal.rs` `khoi_phuc_day_du_qua_mot_luot_restart`, kèm ca đuôi rách, sửa
+một byte, gỡ khoá khỏi registry. Phần (b) (Mirage `EncryptedDistributed`) và thang tầng §5.2 thì
+đúng là chưa có dòng mã nào: `grep` `no-repair|EncryptedDistributed|tier` trong `src/` `node/src/`
+ra 0.
+
+### 28.2 S9: đã làm mù được trong proof, nhưng chưa request nào dựng được trường làm mù
+
+| Mảnh | Trạng thái | Chỗ |
+|---|---|---|
+| `fval_hash_salted`, length-prefix | ✅ | `#63` `30ce952`, `src/state.rs:89` |
+| miền tag riêng `…/fval/salted/v1` | ✅ | `5274420` |
+| `FieldProofResp.salt` luôn có mặt + vector chế độ | ✅ | `#71`, `node/src/dto.rs:340`, `Strata-API.md:262-279` |
+| **ô `salt` ở thân `create`/`version`** | ⬜ | `FieldDto` (`node/src/dto.rs:22`) chỉ có `key`, `value` |
+| daemon dựng/prove dạng có salt | ⬜ | `routes.rs:317/382/439` `build_state_root`, `:691` `prove_field` (dạng không salt) |
+| đệm lá lên luỹ thừa 2 | ⬜ | không có mã |
+
+⇒ Trên sản xuất `salt` trả về **luôn rỗng**. Mặt đọc đã sẵn cho một chế độ mà mặt ghi chưa mở được.
+
+Mặt ghi không tự làm được vì hai lẽ. Salt phải do **client** chọn: client ký `version_hash`, mà
+`version_hash` phủ `state_root`, nên server tự gieo salt thì chữ ký sai. Vì vậy thân request phải
+mang `salt`, và đó là **đổi dây** `Strata-API §3`. Phần bền vững thì không tốn gì thêm: nhật ký
+`#69` ghi nguyên request, nên ô `salt` có trong request là replay có luôn.
+
+### 28.3 Các mục còn lại đều chạm dây hoặc spec
+
+| Mục | Vì sao chưa tự làm |
+|---|---|
+| S8 ghép đường đọc | `proof/version` trả two-tier, row-sum, composite là hình dạng phản hồi/route ngoài `Strata-API §3` |
+| S9 mặt ghi + đệm lá | 28.2; đệm lá còn đổi `state_root` ⇒ `_CONTRACT` CHỐT-4 |
+| S10 `migrate_static` | cần `parse_root_hash`/`strip_class` phía LampNet (`cid.rs`); tạo genesis mới ⇒ dính `#104`; Tech §8.1 tự ghi ràng buộc làm mù `data_class` là *"cần quyết định spec"* |
+| S11 backend Mosaic thật | chờ hướng (A)/(B) |
+
+Roadmap đã sửa ô S6, S9 và thêm dòng cập nhật `21–22/09`.
+
+🪤 **Bài học:** bảng milestone cũng là ảnh chụp (cùng họ với *"đo main, đừng tin comment cuối"*).
+PR `#69` không sửa ô S6 vì lúc đó việc được ghi dưới tên *"§14.9 việc chặn"*, không dưới tên S6.
+Việc land dưới một cái tên khác thì ô milestone không ai nhớ mà sửa. ⇒ mỗi vòng dọn hàng, đo từng ô
+"CHƯA BẮT ĐẦU" bằng `git log -S`/`grep` trước khi trích nó.
