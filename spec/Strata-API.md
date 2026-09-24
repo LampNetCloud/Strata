@@ -190,6 +190,15 @@ let anchor: StrataAnchor = chain.publish_anchor()?;       // &mut self; seq <= l
 
 Style axum khớp `lampnet-node.rs` (`Router::new().route("/v1/...", post(handler))`). Hash/CID hex (64 char cho H32). Body JSON. Bảng route mở rộng §6 Strata-Tech; file này là spec chuẩn request/response + lỗi.
 
+**Xác thực người gọi — hiện trạng (#107).** Không route nào ở §3 xác thực *người gọi*.
+`create`/`version` kiểm chữ ký của *tác giả* (DID phải tra được trong registry), không kiểm ai
+gửi request. Các route đọc — `head` · `version?at=` · `proof/version` · `proof/field` · `_dirty` ·
+`_settlement_window` — không mang định danh người gọi nào, nên không giới hạn theo người gọi
+được. Giới hạn đang có nằm trong handler: `_dirty` trần 1000 ref một lượt, `_settlement_window`
+quét lần lượt (mỗi lúc một lượt gọi thượng nguồn). `router()` là mountable: cổng khởi động
+`STRATA_NODE_EXPOSED` chỉ đứng ở binary `strata-node`, bản gắn vào tiến trình chủ phải tự đặt lớp
+gác. Ô xác thực cho đường ghi on-chain (`/anchor`, `/_anchor_batch`) là câu mở ở #77.
+
 ### POST `/v1/strata/create`
 ```jsonc
 // req
@@ -387,6 +396,7 @@ quyết lô và **không** giữ hàng đợi — nó trả lời một câu h�
   `ref_id`). Nhờ vậy `limit` cắt đúng phần chờ lâu nhất, và lô **tất định** giữa hai lượt.
 - `truncated = true` khi `limit` đã cắt. Cắt **im lặng** là cách một hàng đợi tưởng mình
   rỗng trong khi vẫn còn việc. `limit=0` ⇒ `400`.
+- `limit` vắng hoặc lớn hơn **1000** ⇒ cắt ở 1000 (#107). Không có lượt đọc "trả tất cả".
 - ⚠️ `author_did` (của **genesis**) **KHÔNG còn là ranh giới lô** kể từ `Specs#32`
   (2026-08-19): lô gom **LIÊN HỘ**, chia theo **kích cỡ**. Nhóm lô theo trường này là dựng
   lại một ràng buộc đã bỏ, và trả giá bằng phần cố định của tx nhân với *số hộ* thay vì
@@ -437,6 +447,11 @@ CHI**, có `slot ∈ [from_slot, to_slot)` — `from_slot` **đóng**, `to_slot`
 **Cả hai tham số BẮT BUỘC, không có mặc định.** Một cửa sổ mặc định là một cửa sổ mà bên
 gọi không khai — và cam kết on-chain thì phải nói rõ nó cam kết đúng quãng nào, chứ không
 phải quãng server tự chọn hôm đó. `to_slot <= from_slot` ⇒ `400`.
+
+Mỗi lúc chỉ **một** lượt quét chạy; request đến sau **xếp hàng**, không bị từ chối (#107). Một
+lượt tốn tới `1 + ceil(L/100) + 3L` lượt gọi Blockfrost (`L = resolve_scan_limit`). Độ rộng cửa
+sổ không có trần: phía Mosaic `from_slot` cố định bằng `to_slot` của chu kỳ trước, nên cửa sổ
+sau một lần ngừng rộng hơn nhịp thường.
 
 **Bốn trường anchor giữ ĐÚNG thứ tự canonical của `StrataAnchor`** (`ref_id ‖
 head_version_hash ‖ mmr_root ‖ seq`): bên tiêu thụ băm lại đúng 104 byte đó để dựng lá
