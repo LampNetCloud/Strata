@@ -3178,3 +3178,20 @@ Kiểm: `scan_limit_bang_0_thi_khong_khoi_dong` (`"0"`, `" 0 "`, `"00"`) và đ�
 `scan_limit_duong_hoac_vang_thi_qua`. Gỡ tạm sàn ⇒ ca thứ nhất đỏ.
 
 Lớp 2 (hai đường `resolve` dùng chung phép kiểm "đã quét hết" với `scan_window`) chưa làm, xem 29.6.
+### 29.2 `#108` — thân lỗi `503` không còn chở URL thượng nguồn
+
+`net_err` (`anchor-io/src/lib.rs`) đưa `reqwest::Error::to_string()` vào `AnchorError::Network`,
+tức vào `reason` của `503 AnchorNetwork`. Chuỗi đó không chứa header (project_id an toàn) nhưng
+chở nguyên URL: host thượng nguồn (có thể là host nội bộ), đường dẫn (`/addresses/{addr}/…` ⇒
+địa chỉ publisher), tiền tố mạng. Đường thứ hai cùng hình dạng, issue chưa nêu: lượt gọi cửa
+Mosaic (`anchor-io/src/mosaic_door.rs`, `"gọi cửa Mosaic: {e}"`). URL cửa là host nội bộ.
+
+Vá: một hàm chung `upstream_err(upstream, &e)` cho cả hai đường. Thân lỗi chỉ mang phân loại và
+mã tham chiếu `net-xxxxxxxx`; chuỗi đầy đủ ra stderr của node kèm cùng mã. Phân loại tách
+*không gọi được thượng nguồn* (timeout · connect · request) với *thượng nguồn trả lỗi*
+(status · body). Biến thể vẫn là `Network` ⇒ phân tầng retry §8.1b không đổi. `Strata-API §3.1`
+không tả nội dung `reason` ⇒ không đổi hợp đồng dây.
+
+Kiểm: `loi_mang_khong_cho_url_vao_than_phan_hoi` (Blockfrost qua cổng đóng `127.0.0.1:1`, đối
+chứng rằng chuỗi `reqwest` gốc CÓ chở host + địa chỉ) và `cua_khong_voi_toi_duoc_la_loi_retryable`
+mở rộng cho cửa Mosaic. Đột biến trả lại chuỗi gốc ⇒ cả hai đỏ.
