@@ -3232,7 +3232,7 @@ của vòng này, mỗi PR trả lời *"còn đường nào đọc cùng dữ l
 |---|---|---|---|
 | `#110` (`#106`) | sàn `scan_limit` ở parse env | `SinkConfig` dựng thẳng bằng mã (thư viện), không qua parse | chưa phủ — đó là lớp 2 của `#106`, ghi ở 29.6 |
 | `#111` (`#108`) | `net_err` không chở URL | lượt gọi cửa Mosaic (`mosaic_door.rs`) | phủ trong cùng PR |
-| `#112` (`#107`) | trần `_dirty`, quét cửa sổ lần lượt | `head` · `version?at=` · `proof/*` | miễn: mỗi lượt đọc một ref, không gọi thượng nguồn, chi phí `O(log n)` theo MMR |
+| `#112` (`#107`) | trần `_dirty`, quét cửa sổ lần lượt | `head` · `version?at=` · `proof/*` | miễn: mỗi lượt đọc một ref trong bộ nhớ, không gọi sink (sink chỉ được gọi ở `anchor`, `_anchor_batch`, `_settlement_window`) |
 
 ### 29.5 `#81` — câu `scan_window` đã chốt, hai chỗ còn hở trước khi viết mã
 
