@@ -122,10 +122,10 @@ Mô tả trong comment issue lệch với `spec/_CONTRACT.md` hiện tại — c
 
 | issue | trạng thái `24/09` | phần còn lại |
 |---|---|---|
-| **`#106`** `STRATA_RESOLVE_SCAN_LIMIT=0` tắt gác INV-E7 | 🟡 lớp 1 (sàn ở parse): PR `#110` | lớp 2: hai đường `resolve` quét địa chỉ chưa có phép kiểm "đã quét hết" — cùng lượt với `#81` |
-| **`#107`** route đọc không trần | 🟡 `_dirty` trần 1000 + `_settlement_window` quét lần lượt: PR `#112`; mục 3 (spec §3) nhánh riêng | trần **độ rộng** cửa sổ: không làm vì kẹt vòng checkpoint Mosaic sau một lần ngừng — hỏi chủ spec |
-| **`#108`** thân 503 chở URL thượng nguồn | 🟡 PR `#111` (cả đường cửa Mosaic) | — |
-| **`#109`** tiêu chí review hai-đường-cùng-mức | ✅ ghi thành luật 4 dưới đây | — |
+| **`#106`** `STRATA_RESOLVE_SCAN_LIMIT=0` tắt gác INV-E7 | 🟡 lớp 1 (sàn ở parse): `#110` merged | lớp 2: hai đường `resolve` quét địa chỉ chưa có phép kiểm "đã quét hết" — cùng lượt với `#81` |
+| **`#107`** route đọc không trần | 🟡 `_dirty` trần 1000 + `_settlement_window` quét lần lượt: `#112` merged; mục 3 (spec §3): PR `#114` chờ review | trần **độ rộng** cửa sổ: không làm vì kẹt vòng checkpoint Mosaic sau một lần ngừng — hỏi chủ spec |
+| **`#108`** thân 503 chở URL thượng nguồn | ✅ **ĐÓNG** — `#111` (cả đường cửa Mosaic) | — |
+| **`#109`** tiêu chí review hai-đường-cùng-mức | ✅ **ĐÓNG** — `#113`, luật 4 dưới đây | — |
 | **`#81`** | 🟡 câu `scan_window` đã chốt: **bỏ qua · ĐẾM · KHAI tập kiểu đã hiểu** | (b3) đổi `CheckpointDatum` on-chain ⇒ chờ cách mã hoá; (a) ranh giới "không đọc được" trên đường ghi — hỏi chủ spec |
 
 ### Ba luật rút ra, áp cho mọi milestone sau
