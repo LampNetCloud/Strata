@@ -1,6 +1,6 @@
 # Strata — Roadmap thực thi
 
-> **Repo:** `LampNetCloud/Strata` (Rust) · **Cập nhật:** 2026-09-22
+> **Repo:** `LampNetCloud/Strata` (Rust) · **Cập nhật:** 2026-09-24
 > **Strata** = tầng lưu trữ tiến hóa của MagicLamp: chuỗi version hash-link + MMR + `state_root` field-Merkle + anchor on-chain + audit-log.
 > **Spec nguồn:** `spec/_CONTRACT.md` (khế ước giao diện) + `spec/Strata-Feat/Math/Tech/API.md`.
 > **Theo dõi công việc:** issue `#1` (S1) · `#2` (S2) · `#3` (S3) · `#24` (S7: CI + fmt drift).
@@ -118,13 +118,34 @@ Mô tả trong comment issue lệch với `spec/_CONTRACT.md` hiện tại — c
 
 > **Cập nhật `21/09`–`22/09`** (report **§27**, **§28**) — `#103` land: bộ kiểm `mmr_root` độc lập, **317 pass**, CI 3 job. Mở `#104` (chữ ký genesis không bọc `genesis_nonce`) — câu spec. Đo lại bảng milestone trên `main` `734de40`: ô **S6** và **S9** đã cũ (sửa ở trên); S8/S10/S11 đúng là chưa bắt đầu. **Không còn mục mã nào tự làm được mà không chạm dây hoặc spec:** S8 thêm route ngoài `Strata-API §3`, S9 mặt ghi đổi thân request, S10 cần `parse_root_hash` phía LampNet + dính `#104` (genesis mới), S11 chờ hướng (A)/(B). Hàng chờ spec: `#39`đ2 · `#77` · `#80` · `#81` · `#84` · `#104` · S9 mặt ghi.
 
+> **Cập nhật `24/09`** (report **§29**) — chủ spec mở `#106`–`#109` trên `main` `7a5cbf0` và trả lời `#81`.
+
+| issue | trạng thái `24/09` | phần còn lại |
+|---|---|---|
+| **`#106`** `STRATA_RESOLVE_SCAN_LIMIT=0` tắt gác INV-E7 | 🟡 lớp 1 (sàn ở parse): PR `#110` | lớp 2: hai đường `resolve` quét địa chỉ chưa có phép kiểm "đã quét hết" — cùng lượt với `#81` |
+| **`#107`** route đọc không trần | 🟡 `_dirty` trần 1000 + `_settlement_window` quét lần lượt: PR `#112`; mục 3 (spec §3) nhánh riêng | trần **độ rộng** cửa sổ: không làm vì kẹt vòng checkpoint Mosaic sau một lần ngừng — hỏi chủ spec |
+| **`#108`** thân 503 chở URL thượng nguồn | 🟡 PR `#111` (cả đường cửa Mosaic) | — |
+| **`#109`** tiêu chí review hai-đường-cùng-mức | ✅ ghi thành luật 4 dưới đây | — |
+| **`#81`** | 🟡 câu `scan_window` đã chốt: **bỏ qua · ĐẾM · KHAI tập kiểu đã hiểu** | (b3) đổi `CheckpointDatum` on-chain ⇒ chờ cách mã hoá; (a) ranh giới "không đọc được" trên đường ghi — hỏi chủ spec |
+
 ### Ba luật rút ra, áp cho mọi milestone sau
 
 1. **Gác có mã + có test vẫn có thể chưa bao giờ chạy.** `verify_resolved` có 5 ca kiểm và **0** call site sản xuất trong nhiều tháng. Lớp lỗi này không phát hiện được bằng đọc mã từng tệp — mỗi tệp đều đúng, mỗi test đều xanh. Phép đo rẻ: **đếm call site ngoài `tests/`**.
 2. **Chỗ được đề nghị vá có thể không có đầu vào mà bản vá cần.** `#79` đề nghị nối `verify_resolved` vào `AnchorSink`; trait đó không mang `&StrataChain`. Đo mặt cắt **trước** khi nhận phạm vi.
 3. **Bộ đệm suy được thì đừng nhớ.** `#79` mục 1 đề nghị thêm `mmr_root`+`mmr_size` vào nhật ký; `mmr_size = seq + 1` là **suy ra**, `version_hash` lấy thẳng từ chain ⇒ bảng dựng tại chỗ tương đương bảng đã lưu, và không đẻ thêm một trạng thái lệch được.
 
-### Câu hỏi đang chờ chủ spec (`#81`)
+4. **Hai đường đọc cùng một nguồn phải kêu cùng mức, và đường MẶC ĐỊNH phải là đường nghiêm** (`#109`, chủ spec đề nghị `24/09`). Ba câu kiểm được khi review:
+   - Thêm một phép kiểm ở đường A mà không thêm ở đường B thì trong cùng PR phải ghi **vì sao B được miễn**. Không viết được lý do ⇒ chưa xong.
+   - Hai đường khác mức mà chưa gộp được thì mặc định trỏ vào đường nghiêm; đường lỏng phải bật tường minh bằng cấu hình.
+   - Mỗi giá trị cấu hình làm yếu một hàng rào phải có sàn kiểm ở **tầng parse** — chỗ duy nhất thấy cả giá trị người ta gõ lẫn hàng rào nó chạm.
+
+   Phép thử một dòng: *"Hàng rào vừa thêm — còn đường nào đọc cùng dữ liệu mà không đi qua nó? Đường đó có phải đường mặc định không?"* Trả lời bằng tên hàm.
+
+### Câu `#81` — đã chốt `24/09`, phần hiện thực còn chờ
+
+Chủ spec chốt hành vi `scan_window` khi gặp record không hiểu: **bỏ qua** (không dừng checkpoint) · **ĐẾM** (`WindowScan` chở số record không hiểu, nơi gọi phải xử tường minh khi khác `0`) · **KHAI tập kiểu đã hiểu** (checkpoint cam kết tập `t` đã xử lý, để hai `root` khác nhau tự chỉ ra nguyên nhân). Vế khai phải land **cùng hoặc trước** vế đếm. Trên đường GHI: record đọc được mà không hiểu là **lỗi**. `t` không cần trường version. Chi tiết và hai câu còn hỏi: report **§29.5**.
+
+#### Câu cũ (giữ lưu vết)
 
 Đường **quét địa chỉ** là chế độ **MẶC ĐỊNH** (`beacon_policy: None`), và ở đó một record `t` lạ vẫn bị `decode_records_lenient` bỏ qua im lặng ⇒ `Ok(None)` = *"chưa neo"* ⇒ gác INV-E7 không chạy. Vá đúng hướng là tách ba câu trả lời ở tầng decode, nhưng `scan_window` — **nguồn lá của checkpoint toàn cục** — cũng gọi cùng hàm đó, nên câu phải chốt trước khi viết:
 
