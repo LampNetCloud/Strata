@@ -3195,3 +3195,31 @@ không tả nội dung `reason` ⇒ không đổi hợp đồng dây.
 Kiểm: `loi_mang_khong_cho_url_vao_than_phan_hoi` (Blockfrost qua cổng đóng `127.0.0.1:1`, đối
 chứng rằng chuỗi `reqwest` gốc CÓ chở host + địa chỉ) và `cua_khong_voi_toi_duoc_la_loi_retryable`
 mở rộng cho cửa Mosaic. Đột biến trả lại chuỗi gốc ⇒ cả hai đỏ.
+### 29.3 `#107` — `_dirty` có trần mặc định, `_settlement_window` quét lần lượt
+
+`router()` không có `.layer(` nào, nên phép giới hạn phải nằm trong handler.
+
+| Route | Trước | Sau |
+|---|---|---|
+| `_dirty` | `limit` vắng ⇒ trả tất cả; `limit=0` ⇒ 400 | vắng hoặc quá trần ⇒ `DIRTY_MAX_LIMIT = 1000`, cắt thì `truncated = true`; `limit=0` vẫn 400 |
+| `_settlement_window` | N người gọi song song = N lượt quét, mỗi lượt tới `1 + ceil(L/100) + 3L` lượt gọi Blockfrost (~1.506 với `L = 500`) | semaphore `static` một chỗ, permit đi vào closure blocking ⇒ mỗi lúc một lượt quét, kể cả khi người gọi ngắt kết nối giữa chừng |
+
+Trần 1000 cho `_dirty` không làm hỏng bên tiêu thụ: `Core: mosaic/l1` đọc cờ `truncated` và làm
+tiếp với phần cũ nhất, mà thứ tự cũ-trước nghĩa là phần bị cắt là phần chờ ngắn nhất.
+
+Hướng vá của issue cho `_settlement_window` là trần **độ rộng** cửa sổ. Không làm, vì hai lẽ đo được:
+
+1. Phía Mosaic `from_slot = prev.to_slot`, `to_slot = tip − confirm_slots`
+   (`Core: mosaic/l1/src/checkpoint_plan.rs`, `plan_cycle`). Sau một lần vòng checkpoint ngừng,
+   cửa sổ kế tiếp rộng hơn nhịp thường. Trần độ rộng sẽ từ chối đúng lượt cần đuổi kịp, và
+   `plan_cycle` hiện không tự thu hẹp `to_slot` ⇒ kẹt.
+2. Số lượt gọi bị chặn bởi `L`, không bởi độ rộng: vòng quét dừng ở `L` tx bất kể cửa sổ rộng
+   bao nhiêu, và mỗi tx trên cửa sổ vẫn tốn một lượt `tx_slot`.
+
+Quét lần lượt thì không đổi dây (xếp hàng, không thêm mã lỗi) và không kẹt ai. Câu trần độ rộng
+để lại cho chủ spec ở `#107`.
+
+Kiểm: `dirty_limit_co_bien_ca_hai_dau` (unit), `settlement_window_quet_lan_luot_khong_chong_nhau`
+(4 request song song ⇒ tối đa 1 lượt quét), `settlement_window_nguoi_goi_ngat_ket_noi_khong_mo_them_cho`
+(huỷ request khi lượt quét đang chạy ⇒ lượt sau vẫn không chồng). Đột biến semaphore 4 chỗ ⇒ ca
+thứ hai đỏ; đột biến giữ permit ở handler ⇒ ca thứ ba đỏ 3/3.
