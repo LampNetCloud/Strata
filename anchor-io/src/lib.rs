@@ -136,8 +136,51 @@ impl BlockfrostQuery {
 }
 
 fn net_err(e: reqwest::Error) -> AnchorError {
-    // reqwest::Error KHÔNG chứa header (project_id an toàn); chỉ chứa URL + kind.
-    AnchorError::Network(e.to_string())
+    upstream_err("Blockfrost", &e)
+}
+
+/// Lỗi `reqwest` ⇒ `AnchorError::Network` mà **không** chở chuỗi của thư viện (#108).
+///
+/// `reqwest::Error` không chứa header (project_id, bearer an toàn), nhưng `to_string()`
+/// chở nguyên **URL**: host thượng nguồn (có thể là tên host nội bộ), đường dẫn (địa chỉ
+/// publisher ở `/addresses/{addr}/…`), và tiền tố mạng. Chuỗi đó đi thẳng vào thân `503`
+/// của route, và nội dung của nó do phiên bản thư viện quyết, không do mã này.
+///
+/// Nên: thân phản hồi chỉ mang **phân loại** + **mã tham chiếu**; chuỗi đầy đủ đi vào
+/// stderr của node kèm cùng mã, để tra ngược. Phân loại tách hai thứ dẫn tới hai hành
+/// động khác nhau ở phía gọi: *không gọi được thượng nguồn* với *thượng nguồn trả lỗi*.
+/// Biến thể giữ nguyên `Network` ⇒ phân tầng retry (§8.1b) không đổi.
+pub(crate) fn upstream_err(upstream: &str, e: &reqwest::Error) -> AnchorError {
+    let kind = if e.is_timeout() {
+        "không gọi được thượng nguồn (timeout)"
+    } else if e.is_connect() {
+        "không gọi được thượng nguồn (connect)"
+    } else if e.is_status() {
+        "thượng nguồn trả lỗi (status)"
+    } else if e.is_body() || e.is_decode() {
+        "thượng nguồn trả lỗi (body)"
+    } else {
+        "không gọi được thượng nguồn (request)"
+    };
+    let reference = error_ref();
+    eprintln!("[anchor-io] {reference} {upstream}: {e}");
+    AnchorError::Network(format!(
+        "{upstream}: {kind}; tham chiếu {reference} trong log của node"
+    ))
+}
+
+/// Mã tham chiếu ngắn, đủ khác nhau để tra một dòng log. Không cần là bí mật hay
+/// duy nhất toàn cục — chỉ cần hai lỗi gần nhau không trùng mã.
+fn error_ref() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("net-{:08x}", nanos ^ seq.rotate_left(16))
 }
 
 fn truncate(s: &str, n: usize) -> &str {
@@ -306,6 +349,38 @@ impl ChainQuery for BlockfrostQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #108: thân lỗi `Network` không chở host, đường dẫn (địa chỉ publisher) hay chuỗi
+    /// `reqwest`; chỉ phân loại + mã tham chiếu. Đối chứng: chuỗi gốc CÓ chở cả hai, nên
+    /// ca này đỏ nếu `net_err` quay về `e.to_string()`.
+    #[test]
+    fn loi_mang_khong_cho_url_vao_than_phan_hoi() {
+        let q = BlockfrostQuery::new("http://127.0.0.1:1/api/v0".into(), "pid".into());
+        let addr = "addr_test1_publisher_bi_mat";
+        let raw = reqwest::blocking::get(format!(
+            "http://127.0.0.1:1/api/v0/addresses/{addr}/transactions"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            raw.contains("127.0.0.1") && raw.contains(addr),
+            "đối chứng: {raw}"
+        );
+
+        let err = q.address_txs(addr, 10).unwrap_err();
+        let AnchorError::Network(m) = &err else {
+            panic!("phải là Network, gặp {err:?}");
+        };
+        assert!(
+            !m.contains("127.0.0.1") && !m.contains(addr) && !m.contains("/api/v0"),
+            "{m}"
+        );
+        assert!(
+            m.contains("không gọi được thượng nguồn") && m.contains("net-"),
+            "{m}"
+        );
+        assert!(err.is_retryable());
+    }
 
     #[test]
     fn blockfrost_debug_redacts_token() {

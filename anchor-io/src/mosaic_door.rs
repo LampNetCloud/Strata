@@ -332,8 +332,9 @@ impl Submitter for MosaicDoorSubmitter {
             .map_err(|e| {
                 // Cửa không với tới được = lô CHƯA được kiểm-và-đẩy ⇒ retryable.
                 // Giữ lô lại là hành vi đúng: submit một lô chưa qua cửa thì không
-                // còn ai dựng tx cho nó cả.
-                AnchorError::Network(format!("gọi cửa Mosaic: {e}"))
+                // còn ai dựng tx cho nó cả. URL của cửa là host nội bộ ⇒ không đưa
+                // chuỗi `reqwest` vào thân phản hồi (#108).
+                crate::upstream_err("cửa Mosaic", &e)
             })?;
 
         let status = resp.status();
@@ -451,6 +452,11 @@ mod tests {
             "phải là Network, gặp {err:?}"
         );
         assert!(err.is_retryable());
+        // #108: URL của cửa là host nội bộ — không được đi ra thân phản hồi.
+        let AnchorError::Network(m) = &err else {
+            unreachable!()
+        };
+        assert!(!m.contains("127.0.0.1") && m.contains("net-"), "{m}");
     }
 }
 
