@@ -3162,7 +3162,8 @@ Việc land dưới một cái tên khác thì ô milestone không ai nhớ mà 
 ## §29. Vòng `24/09` — bốn issue mới (`#106`–`#109`) và câu chốt `#81`
 
 Chủ spec mở bốn issue trên `main` `7a5cbf0` và trả lời `#81`. Mỗi vá đi một PR riêng, mỗi PR mang
-một mục dưới đây. Việc nào còn chờ spec thì ghi ở 29.6.
+một mục dưới đây. Việc nào còn chờ spec thì ghi ở 29.6. Đã merge: `#110` (`389de6c`), `#111`
+(`da27c9c`, đóng `#108`), `#112` (`e4a74d6`); PR này (`#113`) đóng `#109`.
 
 ### 29.1 `#106` lớp 1 — `STRATA_RESOLVE_SCAN_LIMIT=0` bị từ chối lúc khởi động
 
@@ -3178,6 +3179,7 @@ Kiểm: `scan_limit_bang_0_thi_khong_khoi_dong` (`"0"`, `" 0 "`, `"00"`) và đ�
 `scan_limit_duong_hoac_vang_thi_qua`. Gỡ tạm sàn ⇒ ca thứ nhất đỏ.
 
 Lớp 2 (hai đường `resolve` dùng chung phép kiểm "đã quét hết" với `scan_window`) chưa làm, xem 29.6.
+
 ### 29.2 `#108` — thân lỗi `503` không còn chở URL thượng nguồn
 
 `net_err` (`anchor-io/src/lib.rs`) đưa `reqwest::Error::to_string()` vào `AnchorError::Network`,
@@ -3195,6 +3197,7 @@ không tả nội dung `reason` ⇒ không đổi hợp đồng dây.
 Kiểm: `loi_mang_khong_cho_url_vao_than_phan_hoi` (Blockfrost qua cổng đóng `127.0.0.1:1`, đối
 chứng rằng chuỗi `reqwest` gốc CÓ chở host + địa chỉ) và `cua_khong_voi_toi_duoc_la_loi_retryable`
 mở rộng cho cửa Mosaic. Đột biến trả lại chuỗi gốc ⇒ cả hai đỏ.
+
 ### 29.3 `#107` — `_dirty` có trần mặc định, `_settlement_window` quét lần lượt
 
 `router()` không có `.layer(` nào, nên phép giới hạn phải nằm trong handler.
@@ -3223,3 +3226,44 @@ Kiểm: `dirty_limit_co_bien_ca_hai_dau` (unit), `settlement_window_quet_lan_luo
 (4 request song song ⇒ tối đa 1 lượt quét), `settlement_window_nguoi_goi_ngat_ket_noi_khong_mo_them_cho`
 (huỷ request khi lượt quét đang chạy ⇒ lượt sau vẫn không chồng). Đột biến semaphore 4 chỗ ⇒ ca
 thứ hai đỏ; đột biến giữ permit ở handler ⇒ ca thứ ba đỏ 3/3.
+
+### 29.4 `#109` — tiêu chí review "hai đường cùng mức" vào luật roadmap
+
+Ghi thành luật 4 ở `STRATA-ROADMAP.md` §5: ba câu kiểm được + phép thử một dòng. Áp ngay cho ba PR
+của vòng này, mỗi PR trả lời *"còn đường nào đọc cùng dữ liệu mà không đi qua hàng rào?"*:
+
+| PR | Hàng rào | Đường còn lại | Kết luận |
+|---|---|---|---|
+| `#110` (`#106`) | sàn `scan_limit` ở parse env | `SinkConfig` dựng thẳng bằng mã (thư viện), không qua parse | chưa phủ — đó là lớp 2 của `#106`, ghi ở 29.6 |
+| `#111` (`#108`) | `net_err` không chở URL | lượt gọi cửa Mosaic (`mosaic_door.rs`) | phủ trong cùng PR |
+| `#112` (`#107`) | trần `_dirty`, quét cửa sổ lần lượt | `head` · `version?at=` · `proof/*` | miễn: mỗi lượt đọc một ref trong bộ nhớ, không gọi sink (sink chỉ được gọi ở `anchor`, `_anchor_batch`, `_settlement_window`) |
+
+### 29.5 `#81` — câu `scan_window` đã chốt, hai chỗ còn hở trước khi viết mã
+
+Chủ spec chốt (`24/09`): gặp record không hiểu trong `scan_window` thì **bỏ qua · ĐẾM · KHAI tập
+kiểu đã hiểu**; vế khai land cùng hoặc trước vế đếm; trên đường GHI, record đọc được mà không hiểu
+là lỗi; `t` không cần trường version. Phạm vi mới của issue: (a) đường quét địa chỉ chưa tách ba
+câu trả lời ở tầng decode; (b) ba vế trên.
+
+Đo trước khi viết, hai chỗ chưa tự quyết được:
+
+1. **Vế khai nằm ở đâu.** `CheckpointDatum` là `{epoch, root, from_slot, to_slot}`
+   (`Core: mosaic/l1/src/checkpoint.rs`), và validator giải nó bằng
+   `expect next: CheckpointDatum = inline_datum(cont)` (`Core: mosaic/aiken/validators/strata_checkpoint.ak`).
+   Thêm trường vào datum ⇒ đổi type ⇒ xoay hash validator ⇒ phải vào đợt redeploy Mosaic. Đường
+   không đụng on-chain là gộp tập kiểu vào preimage của `root`; khi đó hai `root` khác nhau vẫn tách
+   được nguyên nhân khi dựng lại, nhưng không có trường nào đọc thẳng trên chuỗi. Cách mã hoá (số
+   phiên bản hay bitmap) cũng chưa chốt.
+2. **Ranh giới "không đọc được" trên đường GHI.** Câu chốt nói *đọc được mà không hiểu* (vd `t` lạ)
+   ⇒ lỗi. Còn record *không đọc được* (CBOR hỏng, `t=1` sai hình dạng) trong tx do **chính
+   publisher** chi thì chưa rõ. Nếu cũng là lỗi: một record hỏng cũ nằm trong cửa sổ quét sẽ khoá
+   đường ghi của mọi ref cho tới khi nó trôi ra ngoài `resolve_scan_limit`.
+
+### 29.6 Việc còn chờ sau vòng này
+
+| Việc | Vì sao chưa làm |
+|---|---|
+| `#106` lớp 2 — hai đường `resolve_*_via_address_scan` kiểm "đã quét hết" | ví publisher có nhiều tx hơn trần thì ref mới luôn ra `Ok(None)`; đổi thành lỗi là đổi hành vi đường ghi của chế độ mặc định ⇒ đi cùng `#81` (a) |
+| `#107` trần độ rộng cửa sổ | kẹt vòng checkpoint (29.3) — hỏi chủ spec |
+| `#107` mục 3 | PR spec `#114` (ghi hiện trạng xác thực + trần), chờ chủ spec review |
+| `#81` (a) + (b) | 29.5 |
