@@ -161,6 +161,19 @@ fn build_settlement(get: EnvGet<'_>) -> Result<SinkChoice, String> {
             .map_err(|e| format!("{SCAN_LIMIT_ENV} phải là số: {e}"))?,
         None => SinkConfig::default().resolve_scan_limit,
     };
+    // Sàn ở tầng parse (#106): `0` là số hợp lệ nên không nhánh lỗi nào ở dưới bắt được.
+    // `address_txs(.., 0)` trả rỗng mà không gọi mạng lần nào ⇒ `resolve` đọc lineage
+    // đã neo thành "chưa neo" ⇒ `publish_batch` đi nhánh `fresh`, gác INV-E7 không chạy.
+    // Từ chối chứ không hạ về mặc định: hạ về mặc định là sửa hộ một cấu hình sai
+    // trong im lặng, và lần sau người vận hành vẫn không biết mình đã gõ gì.
+    if scan_limit == 0 {
+        return Err(format!(
+            "{SCAN_LIMIT_ENV}=0: resolve sẽ không quét tx nào và đọc mọi lineage đã neo thành \
+             'chưa neo' ⇒ gác chống tụt seq (INV-E7) không chạy. Bỏ hẳn biến để dùng mặc định \
+             ({}), hoặc đặt một số dương.",
+            SinkConfig::default().resolve_scan_limit
+        ));
+    }
 
     // Mạng truyền XUỐNG, không đọc lại từ env thứ hai: nó nằm trong thông điệp operator
     // ký, và hai nguồn cho cùng một giá trị thì lệch nhau vào ngày không ai nhìn.
@@ -319,6 +332,29 @@ mod tests {
         e.push((BEACON_POLICY_ENV, "abcd"));
         e.push((BEACON_SUBMIT_ENV, "1"));
         assert!(build(&e).unwrap_err().contains(BEACON_POLICY_ENV));
+    }
+
+    /// #106: `0` qua được `parse::<usize>()` rồi tắt gác INV-E7 trong im lặng.
+    #[test]
+    fn scan_limit_bang_0_thi_khong_khoi_dong() {
+        for v in ["0", " 0 ", "00"] {
+            let mut e = full();
+            e.push((SCAN_LIMIT_ENV, v));
+            let err = build(&e).expect_err("scan_limit=0 PHẢI chặn khởi động");
+            assert!(
+                err.contains(SCAN_LIMIT_ENV) && err.contains("INV-E7"),
+                "{err}"
+            );
+        }
+    }
+
+    /// Đối chứng dương: sàn chỉ chặn `0`, không chặn số dương, và vắng biến vẫn là mặc định.
+    #[test]
+    fn scan_limit_duong_hoac_vang_thi_qua() {
+        let mut e = full();
+        e.push((SCAN_LIMIT_ENV, "1"));
+        build(&e).expect("scan_limit=1 hợp lệ");
+        build(&full()).expect("vắng biến ⇒ mặc định");
     }
 
     #[test]

@@ -3158,3 +3158,23 @@ Roadmap đã sửa ô S6, S9 và thêm dòng cập nhật `21–22/09`.
 PR `#69` không sửa ô S6 vì lúc đó việc được ghi dưới tên *"§14.9 việc chặn"*, không dưới tên S6.
 Việc land dưới một cái tên khác thì ô milestone không ai nhớ mà sửa. ⇒ mỗi vòng dọn hàng, đo từng ô
 "CHƯA BẮT ĐẦU" bằng `git log -S`/`grep` trước khi trích nó.
+
+## §29. Vòng `24/09` — bốn issue mới (`#106`–`#109`) và câu chốt `#81`
+
+Chủ spec mở bốn issue trên `main` `7a5cbf0` và trả lời `#81`. Mỗi vá đi một PR riêng, mỗi PR mang
+một mục dưới đây. Việc nào còn chờ spec thì ghi ở 29.6.
+
+### 29.1 `#106` lớp 1 — `STRATA_RESOLVE_SCAN_LIMIT=0` bị từ chối lúc khởi động
+
+Đường hỏng: `parse::<usize>()` nhận `"0"` (`node/src/sink_config.rs`) ⇒ `address_txs(.., 0)` không
+chạy vòng lặp nào, 0 lượt gọi mạng ⇒ hai đường `resolve` quét địa chỉ trả `Ok(None)` cho lineage đã
+neo ⇒ `publish_batch` đi nhánh `fresh`, gác INV-E7 không chạy. Cùng giá trị, `scan_window` thì
+trả `Rejected`.
+
+Vá: sàn ngay sau parse, `0` ⇒ không khởi động, thông điệp nêu hệ quả (gác INV-E7) chứ không chỉ
+nói "không hợp lệ". Không hạ về mặc định, vì hạ về mặc định là sửa hộ cấu hình sai trong im lặng.
+
+Kiểm: `scan_limit_bang_0_thi_khong_khoi_dong` (`"0"`, `" 0 "`, `"00"`) và đối chứng dương
+`scan_limit_duong_hoac_vang_thi_qua`. Gỡ tạm sàn ⇒ ca thứ nhất đỏ.
+
+Lớp 2 (hai đường `resolve` dùng chung phép kiểm "đã quét hết" với `scan_window`) chưa làm, xem 29.6.
