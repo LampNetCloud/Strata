@@ -152,11 +152,44 @@ fn path<T>(r: Result<Path<T>, PathRejection>) -> ApiResult<T> {
         .map_err(|e| ApiError::Malformed(e.body_text()))
 }
 
-/// Query của [`dirty`]. `limit` vắng ⇒ trả tất cả.
+/// Query của [`dirty`]. `limit` vắng ⇒ [`DIRTY_MAX_LIMIT`]; lớn hơn trần ⇒ cũng về trần.
 #[derive(Debug, Deserialize)]
 pub struct DirtyQuery {
     pub limit: Option<usize>,
 }
+
+/// Trần số ref một lượt `_dirty` trả về (#107).
+///
+/// Trước đây `limit` vắng nghĩa là *"trả tất cả"*, trong khi `limit=0` bị từ chối là vô
+/// nghĩa: ca bị chặn là ca trả ít nhất, ca được nhận là ca trả nhiều nhất. Nay cả hai
+/// đầu đều có biên. Cắt thì `truncated = true` như mọi lượt cắt khác, và thứ tự cũ-trước
+/// nghĩa là phần bị cắt là phần chờ **ngắn** nhất.
+///
+/// Trần không giới hạn công đọc (`dirty_blocking` vẫn duyệt cả store để xếp thứ tự),
+/// nó giới hạn thân phản hồi. Bên tiêu thụ hiện hành (`Core: mosaic/l1`) gom lô vài ref
+/// mỗi tx, nên 1000 cao hơn nhu cầu một lượt nhiều bậc.
+pub const DIRTY_MAX_LIMIT: usize = 1000;
+
+/// `limit` người gọi khai ⇒ số ref tối đa thật sự trả.
+fn dirty_limit(requested: Option<usize>) -> usize {
+    requested.map_or(DIRTY_MAX_LIMIT, |n| n.min(DIRTY_MAX_LIMIT))
+}
+
+/// Mỗi lúc chỉ MỘT lượt quét `_settlement_window` được gọi thượng nguồn (#107).
+///
+/// Một lượt quét tốn tới `1 + ceil(L/100) + 3L` lượt gọi Blockfrost (`L =
+/// resolve_scan_limit`, mặc định 500 ⇒ ~1.506), và route không xác thực. Không có hàng
+/// này thì N người gọi song song là N lần con số đó cùng lúc. Người gọi hợp lệ duy nhất
+/// là vòng checkpoint (nhịp ≥ 60 s), nên xếp hàng không làm chậm nó.
+///
+/// Chủ ý **xếp hàng** chứ không từ chối khi bận: từ chối là thêm một mã lỗi mới trên dây.
+/// Và chủ ý **không** đặt trần độ rộng cửa sổ: `from_slot` phía Mosaic cố định bằng
+/// `to_slot` của chu kỳ trước, nên sau một lần ngừng, cửa sổ kế tiếp rộng hơn nhịp
+/// thường — trần độ rộng sẽ kẹt luồng checkpoint ở đúng lúc nó cần đuổi kịp.
+///
+/// Semaphore là `static` ⇒ dùng chung cho mọi `router()` trong cùng tiến trình, kể cả
+/// bản mounted: chúng dùng chung một hạn mức Blockfrost.
+static WINDOW_SCAN: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 /// Query của `GET /v1/strata/_settlement_window`.
 ///
@@ -886,18 +919,19 @@ async fn dirty(
     Query(q): Query<DirtyQuery>,
 ) -> ApiResult<Json<DirtyResp>> {
     if let Some(0) = q.limit {
-        return Err(ApiError::Malformed(
-            "limit=0 vô nghĩa: bỏ hẳn tham số nếu muốn lấy tất cả".into(),
-        ));
+        return Err(ApiError::Malformed(format!(
+            "limit=0 vô nghĩa: bỏ hẳn tham số để lấy tới {DIRTY_MAX_LIMIT} ref"
+        )));
     }
-    tokio::task::spawn_blocking(move || dirty_blocking(&st, q.limit))
+    let limit = dirty_limit(q.limit);
+    tokio::task::spawn_blocking(move || dirty_blocking(&st, limit))
         .await
         .map_err(|e| ApiError::Malformed(format!("tác vụ đọc _dirty hỏng: {e}")))
         .map(Json)
 }
 
 /// Phần THUẦN của [`dirty`] — không async, không I/O ngoài việc khoá từng ref.
-fn dirty_blocking(st: &AppState, limit: Option<usize>) -> DirtyResp {
+fn dirty_blocking(st: &AppState, limit: usize) -> DirtyResp {
     let mut out: Vec<DirtyRefResp> = Vec::new();
 
     for (ref_id, entry) in st.store.all() {
@@ -946,10 +980,8 @@ fn dirty_blocking(st: &AppState, limit: Option<usize>) -> DirtyResp {
             .then_with(|| a.ref_id.cmp(&b.ref_id))
     });
 
-    let truncated = matches!(limit, Some(n) if out.len() > n);
-    if let Some(n) = limit {
-        out.truncate(n);
-    }
+    let truncated = out.len() > limit;
+    out.truncate(limit);
 
     DirtyResp {
         count: out.len(),
@@ -993,9 +1025,20 @@ async fn settlement_window(
             q.from_slot, q.to_slot
         )));
     }
-    let scan = tokio::task::spawn_blocking(move || st.sink.scan_window(q.from_slot, q.to_slot))
+    // Permit đi VÀO closure blocking: người gọi ngắt kết nối ⇒ future này bị huỷ, nhưng
+    // lượt quét đã chạy thì vẫn chạy tới cùng — permit giữ ở đây sẽ được trả sớm và mở
+    // chỗ cho lượt quét thứ hai chồng lên. Người gọi bỏ đi lúc còn CHỜ thì không chiếm
+    // chỗ nào. `acquire` chỉ lỗi khi semaphore bị đóng, mà `static` thì không ai đóng.
+    let permit = WINDOW_SCAN
+        .acquire()
         .await
-        .map_err(|e| ApiError::Malformed(format!("tác vụ quét cửa sổ hỏng: {e}")))??;
+        .map_err(|e| ApiError::Malformed(format!("hàng quét cửa sổ đã đóng: {e}")))?;
+    let scan = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        st.sink.scan_window(q.from_slot, q.to_slot)
+    })
+    .await
+    .map_err(|e| ApiError::Malformed(format!("tác vụ quét cửa sổ hỏng: {e}")))??;
 
     let anchors: Vec<WindowAnchorResp> = scan
         .anchors
@@ -1184,6 +1227,15 @@ fn anchor_batch_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #107: `limit` vắng không còn là "trả tất cả"; `limit` quá trần cũng về trần.
+    #[test]
+    fn dirty_limit_co_bien_ca_hai_dau() {
+        assert_eq!(dirty_limit(None), DIRTY_MAX_LIMIT);
+        assert_eq!(dirty_limit(Some(usize::MAX)), DIRTY_MAX_LIMIT);
+        assert_eq!(dirty_limit(Some(DIRTY_MAX_LIMIT + 1)), DIRTY_MAX_LIMIT);
+        assert_eq!(dirty_limit(Some(7)), 7);
+    }
 
     /// `ts` giây thật của hôm nay (2026) — mốc "phải qua" trong mọi ca dưới đây.
     const TS_SECS_TODAY: u64 = 1_786_000_000;

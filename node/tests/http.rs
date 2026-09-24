@@ -1416,6 +1416,109 @@ async fn settlement_window_tra_dung_hinh_dang_la() {
     assert_eq!(a["txid"], "txaa");
 }
 
+/// Sink đếm số lượt quét đang chạy cùng lúc — mỗi lượt giữ chỗ một quãng ngắn.
+struct CountingWindowSink {
+    in_flight: std::sync::atomic::AtomicUsize,
+    max_seen: std::sync::atomic::AtomicUsize,
+}
+
+impl lampnet_strata::AnchorSink for CountingWindowSink {
+    fn publish(
+        &self,
+        _a: &lampnet_strata::chain::StrataAnchor,
+        _p: lampnet_strata::AnchorPriority,
+    ) -> Result<Option<lampnet_strata::anchor_sink::AnchorReceipt>, lampnet_strata::AnchorError>
+    {
+        Ok(None)
+    }
+    fn resolve(
+        &self,
+        _r: &Hash32,
+    ) -> Result<Option<lampnet_strata::chain::StrataAnchor>, lampnet_strata::AnchorError> {
+        Ok(None)
+    }
+    fn scan_window(
+        &self,
+        from_slot: u64,
+        to_slot: u64,
+    ) -> Result<lampnet_strata::anchor_sink::WindowScan, lampnet_strata::AnchorError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+        self.max_seen.fetch_max(now, SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        self.in_flight.fetch_sub(1, SeqCst);
+        Ok(lampnet_strata::anchor_sink::WindowScan {
+            from_slot,
+            to_slot,
+            tip_slot: 900,
+            scanned_txs: 0,
+            anchors: vec![],
+        })
+    }
+}
+
+/// #107: route không xác thực, một lượt quét tốn tới ~1.500 lượt gọi thượng nguồn ⇒
+/// N người gọi song song KHÔNG được thành N lượt quét cùng lúc. Họ xếp hàng, và ai
+/// cũng nhận đúng kết quả của mình.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settlement_window_quet_lan_luot_khong_chong_nhau() {
+    let sink = Arc::new(CountingWindowSink {
+        in_flight: 0.into(),
+        max_seen: 0.into(),
+    });
+    let (app, _) = app_with(sink.clone());
+    let calls = (0..4u64).map(|i| {
+        let app = app.clone();
+        tokio::spawn(async move {
+            let uri = format!(
+                "/v1/strata/_settlement_window?from_slot={}&to_slot={}",
+                100 + i,
+                200 + i
+            );
+            call(&app, "GET", &uri, None).await
+        })
+    });
+    for (i, h) in calls.collect::<Vec<_>>().into_iter().enumerate() {
+        let (st, v) = h.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["from_slot"], 100 + i as u64);
+    }
+    assert_eq!(
+        sink.max_seen.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "hai lượt quét chạy chồng nhau"
+    );
+}
+
+/// Người gọi ngắt kết nối khi lượt quét của nó ĐANG chạy ⇒ lượt quét vẫn chạy tới cùng,
+/// nên chỗ của nó chưa được trả. Permit giữ ở future của handler thì bị trả ngay lúc
+/// huỷ, và "gửi rồi ngắt" mở được bao nhiêu lượt quét song song cũng được.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settlement_window_nguoi_goi_ngat_ket_noi_khong_mo_them_cho() {
+    let sink = Arc::new(CountingWindowSink {
+        in_flight: 0.into(),
+        max_seen: 0.into(),
+    });
+    let (app, _) = app_with(sink.clone());
+    let uri = "/v1/strata/_settlement_window?from_slot=100&to_slot=200";
+    let first = {
+        let app = app.clone();
+        tokio::spawn(async move { call(&app, "GET", uri, None).await })
+    };
+    // Chờ tới khi lượt quét thứ nhất THẬT SỰ đang chạy rồi mới huỷ.
+    while sink.in_flight.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    first.abort();
+    let (st, v) = call(&app, "GET", uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        sink.max_seen.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "huỷ request đã trả chỗ trong khi lượt quét của nó còn chạy"
+    );
+}
+
 /// Quét không phủ hết ⇒ **lỗi**, không phải danh sách ngắn. Một `root` tính trên tập
 /// thiếu vẫn hợp lệ về hình thức và vẫn chốt lên chuỗi được — không gì bật ra.
 #[tokio::test]
