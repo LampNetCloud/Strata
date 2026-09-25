@@ -1,6 +1,6 @@
 # Strata — Roadmap thực thi
 
-> **Repo:** `LampNetCloud/Strata` (Rust) · **Cập nhật:** 2026-09-24
+> **Repo:** `LampNetCloud/Strata` (Rust) · **Cập nhật:** 2026-09-25
 > **Strata** = tầng lưu trữ tiến hóa của MagicLamp: chuỗi version hash-link + MMR + `state_root` field-Merkle + anchor on-chain + audit-log.
 > **Spec nguồn:** `spec/_CONTRACT.md` (khế ước giao diện) + `spec/Strata-Feat/Math/Tech/API.md`.
 > **Theo dõi công việc:** issue `#1` (S1) · `#2` (S2) · `#3` (S3) · `#24` (S7: CI + fmt drift).
@@ -127,6 +127,18 @@ Mô tả trong comment issue lệch với `spec/_CONTRACT.md` hiện tại — c
 | **`#108`** thân 503 chở URL thượng nguồn | ✅ **ĐÓNG** — `#111` (cả đường cửa Mosaic) | — |
 | **`#109`** tiêu chí review hai-đường-cùng-mức | ✅ **ĐÓNG** — `#113`, luật 4 dưới đây | — |
 | **`#81`** | 🟡 câu `scan_window` đã chốt: **bỏ qua · ĐẾM · KHAI tập kiểu đã hiểu** | (b3) đổi `CheckpointDatum` on-chain ⇒ chờ cách mã hoá; (a) ranh giới "không đọc được" trên đường ghi — hỏi chủ spec |
+
+> **Cập nhật `25/09`** (report **§30**) — chủ spec chốt `#39` điểm 2, `#77`, `#80`, `#84` trên `main` `6a8eb66` và mở hai PR spec `#116` · `#120`. Đã merge `#114` (`e6c6049`), `#121` (`70c65b1`), `#122` (`c749f06`); đóng `#107`. `main`: **331 pass / 0 fail / 1 ignored**.
+
+| issue | trạng thái `25/09` | phần còn lại |
+|---|---|---|
+| **`#107`** route đọc không trần | ✅ **ĐÓNG** — `#112` + `#114` | trần tần suất theo người gọi đi theo `#77` |
+| **`#39`** điểm 2 | 🟡 chủ spec chốt hướng (c): khử trùng là nghĩa vụ bên gọi | chữ spec ở `#116`; ảnh chụp bề mặt công khai trong CI + dòng `BREAKING` (tự làm, chưa làm) |
+| **`#84`** | 🟡 did trùng ⇒ `400` + trần 64 author ở cửa `create`: `#121` | `_canonical` trả `policy_hash` + `policy_authors` theo `#116` |
+| **`#77`** | 🟡 trần 69 ref ở cửa `_anchor_batch`: `#122` | `anchor_auth` theo `#120` (trường `AnchorAuth` bắt buộc trong `AppState`, 3 mã `403`) |
+| **`#80`** | 🟡 chủ spec chốt `nonce` + `expiry`, `TTL 600` + `S 300` | chữ ở `#116`; mã chạm cả cửa Mosaic ở `VeDataIO/Core` |
+| PR spec **`#116`** · **`#120`** | đã soát, khớp mã | một câu trỏ sai chỗ vá ca `seq` khổng lồ ("validator ép `seq' = seq + 1`") — đã nêu, chờ chủ spec (report §30.5) |
+| **`#115`** · **`#117`** · **`#118`** · **`#119`** (mở `25/09`) | chưa soát | — |
 
 ### Ba luật rút ra, áp cho mọi milestone sau
 

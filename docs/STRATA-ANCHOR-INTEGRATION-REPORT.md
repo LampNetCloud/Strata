@@ -3267,3 +3267,114 @@ câu trả lời ở tầng decode; (b) ba vế trên.
 | `#107` trần độ rộng cửa sổ | kẹt vòng checkpoint (29.3) — hỏi chủ spec |
 | `#107` mục 3 | PR spec `#114` (ghi hiện trạng xác thực + trần), chờ chủ spec review |
 | `#81` (a) + (b) | 29.5 |
+
+## §30. Vòng `25/09` — bốn câu chốt của chủ spec (`#39` `#77` `#80` `#84`), hai PR spec, hai vá mã
+
+Chủ spec trả lời cùng lúc trên `main` `6a8eb66`: chốt `#39` điểm 2, `#77`, `#80`, `#84`, soát lại
+`#112` và duyệt `#114`, rồi mở hai PR spec: `#116` (bốn chốt `#39` · `#81` · `#80` · `#84`) và `#120`
+(`anchor_auth` cho `#77`). Vòng này làm phần thuần mã mà các câu chốt cho land độc lập, soát hai PR
+spec, và đóng `#114`. Đã merge: `#114` (`e6c6049`), `#121` (`70c65b1`), `#122` (`c749f06`);
+đóng `#107`. `main` sau vòng: **331 pass / 0 fail / 1 ignored**.
+
+### 30.1 Các câu chốt, tóm tắt
+
+| issue | chốt | phần land được ngay (thuần mã) | phần chờ spec merge |
+|---|---|---|---|
+| `#39` điểm 2 | hướng (c): khử trùng `field_key` là nghĩa vụ **bên gọi**; `build_state_root` giữ `-> Hash32`, không thêm `DuplicateFieldKey` | ảnh chụp bề mặt công khai của crate trong CI + dòng `BREAKING` ở nhật ký thay đổi | ba chỗ chữ trong `#116`; sau đó `#39` không còn vế mở |
+| `#77` | một phép kiểm chung cho `/anchor` và `_anchor_batch`; chủ thể = allow-list khoá dịch vụ bên điều phối; `AppState` có trường `AnchorAuth` bắt buộc | trần `refs` ở cửa (30.3) | hình dạng dây trong `#120`, rồi mã xác thực |
+| `#80` | `nonce` + `expiry` vào tiền ảnh operator; `TTL = 600`, `S = 300`, cửa sổ nhận `TTL + S = 900` (không phải `2S`: tập nghiệm rỗng ở `S = 300`) | — | chữ trong `#116`; mã chạm cả cửa Mosaic ở `VeDataIO/Core` |
+| `#84` | `_canonical` trả tập `(did, pk)` đã phân giải, sắp tăng dần theo `did` | did trùng ⇒ `400`, trần số author (30.2) | hình dạng trả mới trong `#116` |
+
+Đính chính của chủ spec ở `#77`: `scripts/orilife_handshake.py` **không** gọi `/anchor` (chỉ gọi
+`_canonical`), nên gộp `/anchor` vào cùng phép kiểm gần như không tốn công di trú.
+
+### 30.2 `#84` mục 2 + 3 — `policy_authors` trùng did bị từ chối, có trần (`#121`, `70c65b1`)
+
+`Policy::allow` là `BTreeMap::insert` ⇒ `[A, A, B]` thành policy `{A, B}` và một `policy_hash`
+không phản ánh thứ đã gửi, không lỗi nào bật ra. Nay `400 MalformedRequest`, so trùng trên 32 byte đã
+giải mã (hex hoa và thường là cùng một did). Trần `MAX_POLICY_AUTHORS = 64`, kiểm trước vòng
+`registry.resolve`.
+
+Chỗ đặt gác là quyết định có hệ quả vận hành: **handler `create`, không trong `create_inner`**.
+`create_inner` là đường replay nhật ký, và mọi lỗi lúc replay là từ chối khởi động. Đặt gác vào đó
+thì một daemon đã lỡ nhận một `Create` có did trùng sẽ không lên được sau khi nâng cấp. Replay bản ghi
+cũ vẫn ra đúng trạng thái đã trả `200`, vì map khử trùng y hệt lúc nhận — gác là luật nhận request
+mới, không đổi trạng thái của bản ghi cũ.
+
+Kiểm (mỗi ca chọn để phân biệt hai cực):
+
+| Bài | Có gác | Tắt gác |
+|---|---|---|
+| `[DID, DID2]` (đối chứng dương) | 200 | 200 |
+| `[DID, DID, DID2]`, chữ ký + `policy_hash` đúng | 400 | 200 |
+| `[DID, DID hoa, DID2]` | 400 | 200 |
+| 65 did chưa đăng ký | 400 | 424 `UnknownAuthor` |
+| replay một `Create` có did trùng | lên | — |
+
+Đột biến dời gác vào `create_inner` ⇒ bài replay đỏ. Nhánh: **328 pass / 0 fail / 1 ignored**
+(`main` 323), clippy `-D warnings` 0, `fmt --check` sạch.
+
+### 30.3 `#77` mục 3 gạch 4 — trần `refs` ở cửa `_anchor_batch` (`#122`, `c749f06`)
+
+Không trần thì lô mười nghìn ref đi hết đường tra store và giữ khoá từng ref rồi mới gặp trần byte
+8 KiB ở sink. Con số "~74" trong issue chỉ đúng khi mọi `seq < 24`. Đo trên `encode_records`:
+
+| `seq` | byte / record | số record lớn nhất vừa 8 KiB |
+|---|---|---|
+| `< 24` | 111 | 74 |
+| `24 … 65 535` | 112–113 | 73 |
+| `65 536 … 2³²−1` | 115 | 71 |
+| `u64::MAX` | 119 | 69 |
+
+`MAX_BATCH_REFS = 69` (cận xấu nhất): lô nào qua cửa cũng vừa trần byte. Bài
+`tran_refs_la_so_lon_nhat_vua_8kib_o_seq_xau_nhat` đo lại con số trên `encode_records` thật so với
+`SinkConfig::default().max_metadatum_bytes`. 70 ref lạ ⇒ `400` (tắt gác ⇒ `404`), 69 ref lạ ⇒ qua
+cửa. Nhánh: **326 pass / 0 fail / 1 ignored**.
+
+Chưa làm: trần tần suất theo người gọi — cần định danh người gọi (phần xác thực của `#77`).
+
+### 30.4 `#114` — thêm hai câu chủ spec đề nghị rồi merge (`e6c6049`); đóng `#107`
+
+Chủ spec duyệt "Đạt" kèm hai câu, cả hai là chỗ câu hiện tại đúng nhưng chưa đủ để người đọc rút ra
+hệ quả:
+
+1. nghĩa vụ "bản gắn vào tiến trình chủ tự đặt lớp gác" **không** được cưỡng chế bởi kiểu hay cổng
+   khởi động; cưỡng chế bằng kiểu là mục mở ở `#77`;
+2. `_settlement_window` một-lượt-mỗi-lúc chặn **độ song song**, không chặn **tổng chi phí** (1 506 lượt
+   gọi mỗi request ở `L = 500`, tuần tự vẫn cộng dồn) và độ sâu hàng đợi không có trần.
+
+Với `#114` merge, cả ba hướng vá của `#107` đã land (hướng trần độ rộng cửa sổ thay bằng quét lần
+lượt, chủ spec đồng ý bỏ ở comment `#112`) ⇒ đóng `#107`. Trần tần suất theo người gọi đi theo `#77`.
+
+### 30.5 Soát `#116` và `#120` — một câu trỏ sai chỗ vá
+
+Hai PR khớp mã ở mọi con trỏ đã đối chiếu, ba cặp PR spec (`#114`/`#116`/`#120`) ghép với nhau
+không xung đột. Một câu lặp ở cả hai PR (và ở comment `#80` mục 3): *"chỗ vá ca `seq` khổng lồ là
+validator ép `seq' = seq + 1` thay vì `seq' > seq`"*. Đo được:
+
+1. Validator duy nhất có kiểm `seq` — `VeDataIO/Core: mosaic/aiken/validators/strata_anchor.ak`
+   (Mosaic-A CIP-68) — **đã** ép `== seq + 1` (T4, có `spend_rejects_seq_skip` và property).
+2. Đường ca `seq` khổng lồ đi qua là cửa `/mosaic/v1/strata-anchor-batch`, đẩy **metadata label
+   1234** theo beacon-walk; không có validator nào, và `Core: mosaic/l1/src/door.rs` tự khai là cửa
+   không kiểm INV-E7.
+3. Đặt đúng phép `seq' == seq + 1` ở cửa thì chặn cả lô trung thực: `seq` của neo là `head().seq`
+   (`src/chain.rs`), `publish_anchor` chỉ đòi `>`, nên lineage có ba version giữa hai lần neo
+   `batch_daily` nhảy `2 → 5`. Chỉ sink Mosaic-A cấm nhảy (`tests/anchor_sink.rs`, bài
+   `seq_gap_rejected_before_building_tx`).
+
+Đã nêu dưới `#116` và `#120` kèm ba hướng để chủ spec chọn; hai PR đó chưa merge, chờ câu này.
+
+Cũng ghi nhận: khối `grep` trong body `#116` in `publish_anchor()` ở `:856`/`:1198` "trên
+`6a8eb66`", còn `6a8eb66` cho `:823`/`:1155`. Chữ spec không ghim số dòng nên không ảnh hưởng.
+
+### 30.6 Việc còn lại sau vòng này
+
+| việc | chờ gì |
+|---|---|
+| `#39` — ảnh chụp bề mặt công khai + `BREAKING` changelog | tự làm được; cần chọn công cụ (`cargo public-api` cần nightly) |
+| `#39` đóng | `#116` merge |
+| `#84` hình dạng trả `_canonical` + gọi `check_policy_authors` ở đó | `#116` merge |
+| `#80` mã (`nonce`/`expiry` hai đầu Strata ↔ cửa Mosaic) | `#116` merge; phía cửa ở `VeDataIO/Core` |
+| `#77` mã `anchor_auth` | `#120` merge |
+| câu `seq' = seq + 1` | chủ spec chọn hướng (30.5) |
+| `#115` `#117` `#118` `#119` (mở `25/09`) | chưa soát trong vòng này |
