@@ -199,6 +199,62 @@ fn lock_exclusive(_file: &File, _path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+/// Cắt đuôi rách: tệp có byte mà byte cuối khác `\n` ⇒ `set_len` về ngay sau `\n` cuối cùng
+/// (về `0` nếu không có `\n` nào), rồi `sync_data`. Trả số byte đã cắt.
+///
+/// Vì sao phải cắt chứ không chỉ bỏ qua lúc đọc (#117): [`read_records`] bỏ dòng rách cho
+/// lần khởi động ĐÓ, nhưng tệp mở ở chế độ nối nên lượt ghi kế tiếp dính ngay sau các byte
+/// rách, không có `\n` ở giữa. Bản ghi mới — đã trả `200` — và nửa bản ghi cũ thành MỘT dòng
+/// không phải JSON, và lần khởi động sau từ chối lên. Lần một đạt, lần hai chết.
+///
+/// Ba ràng buộc thứ tự, mỗi cái giữ một tính chất:
+/// 1. **sau khi giành khoá** — cắt trước khoá là hai tiến trình cùng cắt một tệp;
+/// 2. **trước lượt ghi đầu tiên**, kể cả header — header cũng là một lượt nối;
+/// 3. **`sync_data` sau khi cắt** — mất điện ngay sau đó không được để tệp về trạng thái cũ.
+///
+/// Đo bằng **byte cuối**, không bằng đếm dòng: tệp kết thúc bằng `\n` là tệp nguyên vẹn.
+/// Byte bị cắt là lượt ghi chưa trả `200` — `append_many` chỉ trả sau `write_all` + `sync_data`
+/// của trọn các dòng, và một dòng chưa có `\n` là dòng chưa ghi xong.
+fn cut_torn_tail(file: &File, path: &Path) -> Result<u64, std::io::Error> {
+    use std::io::{Read, Seek, SeekFrom};
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(0);
+    }
+    let mut f = file; // `&File` đọc/seek được mà không cần `&mut File`
+    let mut b = [0u8; 1];
+    f.seek(SeekFrom::Start(len - 1))?;
+    f.read_exact(&mut b)?;
+    if b[0] == b'\n' {
+        return Ok(0);
+    }
+    // Quét lùi theo khối tìm `\n` cuối — không đọc cả tệp, nhật ký có thể lớn.
+    const CHUNK: u64 = 64 * 1024;
+    let mut keep = 0u64; // độ dài giữ lại = vị trí ngay sau `\n` cuối
+    let mut end = len;
+    let mut buf = vec![0u8; CHUNK as usize];
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let n = (end - start) as usize;
+        f.seek(SeekFrom::Start(start))?;
+        f.read_exact(&mut buf[..n])?;
+        if let Some(i) = buf[..n].iter().rposition(|&c| c == b'\n') {
+            keep = start + i as u64 + 1;
+            break;
+        }
+        end = start;
+    }
+    file.set_len(keep)?;
+    file.sync_data()?;
+    let cut = len - keep;
+    eprintln!(
+        "strata-node: nhật ký {} có đuôi rách — cắt {cut} byte (lượt ghi chưa hoàn tất, chưa \
+         từng trả 200), giữ {keep} byte",
+        path.display()
+    );
+    Ok(cut)
+}
+
 impl Journal {
     /// Mở (tạo nếu chưa có) nhật ký tại `path` và **giành khoá độc quyền** trên nó; khoá
     /// giữ suốt đời [`Journal`]. Tệp mới ⇒ ghi header.
@@ -215,6 +271,8 @@ impl Journal {
         // Giành khoá TRƯỚC lượt ghi đầu tiên: header cũng là một lượt ghi, và hai tiến
         // trình cùng thấy tệp rỗng sẽ cùng ghi hai header vào một tệp.
         lock_exclusive(&file, &path)?;
+        // Cắt đuôi rách SAU khoá và TRƯỚC lượt ghi đầu tiên (kể cả header) — #117.
+        cut_torn_tail(&file, &path)?;
         // ĐO `fresh` SAU KHI ĐÃ CÓ KHOÁ, và đo bằng ĐỘ DÀI chứ không bằng `Path::exists()`.
         // Hai lý do, cả hai đều đã dựng lại được:
         //   1. Đo trước khoá thì khoá không loại được ca nó sinh ra để loại — hai tiến trình

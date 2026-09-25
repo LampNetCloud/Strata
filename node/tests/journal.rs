@@ -368,6 +368,104 @@ async fn duoi_rach_bo_dung_dong_cuoi_va_phan_con_lai_van_song() {
     );
 }
 
+/// Khởi động như binary `strata-node`: `Journal::open` → `read_records` → replay → router.
+fn boot(path: &PathBuf) -> Result<Router, String> {
+    let j = Arc::new(Journal::open(path).map_err(|e| format!("mở nhật ký: {e}"))?);
+    let recs = read_records(path).map_err(|e| e.to_string())?;
+    let store = Arc::new(ChainStore::with_journal(j));
+    replay_into(&store, registry().as_ref(), &recs).map_err(|e| e.to_string())?;
+    Ok(router(AppState::new(
+        store,
+        registry(),
+        Arc::new(MemorySink::new()),
+    )))
+}
+
+/// #117. Rách → khởi động → GHI TIẾP qua cửa → khởi động lại. Không cắt đuôi thì lượt ghi
+/// thứ hai dính vào nửa dòng rách và lần khởi động sau chết, với một bản ghi đã trả `200`
+/// nằm trong dòng hỏng. Bài `duoi_rach_bo_dung_dong_cuoi…` ở trên xanh ở cả hai cực vì nó
+/// không có lượt ghi thứ hai.
+#[tokio::test]
+async fn duoi_rach_roi_ghi_tiep_thi_lan_khoi_dong_sau_van_len() {
+    let path = tmp_path("torn-then-write");
+    let (r, vh1) = {
+        let app = app_with_journal(&path);
+        let (r, vh0) = create_ok(&app).await;
+        let vh1 = append_ok(&app, &r, 0, vh0, 1_100).await;
+        (r, vh1)
+    };
+    // Dòng rách: nửa đầu của một bản ghi Append nữa, không có `\n`.
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(br#"{"op":"append","r":"00"#).unwrap();
+    }
+
+    let app = boot(&path).expect("lần khởi động MỘT");
+    let vh2 = append_ok(&app, &r, 1, vh1, 1_200).await; // đã trả 200
+    drop(app);
+
+    let raw = std::fs::read(&path).unwrap();
+    assert_eq!(raw.last(), Some(&b'\n'), "tệp phải kết thúc bằng \\n");
+
+    let app = boot(&path).expect("lần khởi động HAI phải lên");
+    let (st, head) = call(&app, "GET", &format!("/v1/strata/{r}/head"), None).await;
+    assert_eq!(st, StatusCode::OK, "{head}");
+    assert_eq!(head["head_seq"], 2, "{head}");
+    assert_eq!(head["head_version_hash"], hex::encode(vh2), "{head}");
+}
+
+/// Ranh giới: tệp CHỈ có một dòng rách, không có `\n` nào ⇒ cắt về `0`, rồi header mới được
+/// ghi như tệp mới.
+#[test]
+fn tep_chi_co_mot_dong_rach_thi_cat_ve_0_va_ghi_header() {
+    let path = tmp_path("torn-only");
+    std::fs::write(&path, br#"{"op":"header","for"#).unwrap();
+    let j = Journal::open(&path).expect("mở được");
+    drop(j);
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(raw.lines().count(), 1, "chỉ còn header: {raw:?}");
+    assert!(raw.ends_with('\n'));
+    assert!(read_records(&path).is_ok(), "tệp sau khi cắt phải đọc được");
+}
+
+/// Đuôi rách dài hơn một khối quét (64 KiB) ⇒ quét lùi qua nhiều khối vẫn tìm đúng `\n` cuối.
+#[tokio::test]
+async fn duoi_rach_dai_hon_mot_khoi_quet_van_cat_dung() {
+    let path = tmp_path("torn-long");
+    {
+        let app = app_with_journal(&path);
+        create_ok(&app).await;
+    }
+    let intact = std::fs::read(&path).unwrap();
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(&vec![b'x'; 100 * 1024]).unwrap();
+    }
+    drop(Journal::open(&path).unwrap());
+    assert_eq!(std::fs::read(&path).unwrap(), intact);
+}
+
+/// Tệp nguyên vẹn (kết thúc bằng `\n`) thì không bị đụng một byte.
+#[tokio::test]
+async fn tep_nguyen_ven_khong_bi_cat() {
+    let path = tmp_path("intact");
+    {
+        let app = app_with_journal(&path);
+        create_ok(&app).await;
+    }
+    let before = std::fs::read(&path).unwrap();
+    drop(Journal::open(&path).unwrap());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
 /// 🔴 Sửa một byte trong nhật ký ⇒ daemon **KHÔNG lên**.
 ///
 /// Đây là tính chất mà cách "tuần tự hoá trạng thái rồi nạp lại" **không** mua được: ở
