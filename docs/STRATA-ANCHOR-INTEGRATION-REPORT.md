@@ -3378,3 +3378,74 @@ Cũng ghi nhận: khối `grep` trong body `#116` in `publish_anchor()` ở `:85
 | `#77` mã `anchor_auth` | `#120` merge |
 | câu `seq' = seq + 1` | chủ spec chọn hướng (30.5) |
 | `#115` `#117` `#118` `#119` (mở `25/09`) | chưa soát trong vòng này |
+
+## §31. Vòng `25/09` (tiếp) — bốn issue mới `#115` `#117` `#118` `#119`
+
+Chủ spec mở bốn issue trên `main` `6a8eb66`, cả bốn thuần mã. Mỗi issue một PR, cả bốn đã merge và
+issue tự đóng: `#124` (`8570723`, `#117`) · `#125` (`77b8a07`, `#115`) · `#126` (`9ab1a3c`, `#118`) ·
+`#127` (`ae3f39b`, `#119`). `main` sau vòng: **351 pass / 0 fail / 1 ignored**.
+
+Ba PR thêm gác lên đường nhận request (`#118`, và trước đó `#121`) cùng theo một luật: gác đặt ở
+handler, **không** trong `create_inner`/`append_inner`/`to_pairs`, vì đó là đường replay nhật ký và
+mọi lỗi replay là từ chối khởi động. Mỗi PR có một bài replay bản ghi cũ để khoá luật này.
+
+### 31.1 `#117` — đuôi rách rồi ghi tiếp làm lần khởi động sau chết (`#124`)
+
+`read_records` bỏ dòng rách cho lần khởi động đó, nhưng `Journal::open` mở chế độ nối và không cắt gì,
+nên lượt ghi kế tiếp (đã trả `200`) dính vào nửa dòng rách. Vá: `cut_torn_tail` sau khi giành khoá,
+trước mọi lượt ghi kể cả header — byte cuối khác `\n` ⇒ `set_len` về sau `\n` cuối (về `0` nếu không
+có), `sync_data`, in số byte cắt. Quét lùi theo khối 64 KiB.
+
+Kiểm: rách → khởi động → ghi tiếp qua HTTP → khởi động lại → `head` đúng version vừa ghi (tắt phép cắt
+⇒ `nhật ký hỏng ở dòng 4`); tệp chỉ một dòng rách ⇒ về 0 + header; đuôi rách 100 KB; tệp nguyên vẹn
+không đổi byte.
+
+### 31.2 `#115` — nhãn metadata gõ cứng, và mức của lỗi (`#125`)
+
+`parse_top_level` so nhãn của nhánh map với hằng 1234 thay vì `cfg.label`. Issue xếp lỗi là
+fail-closed; đo thì **không**: ba nơi đọc (`resolve` quét địa chỉ và beacon, `resolve_many`,
+`scan_window`) đều đi qua `decode_records_lenient`, hàm đó nuốt `Err` thành rỗng ⇒ với nhãn khác 1234
+và nguồn bọc map, lineage đã neo bị đọc thành *"chưa neo"* — im lặng, và trên đường ghi thì gác
+INV-E7 không chạy. Đảo mã về so với hằng thì bài `resolve` ra `None`.
+
+Vá: `parse_top_level(cbor, label)` + `decode_records_lenient_for_label` (`pub(crate)`) cho ba nơi
+đọc. Hai hàm công khai giữ chữ ký và nhãn mặc định — bề mặt công khai không đổi. Câu spec *"nếu
+`label` không được thiết kế để đổi thì bỏ khỏi `SinkConfig`"* để chủ spec quyết; bản vá đúng với cả
+hai lựa chọn.
+
+### 31.3 `#118` — `value` 32 byte ở cửa, quyền tệp nhật ký (`#126`)
+
+- `create`, `version`, `event` (`kind = version`), `_canonical` từ chối `value` khác 32 byte (`400`,
+  thông điệp nêu độ dài). `AppState.field_value_len`, mặc định `Cid32` từ `AppState::new` ⇒ bản gắn
+  `router()` cũng chặt. Binary: `STRATA_FIELD_VALUE_LEN` vắng/`32` ⇒ chặt, `any` ⇒ nới + cảnh báo,
+  giá trị khác ⇒ từ chối khởi động.
+- Đếm bên gọi trước khi bật mặc định (ràng buộc trong issue): `orilife_e2e`, `dev_client`,
+  `orilife_handshake.py`, client OriLife (`strata_client.py`, tự kiểm 32 byte) đều gửi 32 byte; 332
+  bài có sẵn vẫn xanh khi bật.
+- Tệp nhật ký tạo mới mang `0600` (unix); tệp đã có giữ quyền. Bỏ `mode` ⇒ `644` (umask `0022`).
+- Mục 3 (`STRATA_NODE_ADDR` ngoài loopback) đã từ chối khởi động từ trước — không đổi.
+
+### 31.4 `#119` — đối chiếu chuỗi lúc khởi động (`#127`)
+
+`startup_check::check_against_chain`: một lượt `resolve_many` cho mọi ref, đối chiếu bằng đúng cặp
+gác của đường neo (`AnchoredTable::record_anchor` + `verify_resolved`). Lịch sử local không chứa
+hoặc không khớp anchor trên chuỗi ⇒ từ chối khởi động, liệt kê ref · seq trên chuỗi · head local ·
+gương. Backend neo tắt ⇒ bỏ qua có in lý do; lỗi thượng nguồn ⇒ từ chối; `STRATA_STARTUP_CHAIN_CHECK=off`
+⇒ bỏ qua có cảnh báo.
+
+Khác đề nghị của issue ở một chỗ: issue chặn khi *"chuỗi đi trước gương"*, nhưng ca chết giữa lúc
+tx neo lên chuỗi và lúc ghi bản ghi `Anchor` mang đúng hình dạng đó mà lịch sử vẫn đủ và khớp. Nên
+chặn theo **lịch sử**, còn gương tụt thì đếm và in ra. Có bài cho cả hai ca.
+
+Giới hạn khai trong PR: (1) kế thừa cửa sổ quét của `resolve_many` ở chế độ quét địa chỉ — anchor
+ngoài `resolve_scan_limit` đọc thành "chưa neo" (`#106` lớp 2); (2) bản gắn `router()` không tự chạy
+phép này.
+
+### 31.5 Còn lại sau vòng
+
+| việc | chờ gì |
+|---|---|
+| `#106` lớp 2 — phép kiểm "đã quét hết" cho `resolve` quét địa chỉ (nay cũng giới hạn `#119`) | đi cùng `#81` |
+| câu spec `#115` (giữ hay bỏ `SinkConfig::label`) | chủ spec |
+| dòng §3.1 cho `value ≠ 32 byte` (nếu cần tách khỏi "hex sai độ dài") | chủ spec |
+| PR spec `#116` · `#120` | chủ spec sửa câu `seq' = seq + 1` (§30.5) |

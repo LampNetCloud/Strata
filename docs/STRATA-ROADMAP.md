@@ -140,6 +140,15 @@ Mô tả trong comment issue lệch với `spec/_CONTRACT.md` hiện tại — c
 | PR spec **`#116`** · **`#120`** | đã soát, khớp mã | một câu trỏ sai chỗ vá ca `seq` khổng lồ ("validator ép `seq' = seq + 1`") — đã nêu, chờ chủ spec (report §30.5) |
 | **`#115`** · **`#117`** · **`#118`** · **`#119`** (mở `25/09`) | chưa soát | — |
 
+> **Cập nhật `25/09` (tiếp)** (report **§31**) — bốn issue mới `#115` `#117` `#118` `#119` đều ĐÓNG: `#125` · `#124` · `#126` · `#127`. `main`: **351 pass / 0 fail / 1 ignored**. Luật đi kèm: gác nhận request mới đặt ở handler, không trên đường replay nhật ký.
+
+| issue | trạng thái | ghi chú |
+|---|---|---|
+| **`#117`** đuôi rách + ghi tiếp | ✅ **ĐÓNG** — `#124` | `Journal::open` cắt đuôi rách sau khoá, trước lượt ghi đầu |
+| **`#115`** nhãn metadata gõ cứng | ✅ **ĐÓNG** — `#125` | lỗi là im lặng (lenient nuốt `Err`), không phải fail-closed như issue ghi; câu spec giữ/bỏ `SinkConfig::label` chờ chủ spec |
+| **`#118`** `value` 32 byte + quyền nhật ký | ✅ **ĐÓNG** — `#126` | mặc định chặt, `STRATA_FIELD_VALUE_LEN=any` để nới; tệp mới `0600` |
+| **`#119`** khởi động không đối chiếu chuỗi | ✅ **ĐÓNG** — `#127` | chặn theo lịch sử, không theo gương; kế thừa giới hạn quét của `#106` lớp 2 |
+
 ### Ba luật rút ra, áp cho mọi milestone sau
 
 1. **Gác có mã + có test vẫn có thể chưa bao giờ chạy.** `verify_resolved` có 5 ca kiểm và **0** call site sản xuất trong nhiều tháng. Lớp lỗi này không phát hiện được bằng đọc mã từng tệp — mỗi tệp đều đúng, mỗi test đều xanh. Phép đo rẻ: **đếm call site ngoài `tests/`**.
