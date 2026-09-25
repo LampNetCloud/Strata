@@ -1107,6 +1107,16 @@ async fn settlement_window(
     }))
 }
 
+/// Trần số `refs` một lô ở cửa `_anchor_batch` (#77 mục 3 gạch 4).
+///
+/// Không trần thì một lô mười nghìn ref đi hết đường tra `store` và giữ khoá từng ref rồi
+/// mới gặp trần byte metadata (`SinkConfig::max_metadatum_bytes` = 8 KiB) ở sink. 69 là số
+/// record label 1234 lớn nhất vừa 8 KiB ở `seq` XẤU NHẤT (`u64::MAX`, CBOR 9 byte): lô nào
+/// qua cửa này cũng vừa trần byte. Con số hay gặp "~74" chỉ đúng khi mọi `seq < 24`
+/// (seq ≥ 24 ⇒ 73, ≥ 65 536 ⇒ 71). Bài `tran_refs_la_so_lon_nhat_vua_8kib_o_seq_xau_nhat`
+/// đo lại con số này trên `encode_records` thật — đổi encoding hay trần byte thì bài đó đỏ.
+pub const MAX_BATCH_REFS: usize = 69;
+
 /// `POST /v1/strata/_anchor_batch` — neo N ref trong MỘT tx.
 ///
 /// Đây là cửa mà `BatchCoordinator` phía Mosaic đi vào. Phân vai (đã chốt ở
@@ -1152,6 +1162,14 @@ fn anchor_batch_blocking(
 ) -> ApiResult<AnchorBatchResp> {
     if refs.is_empty() {
         return Err(ApiError::Malformed("lô rỗng: cần ít nhất một ref".into()));
+    }
+    // Trước khi giải mã, tra store hay giữ khoá bất cứ ref nào — xem `MAX_BATCH_REFS`.
+    if refs.len() > MAX_BATCH_REFS {
+        return Err(ApiError::Malformed(format!(
+            "lô {} ref, trần {MAX_BATCH_REFS} (số record lớn nhất vừa 8 KiB metadata ở seq xấu \
+             nhất) — chia thành nhiều lô",
+            refs.len()
+        )));
     }
     let mut ids: Vec<Hash32> = refs
         .iter()
