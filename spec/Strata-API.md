@@ -197,7 +197,9 @@ gửi request. Các route đọc — `head` · `version?at=` · `proof/version` 
 được. Giới hạn đang có nằm trong handler: `_dirty` trần 1000 ref một lượt, `_settlement_window`
 quét lần lượt (mỗi lúc một lượt gọi thượng nguồn). `router()` là mountable: cổng khởi động
 `STRATA_NODE_EXPOSED` chỉ đứng ở binary `strata-node`, bản gắn vào tiến trình chủ phải tự đặt lớp
-gác. Ô xác thực cho đường ghi on-chain (`/anchor`, `/_anchor_batch`) là câu mở ở #77.
+gác. Nghĩa vụ này hiện **không** được cưỡng chế bởi kiểu hay bởi cổng khởi động: tiến trình chủ
+không đặt lớp gác vẫn biên dịch và chạy xanh. Cưỡng chế bằng kiểu (một trường bắt buộc trong
+`AppState`) là mục còn mở ở #77. Ô xác thực cho đường ghi on-chain (`/anchor`, `/_anchor_batch`) là câu mở ở #77.
 
 ### POST `/v1/strata/create`
 ```jsonc
@@ -451,7 +453,10 @@ phải quãng server tự chọn hôm đó. `to_slot <= from_slot` ⇒ `400`.
 Mỗi lúc chỉ **một** lượt quét chạy; request đến sau **xếp hàng**, không bị từ chối (#107). Một
 lượt tốn tới `1 + ceil(L/100) + 3L` lượt gọi Blockfrost (`L = resolve_scan_limit`). Độ rộng cửa
 sổ không có trần: phía Mosaic `from_slot` cố định bằng `to_slot` của chu kỳ trước, nên cửa sổ
-sau một lần ngừng rộng hơn nhịp thường.
+sau một lần ngừng rộng hơn nhịp thường. Cơ chế một-lượt-mỗi-lúc chặn **độ song song**, không chặn
+**tổng chi phí**: tổng lượt gọi thượng nguồn tỉ lệ với số request (ở `L = 500` là 1 506 lượt mỗi
+request, tuần tự vẫn cộng dồn), và độ sâu hàng đợi không có trần. Hàng rào cho hai đại lượng đó
+là trần tần suất theo người gọi, chưa có — nó cần định danh người gọi trước (#77).
 
 **Bốn trường anchor giữ ĐÚNG thứ tự canonical của `StrataAnchor`** (`ref_id ‖
 head_version_hash ‖ mmr_root ‖ seq`): bên tiêu thụ băm lại đúng 104 byte đó để dựng lá
