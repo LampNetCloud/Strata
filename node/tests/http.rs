@@ -386,6 +386,79 @@ async fn create_with_unregistered_did_is_424_unknown_author() {
     assert_eq!(b["error"], "UnknownAuthor");
 }
 
+/// Body `create` hai tác giả, ký đúng bằng khoá DID, `policy_hash` của `{DID, DID2}`.
+/// `authors` là danh sách chuỗi gửi lên nguyên văn — để ca trùng/hoa-thường gửi được đúng
+/// thứ nó muốn gửi.
+fn create_two_authors_body(authors: Vec<String>) -> Value {
+    let mut p = Policy::new();
+    p.allow(DID, sk(1).verifying_key());
+    p.allow(DID2, sk(2).verifying_key());
+    let sig = sign_version(
+        1,
+        0,
+        [0u8; 32],
+        b"\xca\xfe",
+        &[],
+        DID,
+        p.policy_hash(),
+        1_000,
+    );
+    json!({
+        "author_did": hex::encode(DID),
+        "genesis_nonce": hex::encode([0x44u8; 32]),
+        "content_cid": "cafe", "state_fields": [],
+        "policy_hash": hex::encode(p.policy_hash()),
+        "ts": 1_000, "sig": sig,
+        "policy_authors": authors,
+    })
+}
+
+/// Đối chứng DƯƠNG cho ba ca dưới: cùng body, không trùng ⇒ `200`. Thiếu ca này thì ba ca
+/// `400` dưới cũng xanh khi body hỏng vì lý do khác.
+#[tokio::test]
+async fn create_policy_authors_khong_trung_thi_nhan() {
+    let (app, _) = app();
+    let body = create_two_authors_body(vec![hex::encode(DID), hex::encode(DID2)]);
+    let (st, b) = call(&app, "POST", "/v1/strata/create", Some(body)).await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+}
+
+/// #84 mục 2. Trước gác: `[DID, DID, DID2]` được policy `{DID, DID2}` — `policy_hash` gửi lên
+/// khớp, chữ ký đúng ⇒ `200`, tức did trùng bị khử im lặng. Ca này đỏ ở cực đó.
+#[tokio::test]
+async fn create_policy_authors_trung_did_la_400() {
+    let (app, _) = app();
+    let body = create_two_authors_body(vec![hex::encode(DID), hex::encode(DID), hex::encode(DID2)]);
+    let (st, b) = call(&app, "POST", "/v1/strata/create", Some(body)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(b["error"], "MalformedRequest");
+}
+
+/// So trùng trên byte, không trên chuỗi: hex hoa và hex thường là cùng một did.
+#[tokio::test]
+async fn create_policy_authors_trung_khac_hoa_thuong_van_la_400() {
+    let (app, _) = app();
+    let body = create_two_authors_body(vec![
+        hex::encode(DID),
+        hex::encode_upper(DID),
+        hex::encode(DID2),
+    ]);
+    let (st, b) = call(&app, "POST", "/v1/strata/create", Some(body)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+}
+
+/// #84 mục 3. 65 did CHƯA đăng ký: không có trần thì vòng `resolve` chạy và trả `424
+/// UnknownAuthor`; có trần thì cửa từ chối `400` trước vòng đó. Mã lỗi phân biệt hai cực.
+#[tokio::test]
+async fn create_policy_authors_vuot_tran_la_400_truoc_vong_resolve() {
+    let (app, _) = app();
+    let authors: Vec<String> = (0..65u8).map(|i| hex::encode([0x80 | i; 32])).collect();
+    let body = create_two_authors_body(authors);
+    let (st, b) = call(&app, "POST", "/v1/strata/create", Some(body)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(b["error"], "MalformedRequest");
+}
+
 #[tokio::test]
 async fn create_with_wrong_policy_hash_is_403() {
     let (app, _) = app();

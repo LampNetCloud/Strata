@@ -215,6 +215,33 @@ fn ref_raw(bech: &str) -> Hash32 {
 
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Gác `policy_authors` trùng (#84) đứng ở CỬA `create`, không ở `create_inner` mà replay
+/// dùng chung. Nhật ký ghi trước gác có thể chứa một `Create` với did trùng đã được trả `200`;
+/// replay bản ghi đó phải LÊN và dựng đúng ref — nếu gác lọt vào đường replay thì daemon ấy
+/// không khởi động được nữa sau khi nâng cấp.
+#[test]
+fn replay_create_co_policy_authors_trung_van_len() {
+    let p = policy();
+    let sig = sig_of(0, [0u8; 32], b"\xca\xfe", &[], 1_000);
+    let ref_id = lampnet_strata::refid::gen_ref_id_raw(&DID, &NONCE);
+    let rec: lampnet_strata_node::JournalRecord = serde_json::from_value(json!({
+        "op": "create",
+        "r": hex::encode(ref_id),
+        "req": {
+            "author_did": hex::encode(DID),
+            "genesis_nonce": hex::encode(NONCE),
+            "content_cid": "cafe", "state_fields": [],
+            "policy_hash": hex::encode(p.policy_hash()),
+            "ts": 1_000, "sig": sig,
+            "policy_authors": [hex::encode(DID), hex::encode(DID)],
+        }
+    }))
+    .expect("bản ghi Create hợp lệ");
+    let store = ChainStore::new();
+    replay_into(&store, registry().as_ref(), &[rec]).expect("replay phải lên");
+    assert!(store.get(&ref_id).is_some(), "ref phải có mặt sau replay");
+}
+
 /// Đường sống: mọi thứ daemon giữ phải sống qua một lượt restart.
 ///
 /// Kiểm **cả bốn** loại trạng thái daemon giữ, vì chúng nằm ở bốn chỗ khác nhau và một
