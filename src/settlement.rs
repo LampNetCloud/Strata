@@ -236,18 +236,23 @@ fn record_from_value(v: &Value) -> Result<Option<SettlementRecord>, PayloadError
     }
 }
 
-fn parse_top_level(cbor: &[u8]) -> Result<Vec<Value>, PayloadError> {
+/// `label` là nhãn mà nơi gọi đã hỏi nguồn (`SinkConfig::label`), không phải hằng
+/// [`METADATA_LABEL`]: so với hằng thì cấu hình nhãn khác 1234 làm nhánh map không đọc được, và
+/// vì ba nơi gọi đều đi qua bản lenient (nuốt `Err` thành rỗng) nên anchor có thật bị đọc thành
+/// *"chưa neo"* — im lặng, không phải fail-closed (#115).
+fn parse_top_level(cbor: &[u8], label: u64) -> Result<Vec<Value>, PayloadError> {
     let v: Value =
         ciborium::de::from_reader(cbor).map_err(|e| PayloadError::BadCbor(e.to_string()))?;
     match v {
         Value::Array(items) => Ok(items),
         // Một số nguồn (Blockfrost cbor endpoint) có thể bọc {label: metadatum}.
         Value::Map(entries) if entries.len() == 1 => match entries.into_iter().next() {
-            Some((Value::Integer(label), Value::Array(items)))
-                if u64::try_from(label) == Ok(METADATA_LABEL) =>
-            {
+            Some((Value::Integer(k), Value::Array(items))) if u64::try_from(k) == Ok(label) => {
                 Ok(items)
             }
+            Some((Value::Integer(k), Value::Array(_))) => Err(PayloadError::BadShape(format!(
+                "metadatum bọc map dưới nhãn {k:?}, khác nhãn đang đọc {label}"
+            ))),
             _ => Err(PayloadError::BadShape(
                 "metadatum không phải mảng record (map lạ)".into(),
             )),
@@ -261,7 +266,7 @@ fn parse_top_level(cbor: &[u8]) -> Result<Vec<Value>, PayloadError> {
 /// Decode STRICT: mọi record phải hợp lệ (t lạ vẫn được bỏ qua, nhưng record hỏng →
 /// lỗi). Dùng cho round-trip test + payload TỰ MÌNH tạo.
 pub fn decode_records(cbor: &[u8]) -> Result<Vec<SettlementRecord>, PayloadError> {
-    let items = parse_top_level(cbor)?;
+    let items = parse_top_level(cbor, METADATA_LABEL)?;
     let mut out = Vec::with_capacity(items.len());
     for item in &items {
         if let Some(r) = record_from_value(item)? {
@@ -287,7 +292,14 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 pub fn decode_records_lenient(cbor: &[u8]) -> Vec<SettlementRecord> {
-    let Ok(items) = parse_top_level(cbor) else {
+    decode_records_lenient_for_label(cbor, METADATA_LABEL)
+}
+
+/// Như [`decode_records_lenient`] nhưng nhánh map so với `label` đã cấu hình. Ba nơi đọc của
+/// [`SettlementSink`] đi qua đây với `self.cfg.label`; hai hàm công khai giữ chữ ký cũ (nhãn
+/// mặc định) để không đổi bề mặt công khai của crate.
+pub(crate) fn decode_records_lenient_for_label(cbor: &[u8], label: u64) -> Vec<SettlementRecord> {
+    let Ok(items) = parse_top_level(cbor, label) else {
         return Vec::new();
     };
     items
@@ -599,7 +611,7 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
                 continue;
             }
             // Decode MỘT lần cho cả tập ref_id, thay vì decode lại theo từng ref.
-            for rec in decode_records_lenient(&cbor) {
+            for rec in decode_records_lenient_for_label(&cbor, self.cfg.label) {
                 let SettlementRecord::Anchor(a) = rec else {
                     continue;
                 };
@@ -635,7 +647,7 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
             if !inputs.iter().any(|a| a == &self.cfg.publisher_address) {
                 continue; // tx từ ví lạ mang label 1234 → bỏ qua
             }
-            best = Self::fold_best_anchor(best, &cbor, ref_id);
+            best = Self::fold_best_anchor(best, &cbor, ref_id, self.cfg.label);
         }
         Ok(best)
     }
@@ -689,7 +701,7 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
             // Cùng một lớp lỗi, thấp hơn đúng một dòng: tx CÓ label nhưng không chứa
             // record nào cho ref đang hỏi (beacon đi kèm một lô anchor của ref khác).
             // `fold_best_anchor` trả `None` ở cả hai nghĩa, nên chỗ phân biệt phải ở đây.
-            Some(cbor) => match Self::fold_best_anchor(None, &cbor, ref_id) {
+            Some(cbor) => match Self::fold_best_anchor(None, &cbor, ref_id, self.cfg.label) {
                 Some(a) => return Ok(Some(a)),
                 None => format!(
                     "tx mới nhất {txid} có metadata label {} nhưng KHÔNG chứa record anchor \
@@ -810,7 +822,7 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
             if !inputs.iter().any(|a| a == &self.cfg.publisher_address) {
                 continue;
             }
-            for rec in decode_records_lenient(&cbor) {
+            for rec in decode_records_lenient_for_label(&cbor, self.cfg.label) {
                 if let SettlementRecord::Anchor(a) = rec {
                     anchors.push(WindowAnchor {
                         anchor: a,
@@ -844,9 +856,10 @@ impl<Q: ChainQuery, S: Submitter> SettlementSink<Q, S> {
         best: Option<StrataAnchor>,
         cbor: &[u8],
         ref_id: &Hash32,
+        label: u64,
     ) -> Option<StrataAnchor> {
         let mut best = best;
-        for rec in decode_records_lenient(cbor) {
+        for rec in decode_records_lenient_for_label(cbor, label) {
             if let SettlementRecord::Anchor(a) = rec
                 && a.ref_id == *ref_id
                 && best.as_ref().is_none_or(|b| a.seq > b.seq)
@@ -1299,6 +1312,91 @@ mod tests {
                 attempted: 3
             }
         );
+    }
+
+    // ── #115: nhãn cấu hình khác 1234 trên nguồn bọc `{label: [...]}` ─────────────
+
+    /// Một tx của publisher, metadatum bọc map dưới `wrap_label`; sink cấu hình `cfg_label`.
+    fn sink_label_map(
+        cfg_label: u64,
+        wrap_label: u64,
+        a: &StrataAnchor,
+    ) -> SettlementSink<std::rc::Rc<RefCell<MockQuery>>, MockSubmitter> {
+        let inner: Value =
+            ciborium::de::from_reader(&encode_records(&[SettlementRecord::Anchor(a.clone())])[..])
+                .unwrap();
+        let wrapped = Value::Map(vec![(Value::Integer(wrap_label.into()), inner)]);
+        let mut cbor = Vec::new();
+        ciborium::ser::into_writer(&wrapped, &mut cbor).unwrap();
+        let store = std::rc::Rc::new(RefCell::new(MockQuery {
+            publisher: "addr_pub".into(),
+            txs: vec!["tx0".into()],
+            inputs: HashMap::from([("tx0".to_string(), vec!["addr_pub".to_string()])]),
+            meta: HashMap::from([("tx0".to_string(), cbor)]),
+            slots: HashMap::from([("tx0".to_string(), 10)]),
+            tip: 100,
+            ..Default::default()
+        }));
+        let submitter = MockSubmitter {
+            publisher: "addr_pub".into(),
+            store: store.clone(),
+            fail_times: RefCell::new(0),
+        };
+        let cfg = SinkConfig {
+            publisher_address: "addr_pub".into(),
+            label: cfg_label,
+            ..Default::default()
+        };
+        SettlementSink::new(cfg, store, submitter)
+    }
+
+    fn anchor_115() -> StrataAnchor {
+        StrataAnchor {
+            ref_id: [0x15; 32],
+            head_version_hash: [0x16; 32],
+            mmr_root: [0x17; 32],
+            seq: 3,
+        }
+    }
+
+    /// Trước bản vá: nhánh map so với hằng 1234 ⇒ `Err` ⇒ bản lenient nuốt thành rỗng ⇒
+    /// `resolve` trả `Ok(None)` ("chưa neo") cho một lineage đã neo. Ba đường đọc, ba ca.
+    #[test]
+    fn nhan_cau_hinh_doc_duoc_nhanh_map_o_ca_ba_duong_doc() {
+        let a = anchor_115();
+        let sink = sink_label_map(4321, 4321, &a);
+        assert_eq!(sink.resolve(&a.ref_id).unwrap(), Some(a.clone()), "resolve");
+        assert_eq!(
+            sink.resolve_many(&[a.ref_id]).unwrap(),
+            vec![a.clone()],
+            "resolve_many"
+        );
+        let w = sink.scan_window(0, 50).unwrap();
+        assert_eq!(w.anchors.len(), 1, "scan_window");
+        assert_eq!(w.anchors[0].anchor, a);
+    }
+
+    /// Đối chứng: nhãn trong map khác nhãn cấu hình ⇒ không đọc — phép so nhãn vẫn còn đó,
+    /// bản vá không biến nhánh map thành "nhận mọi map một khoá".
+    #[test]
+    fn map_duoi_nhan_khac_nhan_cau_hinh_thi_khong_doc() {
+        let a = anchor_115();
+        let sink = sink_label_map(4321, METADATA_LABEL, &a);
+        assert_eq!(sink.resolve(&a.ref_id).unwrap(), None);
+    }
+
+    /// Hàm công khai giữ chữ ký cũ và nhãn mặc định; lỗi nói ra hai nhãn thay vì "map lạ".
+    #[test]
+    fn decode_records_cong_khai_bao_ro_nhan_lech() {
+        let a = anchor_115();
+        let sink = sink_label_map(4321, 4321, &a);
+        let cbor = sink.query.borrow().meta["tx0"].clone();
+        match decode_records(&cbor) {
+            Err(PayloadError::BadShape(m)) => {
+                assert!(m.contains("4321") && m.contains("1234"), "{m}")
+            }
+            other => panic!("phải BadShape nêu hai nhãn: {other:?}"),
+        }
     }
 
     #[test]
