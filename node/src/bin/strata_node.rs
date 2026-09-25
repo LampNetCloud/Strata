@@ -18,14 +18,32 @@
 //!   danh sách biến của từng backend. Cấu hình **thiếu là lỗi khởi động**, không
 //!   phải cảnh báo: một daemon lên xanh với sink nửa-cấu-hình chỉ lộ ra ở lượt neo
 //!   đầu tiên, tức sau khi dữ liệu đã đi vào.
+//! - `STRATA_FIELD_VALUE_LEN` — luật độ dài `value` của `state_fields` (#118). Vắng hoặc `32`
+//!   ⇒ cửa chỉ nhận 32 byte (CID); `any` ⇒ nhận mọi độ dài, in cảnh báo lúc khởi động; giá trị
+//!   khác ⇒ từ chối khởi động.
 
 use ed25519_dalek::VerifyingKey;
 use lampnet_strata_node::{
-    AppState, ChainStore, InMemoryRegistry, Journal, KeyRegistry, build_sink, daemon_router,
-    read_records, replay_into,
+    AppState, ChainStore, FieldValueLen, InMemoryRegistry, Journal, KeyRegistry, build_sink,
+    daemon_router, read_records, replay_into,
 };
 use std::sync::Arc;
 use std::time::Instant;
+
+const FIELD_VALUE_LEN_ENV: &str = "STRATA_FIELD_VALUE_LEN";
+
+/// Đọc `STRATA_FIELD_VALUE_LEN` (#118). Giá trị lạ là lỗi khởi động, không hạ về mặc định:
+/// hạ về mặc định là sửa hộ cấu hình sai trong im lặng.
+fn parse_field_value_len(v: Option<&str>) -> Result<FieldValueLen, String> {
+    match v.map(str::trim) {
+        None | Some("") | Some("32") => Ok(FieldValueLen::Cid32),
+        Some("any") => Ok(FieldValueLen::Any),
+        Some(other) => Err(format!(
+            "từ chối khởi động: `{FIELD_VALUE_LEN_ENV}={other}` — chỉ nhận `32` (mặc định) hoặc \
+             `any`"
+        )),
+    }
+}
 
 /// Vì sao `STRATA_NODE_JOURNAL` **bắt buộc**, chứ không mặc định phù du.
 ///
@@ -208,7 +226,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry: Arc<dyn KeyRegistry> = Arc::new(registry);
     let store = build_store(registry.as_ref())?;
 
-    let state = AppState::new(store, registry, choice.sink);
+    let mut state = AppState::new(store, registry, choice.sink);
+    state.field_value_len =
+        parse_field_value_len(std::env::var(FIELD_VALUE_LEN_ENV).ok().as_deref())?;
+    if state.field_value_len == FieldValueLen::Any {
+        println!(
+            "⚠️  {FIELD_VALUE_LEN_ENV}=any — cửa nhận `value` mọi độ dài: một giá trị nguyên văn \
+             lọt vào sẽ ra lại qua `proof/field` không cần xác thực và nằm vĩnh viễn trong nhật ký"
+        );
+    }
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -227,6 +253,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn field_value_len_mac_dinh_chat_any_phai_khai_gia_tri_la_tu_choi() {
+        assert_eq!(parse_field_value_len(None), Ok(FieldValueLen::Cid32));
+        assert_eq!(parse_field_value_len(Some("32")), Ok(FieldValueLen::Cid32));
+        assert_eq!(parse_field_value_len(Some(" any ")), Ok(FieldValueLen::Any));
+        assert!(parse_field_value_len(Some("64")).is_err());
+        assert!(parse_field_value_len(Some("ANY")).is_err());
+    }
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
         let owned: Vec<(String, String)> = pairs

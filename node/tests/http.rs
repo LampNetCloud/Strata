@@ -1953,3 +1953,131 @@ async fn router_mountable_merge_vao_cay_chu_co_fallback() {
     let (st, v) = call_json(&host, "DELETE", &format!("/v1/strata/{r}/head")).await;
     assert_eq!(st, StatusCode::METHOD_NOT_ALLOWED, "{v}");
 }
+
+// ── #118: cửa chỉ nhận `value` 32 byte (CID), trừ khi người vận hành khai `Any` ─────────
+
+/// Value 16 byte — hex hợp lệ, KHÔNG phải CID 32 byte.
+const V_16: &str = "0123456789abcdef0123456789abcdef";
+
+fn app_field_len(rule: lampnet_strata_node::FieldValueLen) -> (Router, Policy) {
+    let reg = InMemoryRegistry::new();
+    reg.register(DID, sk(1).verifying_key());
+    let mut policy = Policy::new();
+    policy.allow(DID, sk(1).verifying_key());
+    let mut state = AppState::new(
+        Arc::new(ChainStore::new()),
+        Arc::new(reg),
+        Arc::new(MemorySink::new()),
+    );
+    state.field_value_len = rule;
+    (router(state), policy)
+}
+
+/// `create` với `value` 16 byte, ký ĐÚNG — không có gác thì `200`.
+fn create_body_with_value(policy: &Policy, value: &str) -> Value {
+    let fields = vec![f("note", value)];
+    let sig = sign_version(
+        1,
+        0,
+        [0u8; 32],
+        b"\xca\xfe",
+        &fields,
+        DID,
+        policy.policy_hash(),
+        1_000,
+    );
+    json!({
+        "author_did": hex::encode(DID),
+        "genesis_nonce": hex::encode([0x55u8; 32]),
+        "content_cid": "cafe",
+        "state_fields": [{ "key": "note", "value": value }],
+        "policy_hash": hex::encode(policy.policy_hash()),
+        "ts": 1_000, "sig": sig
+    })
+}
+
+#[tokio::test]
+async fn create_value_khac_32_byte_la_400_mac_dinh() {
+    let (app, policy) = app();
+    let (st, b) = call(
+        &app,
+        "POST",
+        "/v1/strata/create",
+        Some(create_body_with_value(&policy, V_16)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(b["error"], "MalformedRequest");
+    assert!(
+        b.to_string().contains("16 byte"),
+        "thông điệp phải nói độ dài nhận được: {b}"
+    );
+}
+
+/// Đối chứng: cùng body, người vận hành khai `Any` ⇒ `200`. Thiếu ca này thì ca trên cũng
+/// xanh khi body hỏng vì lý do khác.
+#[tokio::test]
+async fn create_value_khac_32_byte_qua_khi_khai_any() {
+    let (app, policy) = app_field_len(lampnet_strata_node::FieldValueLen::Any);
+    let (st, b) = call(
+        &app,
+        "POST",
+        "/v1/strata/create",
+        Some(create_body_with_value(&policy, V_16)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+}
+
+/// Đường `version` cũng chặn, không chỉ `create`.
+#[tokio::test]
+async fn append_value_khac_32_byte_la_400() {
+    let (app, policy) = app();
+    let (r, vh0) = create_ok(&app, &policy).await;
+    let fields = vec![f("note", V_16)];
+    let sig = sign_version(
+        1,
+        1,
+        vh0,
+        b"\xbe\xef",
+        &fields,
+        DID,
+        policy.policy_hash(),
+        1_100,
+    );
+    let (st, b) = call(
+        &app,
+        "POST",
+        &format!("/v1/strata/{r}/version"),
+        Some(json!({
+            "prev_seq": 0, "content_cid": "beef",
+            "state_fields": [{ "key": "note", "value": V_16 }],
+            "author_did": hex::encode(DID),
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": 1_100, "sig": sig
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+}
+
+/// Route khô chạy đúng bộ cổng của đường ghi: không có gác thì nó trả `version_hash` cho
+/// một body mà `create` sẽ từ chối.
+#[tokio::test]
+async fn canonical_value_khac_32_byte_la_400() {
+    let (app, policy) = app();
+    let (st, b) = call(
+        &app,
+        "POST",
+        "/v1/strata/_canonical",
+        Some(json!({
+            "seq": 0, "prev_hash": hex::encode([0u8; 32]), "content_cid": "cafe",
+            "state_fields": [{ "key": "note", "value": V_16 }],
+            "author_did": hex::encode(DID),
+            "policy_hash": hex::encode(policy.policy_hash()),
+            "ts": 1_000
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+}

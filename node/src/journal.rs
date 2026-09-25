@@ -263,11 +263,17 @@ impl Journal {
     /// [`ErrorKind::WouldBlock`](std::io::ErrorKind::WouldBlock) — xem [`lock_exclusive`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let path = path.as_ref().to_path_buf();
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&path)?;
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true).read(true);
+        // Tệp TẠO MỚI mang quyền 0600 (#118): không thì nhận theo `umask`, thường 0644 — mọi
+        // người dùng trên máy đọc được. `mode` chỉ áp lúc tạo, nên tệp đã có giữ nguyên quyền:
+        // đổi quyền một tệp mình không tạo là làm hộ quyết định của người vận hành.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&path)?;
         // Giành khoá TRƯỚC lượt ghi đầu tiên: header cũng là một lượt ghi, và hai tiến
         // trình cùng thấy tệp rỗng sẽ cùng ghi hai header vào một tệp.
         lock_exclusive(&file, &path)?;

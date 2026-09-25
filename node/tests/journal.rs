@@ -700,3 +700,49 @@ fn tep_rong_da_ton_tai_van_duoc_ghi_header() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// #118: gác `value` 32 byte đứng ở cửa, không trong `create_inner` — bản ghi `Create` cũ mang
+/// `value` 16 byte vẫn replay lên.
+#[test]
+fn replay_create_co_value_khac_32_byte_van_len() {
+    let fields = vec![(
+        b"note".to_vec(),
+        hex::decode("0123456789abcdef0123456789abcdef").unwrap(),
+    )];
+    let sig = sig_of(0, [0u8; 32], b"\xca\xfe", &fields, 1_000);
+    let ref_id = lampnet_strata::refid::gen_ref_id_raw(&DID, &NONCE);
+    let rec: lampnet_strata_node::JournalRecord = serde_json::from_value(json!({
+        "op": "create",
+        "r": hex::encode(ref_id),
+        "req": {
+            "author_did": hex::encode(DID),
+            "genesis_nonce": hex::encode(NONCE),
+            "content_cid": "cafe",
+            "state_fields": [{ "key": "note", "value": "0123456789abcdef0123456789abcdef" }],
+            "policy_hash": hex::encode(policy().policy_hash()),
+            "ts": 1_000, "sig": sig,
+        }
+    }))
+    .unwrap();
+    let store = ChainStore::new();
+    replay_into(&store, registry().as_ref(), &[rec]).expect("replay phải lên");
+    assert!(store.get(&ref_id).is_some());
+}
+
+/// #118: tệp nhật ký TẠO MỚI mang quyền 0600; tệp đã có giữ nguyên quyền.
+#[cfg(unix)]
+#[test]
+fn nhat_ky_tao_moi_quyen_0600_tep_cu_giu_nguyen() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = tmp_path("mode");
+    drop(Journal::open(&path).unwrap());
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "tệp mới: {mode:o}");
+
+    let old = tmp_path("mode-old");
+    std::fs::write(&old, b"").unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o640)).unwrap();
+    drop(Journal::open(&old).unwrap());
+    let mode = std::fs::metadata(&old).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o640, "tệp cũ không được đổi quyền: {mode:o}");
+}
