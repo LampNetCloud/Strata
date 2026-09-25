@@ -38,6 +38,24 @@ pub struct AppState {
     pub store: Arc<ChainStore>,
     pub registry: Arc<dyn KeyRegistry>,
     pub sink: Arc<dyn AnchorSink + Send + Sync>,
+    /// Luật độ dài `value` của `state_fields` ở cửa (#118). [`AppState::new`] đặt
+    /// [`FieldValueLen::Cid32`], nên bản gắn `router()` vào tiến trình chủ cũng chặt mặc định.
+    pub field_value_len: FieldValueLen,
+}
+
+/// Cửa nhận `value` của `state_fields` dài bao nhiêu (#118).
+///
+/// Quy ước "node chỉ giữ CID 32 byte, không giữ nguyên văn" (`spec/Strata-API.md`, bảng mối nối
+/// Strata ↔ Mirage) trước đây chỉ được cưỡng chế ở bên gọi. Một giá trị nguyên văn lọt vào thì
+/// ra lại được không cần xác thực (`proof/field` trả `value`), và nhật ký append-only giữ nó
+/// vĩnh viễn. Mặc định chặt: một cổng mà người vận hành phải nhớ bật thì tắt ở đúng những chỗ
+/// không ai nhớ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldValueLen {
+    /// `value` phải đúng 32 byte, khác ⇒ `400`.
+    Cid32,
+    /// Nhận mọi độ dài — chỉ khi người vận hành khai (`STRATA_FIELD_VALUE_LEN=any`).
+    Any,
 }
 
 impl AppState {
@@ -50,6 +68,7 @@ impl AppState {
             store,
             registry,
             sink,
+            field_value_len: FieldValueLen::Cid32,
         }
     }
 }
@@ -301,6 +320,29 @@ fn action_from_str(s: &str) -> ApiResult<AuditAction> {
 // POST /v1/strata/create — §2.1 genesis
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Gác độ dài `value` ở CỬA (#118). Đứng ở handler, **không** trong `to_pairs`: `to_pairs` nằm
+/// trên đường replay nhật ký (`create_inner`/`append_inner`), và một bản ghi đã nhận trước gác
+/// này mà mang `value` khác 32 byte phải replay ra đúng trạng thái đã trả `200` — cùng lẽ với
+/// [`check_policy_authors`].
+fn check_field_values(fields: &[FieldDto], rule: FieldValueLen) -> ApiResult<()> {
+    if rule == FieldValueLen::Any {
+        return Ok(());
+    }
+    for f in fields {
+        let v = hexs::decode_var(&f.value)
+            .map_err(|e| ApiError::Malformed(format!("state_fields[{}]: {e}", f.key)))?;
+        if v.len() != 32 {
+            return Err(ApiError::Malformed(format!(
+                "state_fields[{}]: value {} byte, cửa chỉ nhận 32 byte (CID) — nội dung đặt ở \
+                 Mirage, state_fields chở CID của nó",
+                f.key,
+                v.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Trần số phần tử `policy_authors` ở cửa (#84 mục 3).
 ///
 /// Mỗi author tốn một lượt `registry.resolve` trong vòng dựng policy, và 64 B trong tiền ảnh
@@ -414,6 +456,7 @@ async fn create(
 ) -> ApiResult<Json<CreateResp>> {
     let req = body(req)?;
     check_policy_authors(req.policy_authors.as_deref())?;
+    check_field_values(&req.state_fields, st.field_value_len)?;
     let (ref_id, entry, resp) = create_inner(st.registry.as_ref(), &req)?;
 
     // Nhật ký đi CÙNG phép chèn, dưới cùng một khoá — xem `ChainStore::insert_journaled`
@@ -448,9 +491,11 @@ async fn create(
 /// `state_root`, `ref_id`) hoặc suy được từ input của chính client (`canonical_core`) —
 /// không lộ thêm gì. Không có `ref` trong đường dẫn nên không rò sự tồn tại của hồ sơ nào.
 async fn canonical(
+    State(st): State<AppState>,
     req: Result<Json<CanonicalReq>, JsonRejection>,
 ) -> ApiResult<Json<CanonicalResp>> {
     let req = body(req)?;
+    check_field_values(&req.state_fields, st.field_value_len)?;
     // Route khô phải chạy ĐÚNG bộ cổng của đường ghi, chỉ bỏ phần ghi. Thiếu `check_ts` ở
     // đây thì nó "duyệt" một `ts` mili giây và trả về `version_hash`; client ký xong, gọi
     // `create`, ăn 422 — tức công cụ dựng ra để đối chiếu trước khi ký lại bỏ lọt đúng lỗi
@@ -542,6 +587,7 @@ async fn append(
 ) -> ApiResult<Json<AppendResp>> {
     let r = path(r)?;
     let req = body(req)?;
+    check_field_values(&req.state_fields, st.field_value_len)?;
     let ref_id = parse_ref(&r)?;
     let entry = st.store.get(&ref_id).ok_or(ApiError::NotFound("ref"))?;
     let mut g = lock(&entry);
@@ -630,6 +676,9 @@ async fn event(
     let r = path(r)?;
     use axum::response::IntoResponse;
     let req = body(req)?;
+    if let EventReq::Version(a) = &req {
+        check_field_values(&a.state_fields, st.field_value_len)?;
+    }
     let ref_id = parse_ref(&r)?;
     let entry = st.store.get(&ref_id).ok_or(ApiError::NotFound("ref"))?;
     let mut g = lock(&entry);
