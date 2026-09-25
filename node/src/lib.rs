@@ -28,6 +28,7 @@ pub mod registry;
 pub mod replay;
 pub mod routes;
 pub mod sink_config;
+pub mod startup_check;
 pub mod store;
 
 pub use anchor::{DisabledSink, FailingSink, MemorySink};
@@ -37,4 +38,5 @@ pub use registry::{InMemoryRegistry, KeyRegistry};
 pub use replay::{ReplayStats, replay_into};
 pub use routes::{AppState, FieldValueLen, daemon_router, router};
 pub use sink_config::{SinkChoice, build_sink};
+pub use startup_check::{ChainCheckError, ChainCheckReport, Divergence, check_against_chain};
 pub use store::{ChainEntry, ChainStore, StoreError};

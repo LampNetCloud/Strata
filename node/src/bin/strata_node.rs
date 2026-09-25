@@ -21,11 +21,15 @@
 //! - `STRATA_FIELD_VALUE_LEN` — luật độ dài `value` của `state_fields` (#118). Vắng hoặc `32`
 //!   ⇒ cửa chỉ nhận 32 byte (CID); `any` ⇒ nhận mọi độ dài, in cảnh báo lúc khởi động; giá trị
 //!   khác ⇒ từ chối khởi động.
+//! - `STRATA_STARTUP_CHAIN_CHECK` — đối chiếu lịch sử local với chuỗi sau replay (#119). Vắng
+//!   hoặc `on` ⇒ chạy; lịch sử không chứa/không khớp anchor trên chuỗi ⇒ từ chối khởi động.
+//!   `off` ⇒ bỏ qua, in cảnh báo. Giá trị khác ⇒ từ chối khởi động. Backend neo tắt ⇒ bỏ qua
+//!   có in lý do (không neo được nên không có lượt neo nào đè được).
 
 use ed25519_dalek::VerifyingKey;
 use lampnet_strata_node::{
-    AppState, ChainStore, FieldValueLen, InMemoryRegistry, Journal, KeyRegistry, build_sink,
-    daemon_router, read_records, replay_into,
+    AppState, ChainCheckError, ChainStore, FieldValueLen, InMemoryRegistry, Journal, KeyRegistry,
+    build_sink, check_against_chain, daemon_router, read_records, replay_into,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -41,6 +45,60 @@ fn parse_field_value_len(v: Option<&str>) -> Result<FieldValueLen, String> {
         Some(other) => Err(format!(
             "từ chối khởi động: `{FIELD_VALUE_LEN_ENV}={other}` — chỉ nhận `32` (mặc định) hoặc \
              `any`"
+        )),
+    }
+}
+
+const CHAIN_CHECK_ENV: &str = "STRATA_STARTUP_CHAIN_CHECK";
+
+/// Đọc `STRATA_STARTUP_CHAIN_CHECK` (#119): `true` = chạy đối chiếu. Giá trị lạ là lỗi khởi
+/// động — tắt một phép kiểm phải là câu người vận hành gõ ra, không phải lỗi chính tả.
+fn parse_chain_check(v: Option<&str>) -> Result<bool, String> {
+    match v.map(str::trim) {
+        None | Some("") | Some("on") => Ok(true),
+        Some("off") => Ok(false),
+        Some(other) => Err(format!(
+            "từ chối khởi động: `{CHAIN_CHECK_ENV}={other}` — chỉ nhận `on` (mặc định) hoặc `off`"
+        )),
+    }
+}
+
+/// Đối chiếu chuỗi sau replay, trước khi mở cổng (#119). Chạy ở ngữ cảnh đồng bộ.
+fn run_chain_check(
+    store: &ChainStore,
+    sink: &(dyn lampnet_strata::AnchorSink + Send + Sync),
+    enabled: bool,
+) -> Result<(), String> {
+    if !enabled {
+        println!(
+            "⚠️  {CHAIN_CHECK_ENV}=off — KHÔNG đối chiếu lịch sử với chuỗi: một nhật ký tụt sau \
+             chuỗi sẽ neo đè một seq đã có trên L1"
+        );
+        return Ok(());
+    }
+    let t = Instant::now();
+    match check_against_chain(store, sink) {
+        Ok(r) => {
+            println!(
+                "đối chiếu chuỗi: {} ref, {} đã neo trên chuỗi, {} gương tụt nhưng lịch sử khớp \
+                 — {:.2?}",
+                r.checked,
+                r.anchored_on_chain,
+                r.mirror_lagging,
+                t.elapsed()
+            );
+            Ok(())
+        }
+        Err(ChainCheckError::BackendDisabled) => {
+            println!(
+                "đối chiếu chuỗi: bỏ qua — backend neo tắt, không hỏi được chuỗi và cũng không \
+                 neo được"
+            );
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "từ chối khởi động — đối chiếu chuỗi: {e}\n(tắt phép này chỉ khi đã hiểu hệ quả: \
+             {CHAIN_CHECK_ENV}=off)"
         )),
     }
 }
@@ -225,6 +283,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // mình sẽ trả 404 cho những ref nó sắp có, và ghi vào một chuỗi chưa đủ dài.
     let registry: Arc<dyn KeyRegistry> = Arc::new(registry);
     let store = build_store(registry.as_ref())?;
+    // Đối chiếu chuỗi TRƯỚC khi mở cổng, ở ngữ cảnh đồng bộ (sink có thể là client blocking).
+    let check = parse_chain_check(std::env::var(CHAIN_CHECK_ENV).ok().as_deref())?;
+    run_chain_check(&store, choice.sink.as_ref(), check)?;
 
     let mut state = AppState::new(store, registry, choice.sink);
     state.field_value_len =
@@ -261,6 +322,15 @@ mod tests {
         assert_eq!(parse_field_value_len(Some(" any ")), Ok(FieldValueLen::Any));
         assert!(parse_field_value_len(Some("64")).is_err());
         assert!(parse_field_value_len(Some("ANY")).is_err());
+    }
+
+    #[test]
+    fn chain_check_mac_dinh_bat_off_phai_khai_gia_tri_la_tu_choi() {
+        assert_eq!(parse_chain_check(None), Ok(true));
+        assert_eq!(parse_chain_check(Some("on")), Ok(true));
+        assert_eq!(parse_chain_check(Some(" off ")), Ok(false));
+        assert!(parse_chain_check(Some("false")).is_err());
+        assert!(parse_chain_check(Some("OFF")).is_err());
     }
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
