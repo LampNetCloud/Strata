@@ -1324,6 +1324,77 @@ async fn no_anchor_phat_hien_rollback_on_chain_du_guong_daemon_rong() {
     );
 }
 
+// ── Trần `refs` ở cửa `_anchor_batch` (#77 mục 3 gạch 4) ─────────────────────
+
+/// `MAX_BATCH_REFS` phải đúng là số record lớn nhất vừa trần byte mặc định của sink ở `seq`
+/// xấu nhất — đo trên `encode_records` thật, không chép số. Đổi encoding hay trần byte thì
+/// bài này đỏ và con số ở cửa phải đổi theo.
+#[test]
+fn tran_refs_la_so_lon_nhat_vua_8kib_o_seq_xau_nhat() {
+    use lampnet_strata::{SettlementRecord, SinkConfig, StrataAnchor, encode_records};
+    use lampnet_strata_node::routes::MAX_BATCH_REFS;
+    let cap = SinkConfig::default().max_metadatum_bytes;
+    let rec = SettlementRecord::Anchor(StrataAnchor {
+        ref_id: [0xFF; 32],
+        head_version_hash: [0xFF; 32],
+        mmr_root: [0xFF; 32],
+        seq: u64::MAX,
+    });
+    let bytes = |n: usize| encode_records(&vec![rec.clone(); n]).len();
+    assert!(
+        bytes(MAX_BATCH_REFS) <= cap,
+        "{} > {cap}",
+        bytes(MAX_BATCH_REFS)
+    );
+    assert!(
+        bytes(MAX_BATCH_REFS + 1) > cap,
+        "trần ở cửa thấp hơn mức cần"
+    );
+}
+
+/// Hex32 của `n` ref chưa từng `create` — không gác thì lô đi tra store và ăn `404`.
+fn unknown_refs(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| {
+            let mut r = [0u8; 32];
+            r[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+            hex::encode(r)
+        })
+        .collect()
+}
+
+/// Vượt trần ⇒ `400` TRƯỚC khi tra store. Không gác thì cùng body này ra `404` (ref lạ) —
+/// mã lỗi phân biệt hai cực.
+#[tokio::test]
+async fn anchor_batch_vuot_tran_refs_la_400_truoc_khi_tra_store() {
+    use lampnet_strata_node::routes::MAX_BATCH_REFS;
+    let (app, _) = app();
+    let (st, b) = call(
+        &app,
+        "POST",
+        "/v1/strata/_anchor_batch",
+        Some(json!({ "refs": unknown_refs(MAX_BATCH_REFS + 1), "priority": "no_anchor" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(b["error"], "MalformedRequest");
+}
+
+/// Đối chứng: đúng trần thì cửa cho qua, lô đi tiếp tới tra store (ở đây ref lạ ⇒ `404`).
+#[tokio::test]
+async fn anchor_batch_dung_tran_refs_thi_qua_cua() {
+    use lampnet_strata_node::routes::MAX_BATCH_REFS;
+    let (app, _) = app();
+    let (st, b) = call(
+        &app,
+        "POST",
+        "/v1/strata/_anchor_batch",
+        Some(json!({ "refs": unknown_refs(MAX_BATCH_REFS), "priority": "no_anchor" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{b}");
+}
+
 // ── `_settlement_window` — nguồn LÁ của luồng checkpoint toàn cục ────────────
 
 /// Sink giả có **quét được** cửa sổ: trả một tập cố định, và ghi lại cửa sổ đã hỏi.
