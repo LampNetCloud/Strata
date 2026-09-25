@@ -156,7 +156,7 @@ let ok = lampnet_strata::verify_field_proof(&fp);                      // tự k
 
 `verify_version` SUY chiều trái/phải từ `leaf_index`, KHÔNG tin cờ trong proof (bind chặt index↔hash). `verify_field_proof` tính lại root từ `value` + `salt` + siblings rồi so `state_root` — `salt` rỗng hay khác rỗng chọn **hai domain-tag khác nhau**, xem bảng ở §3.
 
-> ⚠️ **Tiền đề key-duy-nhất (INV-E6/E6-key, xem §8.0):** một version PHẢI có `field_key` duy nhất. Đường HTTP đã chặn ở cửa (`to_pairs` → `find_duplicate_key`, PR #50), nhưng tới khi **core** enforce `DuplicateFieldKey` (issue #39 điểm 2, xem §8.0), một `FieldProof` verify hợp lệ dưới `state_root` đã ký **KHÔNG** bảo đảm giá trị duy nhất cho một key — nếu caller ký version có key trùng, hai giá trị mâu thuẫn cùng sinh proof hợp lệ dưới CÙNG root (equivocation). Verifier bên-3 phải coi đây là rủi ro tồn dư; caller PHẢI khử trùng key trước khi ký.
+> ⚠️ **Tiền đề key-duy-nhất (INV-E6/E6-key, xem §8.0):** một version PHẢI có `field_key` duy nhất. Đường HTTP đã chặn ở cửa (`to_pairs` → `find_duplicate_key`, PR #50), và lõi **KHÔNG** enforce — khử trùng là nghĩa vụ bên gọi, chốt ở §8.0 (issue #39 điểm 2) — nên một `FieldProof` verify hợp lệ dưới `state_root` đã ký **KHÔNG** bảo đảm giá trị duy nhất cho một key — nếu caller ký version có key trùng, hai giá trị mâu thuẫn cùng sinh proof hợp lệ dưới CÙNG root (equivocation). Verifier bên-3 phải coi đây là rủi ro tồn dư; caller PHẢI khử trùng key trước khi ký.
 
 ### §2.6 `append_event` — loại #2 (chuỗi-thêm) và audit-log
 
@@ -331,8 +331,30 @@ và **khác** dạng bech32m của `create`/`head`. Đó là cam kết, không p
 { "canonical_core":"<hex>",    // so BYTE với bản client tự dựng
   "version_hash":"<hex32>",    // THỨ PHẢI KÝ
   "state_root":"<hex32>",      // chỗ lệch phổ biến nhất
-  "ref_id":"lnref1…" }         // null khi không gửi genesis_nonce
+  "ref_id":"lnref1…",          // null khi không gửi genesis_nonce
+  "policy_hash":"<hex32>",                                  // #84
+  "policy_authors":[ {"did":"<hex32>","pk":"<hex32>"} ] }    // #84 — SẮP TĂNG DẦN theo did
 ```
+
+**CHỐT (issue #84): route trả về tập `(did, pubkey)` ĐÃ PHÂN GIẢI, không chỉ trả `policy_hash`.**
+`policy_hash` cam kết pubkey lấy từ **key-registry** (CHỐT-5), nên một client chỉ có `did` **không
+dựng lại được** giá trị ấy. Trả một mình cái băm là để client **ký một tập khoá nó không bao giờ
+nhìn thấy**, và một băm khớp khi đó chỉ nói *"daemon và daemon đồng ý với nhau"*. Trả tập đã phân
+giải thì client so được từng `pubkey` với bản nó biết và tự dựng lại `policy_hash` — cái băm trở
+thành thứ **đối chiếu được**, không phải thứ phải tin.
+
+- `policy_authors` **sắp tăng dần theo `did`**, đúng thứ tự mà `policy_hash` nối (tập author giữ
+  trong map có thứ tự theo `did`). Trả về thứ tự gửi lên thì client dựng lại băm theo thứ tự nó
+  nhận và ra giá trị khác — một chỗ lệch câm, vì cả hai bên đều làm đúng theo dữ liệu mình có.
+- **`policy_authors` có `did` trùng ⇒ `400`**, ở route này **và** ở `create`. Hôm nay tập author
+  giữ trong map nên `did` trùng bị **khử im lặng**: gửi `["A","A","B"]` được một policy `{A, B}`
+  và một `policy_hash` không phản ánh thứ mình gửi, không lỗi nào bật ra. Nó không nới tập quyền,
+  nhưng nó phá đúng tính chất mà `#84` dựng lên. Cùng mức nghiêm với `state_fields` trùng key
+  (`to_pairs` → `find_duplicate_key`): hai đường vào cùng một policy thì cùng một mức nghiêm — đó
+  là nội dung `#109` áp cho một ca cụ thể.
+- **`policy_authors` có trần số phần tử**, kiểm **trước** vòng phân giải registry: mỗi author tốn
+  một lượt `resolve` cộng ~132 byte JSON ra, nên một yêu cầu mười nghìn `did` là một đòn khuếch
+  đại rẻ trên một route không ghi.
 
 **Vì sao route này phải có mặt trong spec.** Client tự cài lại **hai cây băm**
 (state-tree + MMR) và **một encoding canonical** ở ngôn ngữ của mình rồi ký lên
@@ -441,6 +463,16 @@ phải quãng server tự chọn hôm đó. `to_slot <= from_slot` ⇒ `400`.
 **Bốn trường anchor giữ ĐÚNG thứ tự canonical của `StrataAnchor`** (`ref_id ‖
 head_version_hash ‖ mmr_root ‖ seq`): bên tiêu thụ băm lại đúng 104 byte đó để dựng lá
 checkpoint, nên thứ tự ở đây là **hợp đồng byte**, không phải lựa chọn trình bày.
+
+**CHỐT (issue #81): record đọc được mà daemon KHÔNG hiểu ⇒ bỏ qua · ĐẾM · KHAI tập kiểu đã hiểu.** Ba phần, thiếu một là thiếu một tính chất:
+
+1. **Bỏ qua** — một record lạ của bên thứ ba dưới cùng label **không** được phép giết luồng checkpoint. Tập `t` là điểm tiến hoá đã có sẵn cơ chế bỏ-qua-tiến-tới, và checkpoint không được phụ thuộc vào việc không ai khác dùng label này.
+2. **Đếm** — bản trả chở số record đọc được nhưng không hiểu, và **nơi gọi phải xử tường minh khi số đó khác `0`**. Một trường đọc thêm nếu muốn là một hàng rào mà nơi gọi được phép bỏ qua, tức đúng lớp `#79`.
+3. **Khai tập kiểu đã hiểu** — checkpoint cam kết chính tập `t` mà nó đã xử lý. Không có vế này thì con số đếm chỉ làm sự im lặng **đo được sau đó**, nó không làm hai `root` **phân biệt được lúc đối chiếu**: hai daemon khác phiên bản mã, cùng cửa sổ, cùng label, một bên hiểu `t = 3` và một bên không, sẽ khai **hai `root` khác nhau cho cùng một cửa sổ** mà không trường nào nói vì sao. Bên thứ ba quét lại gặp đúng câu hỏi cũ: tôi ra `root` khác, là tôi sai hay bên kia sai. Có vế này thì chỗ lệch tự chỉ ra nguyên nhân, và một bên thứ ba dựng lại được đúng tập lá của một checkpoint cũ **mà không cần cùng phiên bản mã**.
+
+**Thứ tự land:** vế 3 đổi hình dạng thứ checkpoint cam kết, nên nó phải land **cùng hoặc trước** vế 2 — land vế đếm trước rồi khai sau thì có một quãng checkpoint mang số đếm mà không ai đối chiếu được.
+
+**Trên đường GHI thì KHÔNG đổi:** record đọc được mà không hiểu vẫn là **lỗi**, không im lặng. Tầng decode phải tách thật ba câu trả lời — *không có record* · *có record nhưng không hiểu* · *có record và hiểu* — chứ không gộp hai câu đầu thành `None`. Đường quét-địa-chỉ hôm nay chưa tách được ba câu đó; đó là phần còn mở của `#81`.
 
 🔺 **Quét không phủ hết cửa sổ là LỖI (`502`), không phải một danh sách ngắn hơn.** Route
 này **không** có cờ `truncated`, có chủ ý: `root` tính trên tập thiếu **vẫn hợp lệ về hình
@@ -605,6 +637,25 @@ publish_batch (kho này)  ──resolve() từng anchor (INV-E7) + encode_record
 2. Đường lô đi qua intake đã chạy **thật đầu-cuối** trên testnet (một txid thật, `resolve()` đọc lại khớp từng byte) — điều kiện này để đường thay thế **không** ở trạng thái "chỉ trông như tồn tại".
 
 Chừng nào một trong hai chưa đạt, cửa riêng vẫn là đường chính thức; và tài liệu **không** được mô tả nó như hình dạng dài hạn. Lý do ghi điều kiện ngay tại chỗ: **một bản trung gian được trình bày như bản cuối sẽ sống rất lâu**.
+
+**CHỐT (issue #80): thông điệp operator ký PHẢI mang `nonce` + `expiry`.** Hôm nay tiền ảnh cam kết `(network, label, beacon, payload)` và **không** có cả hai, nên một gói bắt được là một gói gửi lại được — mỗi lượt phát lại là một giao dịch tốn phí của ví publisher. Hai trường mới đi vào tiền ảnh với độ dài **cố định** (`nonce` 32 B, `expiry` `u64` BE 8 B), nên ánh xạ đầu vào → tiền ảnh vẫn là song ánh, không cần thêm tiền tố độ dài nào.
+
+Hai hằng, **KHÔNG gộp**:
+
+```text
+OPERATOR_SIG_TTL_SECS    = 600   // bên gửi được đặt expiry xa nhất bao nhiêu
+OPERATOR_SIG_SKEW_SECS   = 300   // biên lệch đồng hồ Strata ↔ cửa Mosaic
+
+cửa nhận  ⟺  now < expiry ≤ now + OPERATOR_SIG_TTL_SECS + OPERATOR_SIG_SKEW_SECS   // = 900 s
+```
+
+**Cận trên là `TTL + S`, KHÔNG phải `2S`** — đây là chỗ công thức phải viết ra thay cho con số, vì dạng "nhân đôi biên lệch" **không có nghiệm** ở đúng giá trị đang dùng. Với `δ = đồng hồ bên nhận − đồng hồ bên gửi ∈ [−S, +S]` và độ trễ `L`: cận dưới đòi `TTL > δ + L` (xấu nhất `TTL > S + L`), cận trên đòi `C ≥ TTL + δ` (xấu nhất `C ≥ TTL + S`). Đặt `C = 2S = 600` thì cận trên đòi `TTL ≤ 300` trong khi cận dưới đòi `TTL > 300 + L`: **giao là tập rỗng**, và nó hỏng theo kiểu câm — gói trung thực bị từ chối lẻ tẻ tuỳ độ trễ, không theo quy luật nào người vận hành đọc ra được. Kiểm biên với `TTL = 600`, `S = 300`: `δ = +300, L = 0` → `900 ≤ 900` ✓ · `δ = −300, L = 120` → `600 > −180` ✓.
+
+`OPERATOR_SIG_SKEW_SECS` là hằng **RIÊNG**, dù giá trị trùng biên lệch `ts` của tác giả ở tầng dữ liệu: hằng kia canh đồng hồ **máy tác giả**, hằng này canh đồng hồ **hai dịch vụ**. Hai áp lực ngược dấu — siết cái này để thu hẹp cửa sổ phát lại, nới cái kia để nhận máy tác giả lệch giờ. Gộp một hằng là một hằng mang hai chính sách.
+
+**Cửa sổ phát lại còn lại ~10 phút, và đó là đánh đổi được nhận có chủ ý.** Sổ nonce ở phía cửa là sổ trong tiến trình, nên khởi động lại là sổ rỗng: một gói bắt được, còn trong hạn, phát lại qua được. Bền vững hoá đòi một lượt ghi đồng bộ mỗi yêu cầu và đẻ ra ca *khởi động lại xong không neo được* — đòn DoS đắt hơn thứ nó phòng. Vì lỗ này có hạn dùng **đo được**, nó phải có một phép đo chứ không chỉ một câu: lúc khởi động, ghi ra nhật ký cửa sổ phát lại đang có hiệu lực **tính từ chính hai hằng đang cấu hình**. In ra từ hằng thì lời khai không tự sai khi ai đó đổi hằng.
+
+⚠️ **`nonce`/`expiry` KHÔNG thu hẹp ca `seq` khổng lồ** (lỗ thứ hai của `#80`) — phải khai, vì nó dễ bị đọc thành đã xử. Đường đó không phải phát lại: kẻ giữ được khoá operator ký được gói **mới**, hợp lệ hoàn toàn, với `seq` bất kỳ; phía kho này `verify_on_chain_against_local` nhường cho `AnchorRollback` khi `seq` trên chuỗi lớn hơn seq đang thử ⇒ lineage đó **không neo lại được nữa, vĩnh viễn**. Chỗ vá là ở validator: ép `seq' = seq + 1` thay vì chỉ `seq' > seq`. Nó nằm ở kho khác, nên `#80` đóng được lỗ 1 và **không** đóng theo lỗ 1.
 
 **Ràng buộc vận hành đi kèm cửa** (áp cho mọi bản triển khai, `VeDataIO/Specs#32`, 2026-08-19):
 
@@ -774,8 +825,12 @@ Phần KHỚP đúng (không cần sửa): `StrataVersion` (8 trường, thứ t
   - Body sai schema / hex sai độ dài (H32 ≠ 64 hex char, sig ≠ 128 hex char) → 400 `{ "error":"MalformedRequest", "detail":{...} }` TRƯỚC khi vào core. (Tên biến thể cửa lấy theo `node/src/error.rs`; danh sách đóng nằm ở **bảng §3.1** — không liệt lại ở đây để một sự thật chỉ có một chỗ khai. Điểm cần nhớ tại chỗ này: tên là `MalformedRequest`, **KHÔNG** phải `BadRequest`.)
   - `state_fields` có `key` trùng → daemon từ chối 400 (core `prove_field` chỉ trả lần xuất hiện đầu sau sort; trùng key = ngữ nghĩa mơ hồ). **Chốt INV key-duy-nhất:** key trong một version PHẢI duy nhất. Ba vế dưới tách bạch **cái đã đóng** khỏi **cái còn nợ**, vì trước đây chúng viết chung một câu và câu đó đọc được thành "lõi đã cưỡng chế":
     - **Đã đóng ở CỬA** (PR #50): `find_duplicate_key` (`src/state.rs:135`) được gọi tại `node/src/dto.rs::to_pairs`, nên mọi request đi qua daemon bị chặn 400 **trước khi** vào `build_state_root`.
-    - **CHƯA đóng ở LÕI.** `build_state_root` vẫn trả `Hash32` vô-lỗi và nhận key trùng thản nhiên; `StrataError` (`src/chain.rs`) có **11 biến thể và không biến thể nào tên `DuplicateFieldKey`**. Caller gọi thẳng Rust API vẫn ký được version có "field X = v1" VÀ "X = v2", hai giá trị mâu thuẫn cùng sinh field-proof hợp lệ dưới CÙNG `state_root` đã ký (equivocation — non-repudiation sụp). Việc **có sẵn** `find_duplicate_key` để gọi KHÔNG khép được nợ này: gọi hay không vẫn là lựa chọn của caller.
-    - **Yêu cầu còn mở** (issue #39 điểm 2, chưa land): core PHẢI enforce — `build_state_root`/`prove_field` reject dup key bằng biến thể lỗi mới `DuplicateFieldKey { field_key }` (E6), reject KỂ CẢ khi value giống hệt (fail-closed, đơn giản). Phạm vi: chỉ `state_fields`/`build_state_root`; **KHÔNG** áp cho `field_policy::grant()` (dedupe-idempotent ở đó là đúng — ngữ nghĩa QUYỀN khác GIÁ TRỊ). ⚠️ Vế này đổi `build_state_root` từ `-> Hash32` sang `-> Result<…>`, tức **đổi chữ ký công khai** của một hàm re-export ở gốc crate; phải đo bên tiêu thụ ngoài repo trước khi land, và tự nó là quyết định của chủ spec chứ không phải một lượt vá.
+    - **KHÔNG đóng ở LÕI — có chủ ý.** `build_state_root` trả `Hash32` vô-lỗi và nhận key trùng thản nhiên; `StrataError` (`src/chain.rs`) có **11 biến thể và không biến thể nào tên `DuplicateFieldKey`**. Caller gọi thẳng Rust API vẫn ký được version có "field X = v1" VÀ "X = v2", hai giá trị mâu thuẫn cùng sinh field-proof hợp lệ dưới CÙNG `state_root` đã ký (equivocation — non-repudiation sụp). Việc **có sẵn** `find_duplicate_key` để gọi KHÔNG khép được nợ này: gọi hay không vẫn là lựa chọn của caller.
+    - **CHỐT (issue #39 điểm 2): khử trùng `field_key` là nghĩa vụ của BÊN GỌI, không phải của lõi.** `build_state_root` giữ chữ ký `-> Hash32` và **không** kiểm key trùng; `StrataError` **không** có biến thể `DuplicateFieldKey`, và sẽ không thêm. `find_duplicate_key` có sẵn để gọi, nhưng **gọi hay không là lựa chọn của caller** — và đó chính là nội dung của chốt này, không phải một nợ còn lại.
+      - **Ai được miễn:** đường **HTTP** đã khử trùng ở cửa (`to_pairs` → `find_duplicate_key`), nên mọi client đi qua node không chạm rủi ro này. **Ai không được miễn:** mã Rust nhúng lõi trực tiếp — bên đó **phải gọi `find_duplicate_key` trước khi ký**, và verifier bên-3 coi đây là rủi ro tồn dư.
+      - **Vì sao không cưỡng chế ở lõi:** nó đổi `build_state_root` từ `-> Hash32` sang `-> Result<…>`, tức đổi chữ ký công khai của một hàm re-export ở gốc crate. Phương án nửa vời — thêm một hàm `_checked` song song — để lại một hàng rào không ai buộc phải đi qua, và một hàng rào tuỳ chọn trông giống một hàng rào thật (cùng lớp `#79`).
+      - **KHÔNG** áp cho `field_policy::grant()`: dedupe-idempotent ở đó là đúng — ngữ nghĩa QUYỀN khác GIÁ TRỊ.
+      - **Cách bảo đảm bề mặt công khai thay cho việc đo bên tiêu thụ:** ghim bề mặt của chính kho này (một ảnh chụp toàn bộ item công khai của crate, chạy trong CI). Khi đó mọi thay đổi chữ ký công khai làm bộ kiểm **kho này** đỏ trước khi tới bất cứ bên tiêu thụ nào, và câu hỏi đổi từ *"ai đang gọi hàm này?"* — chỉ trả lời được bằng cách đọc kho khác — sang *"bề mặt công khai của mình có đổi không?"*, trả lời được hoàn toàn bên trong kho này. Kèm một dòng `BREAKING` ở nhật ký thay đổi cho mỗi lần bề mặt đổi: ảnh chụp **phát hiện**, dòng nhật ký **thông báo**. Chỉ được nói *"bề mặt đã được ghim"* sau khi thử đổi một chữ ký công khai, chạy trọn bộ kiểm, và thấy đúng bài ảnh chụp đỏ; chưa chạy phép đó thì phát biểu đúng mức là *"đã có bài ảnh chụp"*.
 
 ### §8.1 S1 — `AnchorSink → Mosaic` (CIP-68): byte-layout datum + resolve
 
