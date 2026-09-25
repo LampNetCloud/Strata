@@ -301,6 +301,50 @@ fn action_from_str(s: &str) -> ApiResult<AuditAction> {
 // POST /v1/strata/create — §2.1 genesis
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Trần số phần tử `policy_authors` ở cửa (#84 mục 3).
+///
+/// Mỗi author tốn một lượt `registry.resolve` trong vòng dựng policy, và 64 B trong tiền ảnh
+/// `policy_hash`. Không trần thì một request mười nghìn `did` là đòn khuếch đại rẻ. Một hồ sơ
+/// thật có một đến vài bên được ghi; 64 để dư mà vẫn giữ vòng `resolve` nhỏ. Nới con số này
+/// thì xem lại chỗ vòng đó chạy (hôm nay: đồng bộ trong handler async).
+const MAX_POLICY_AUTHORS: usize = 64;
+
+/// Gác ở CỬA cho `policy_authors` (#84 mục 2 + 3): trần số phần tử, và `did` trùng ⇒ `400`.
+///
+/// `did` trùng trước đây bị **khử im lặng** (`Policy::allow` là `BTreeMap::insert`): gửi
+/// `[A, A, B]` được policy `{A, B}` và một `policy_hash` không phản ánh thứ đã gửi, không lỗi
+/// nào bật ra. `state_fields` trùng khoá thì bị từ chối thẳng (`to_pairs`) — hai đường vào
+/// cùng một policy thì cùng một mức nghiêm (luật #109). So trùng trên **32 byte đã giải mã**,
+/// không trên chuỗi: `"ab…"` và `"AB…"` là cùng một `did`.
+///
+/// Đứng ở handler, **không** trong [`create_inner`]: `create_inner` cũng là đường replay nhật
+/// ký, và mọi lỗi lúc replay là từ chối khởi động. Một bản ghi `Create` đã nhận trước gác này
+/// mà mang `did` trùng thì replay vẫn phải dựng lại đúng trạng thái đã trả `200` — và nó dựng
+/// lại được, vì map khử trùng y hệt lúc nhận. Gác này là luật NHẬN request mới, không đổi
+/// trạng thái mà một bản ghi cũ sinh ra.
+fn check_policy_authors(list: Option<&[String]>) -> ApiResult<()> {
+    let Some(list) = list else { return Ok(()) };
+    if list.len() > MAX_POLICY_AUTHORS {
+        return Err(ApiError::Malformed(format!(
+            "policy_authors: {} phần tử, trần {MAX_POLICY_AUTHORS}",
+            list.len()
+        )));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for s in list {
+        let did = hexs::decode_fixed::<32>(s)
+            .map_err(|e| ApiError::Malformed(format!("policy_authors: {e}")))?;
+        if !seen.insert(did) {
+            return Err(ApiError::Malformed(format!(
+                "policy_authors: did trùng {} — một did chỉ được xuất hiện MỘT lần; trùng thì \
+                 policy dựng ra khác tập đã gửi và policy_hash không phản ánh thứ đã gửi",
+                hex::encode(did)
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Phần THUẦN của `create` — dựng `ChainEntry` + `CreateResp` từ request đã nhận.
 ///
 /// Tách ra vì **replay nhật ký phải đi đúng đường này**, không phải một đường thứ hai:
@@ -369,6 +413,7 @@ async fn create(
     req: Result<Json<CreateReq>, JsonRejection>,
 ) -> ApiResult<Json<CreateResp>> {
     let req = body(req)?;
+    check_policy_authors(req.policy_authors.as_deref())?;
     let (ref_id, entry, resp) = create_inner(st.registry.as_ref(), &req)?;
 
     // Nhật ký đi CÙNG phép chèn, dưới cùng một khoá — xem `ChainStore::insert_journaled`
