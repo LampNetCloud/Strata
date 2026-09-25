@@ -299,10 +299,237 @@ không áp được.
 Nguồn chuẩn của công thức này là `Strata-Math §6.3` (đã vá ở `#71`) và cài đặt
 `src/state.rs`; bảng trên chép lại đúng cả hai.
 
+### Xác thực đường GHI on-chain — `anchor_auth` (#77)
+
+Áp cho **đúng hai** route đẩy `last_anchor_seq`: `POST /v1/strata/:ref/anchor` và
+`POST /v1/strata/_anchor_batch`. **Một** phép kiểm, **một** tiền ảnh; route lẻ là **lô cỡ 1**.
+
+Vì sao cả hai chứ không một: hai handler đi vào **cùng một dòng** `g.chain.publish_anchor()`
+(`node/src/routes.rs`, hàm `anchor` và `anchor_batch`), và `publish_anchor()` đẩy
+`last_anchor_seq` tiến là việc **không hoàn tác được** (INV-E7 cấm neo lùi). Bất biến cần
+có là *"không lượt đẩy `last_anchor_seq` nào không định danh được bên yêu cầu"*, không phải
+*"route X có gác"*. Gác riêng `/anchor` là gác route mà §14.6 của
+`docs/STRATA-ANCHOR-INTEGRATION-REPORT.md` đã bảo đừng gọi từ ngoài, và để mở route đang là
+cửa sản xuất — một lượt `_anchor_batch` chạm tới mọi lineage trong lô, liên hộ (lô thật đã đo
+30 tác giả trong một tx). Gộp `/anchor` vào gần như không tốn gì: hôm nay không bên tích hợp
+HTTP nào trong kho gọi route đó.
+
+Các route còn lại KHÔNG đổi: `create`/`:ref/version` đã đòi chữ ký tác giả trên
+`version_hash` (CHỐT-1); `_canonical` là route KHÔ; `_dirty`/`_settlement_window`/`head`
+là đường ĐỌC — xem "Tầng này KHÔNG chặn" cuối mục.
+
+#### Chủ thể được xác thực: khoá dịch vụ của bên điều phối, KHÔNG phải `author_did`
+
+Allow-list N khoá Ed25519, cấu hình theo khuôn `STRATA_NODE_KEYS`:
+
+```
+STRATA_ANCHOR_CALLER_KEYS = caller_name:pubkey_hex32[,caller_name:pubkey_hex32…]
+```
+
+`caller_name` chỉ đi vào **nhật ký của daemon** để quy trách nhiệm, **không bao giờ** vào thân
+lỗi. Nhiều khoá để xoay khoá và dựng bên điều phối thứ hai mà không cần một ngày cắt.
+
+Không dùng chữ ký của từng `author_did`, vì hai lý do độc lập:
+
+1. **Nó dựng lại đúng ràng buộc `Specs#32` đã bỏ, bằng đường kinh tế.** `author_did` không còn
+   là ranh giới lô (xem `_dirty`); đòi chữ ký từng tác giả thì một lô 30 hộ cần 30 người ký
+   đang trực tuyến, và lô rẻ nhất để xin đủ chữ ký trở thành lô một hộ — đúng đường đắt ~100×.
+2. **Không có dữ kiện mới nào để tác giả đồng thuận.** Anchor chỉ đẩy lên chuỗi 104 byte suy
+   ra từ những version tác giả **đã ký** ở `create`/`:ref/version`. Chữ ký tác giả ở lớp neo
+   chỉ thêm một phụ thuộc vào tính sống của khoá: tác giả ngoại tuyến ⇒ lineage không bao giờ
+   neo được, và vì `_dirty` sắp cũ trước mới sau, lineage chết ấy nằm luôn ở đầu hàng đợi.
+
+Chỗ cắm đúng: *khi nào* neo và lô gồm *ref nào* là quyết định của **Mosaic** (§4.4), nên xác
+thực định danh **bên ra quyết định** — bên điều phối.
+
+#### Bốn trường thêm vào thân
+
+| Trường | Kiểu trên dây | Nghĩa |
+|---|---|---|
+| `caller_vkey` | hex 64 ký tự = **32 B** | khoá công khai Ed25519 của bên gọi |
+| `nonce` | hex 64 ký tự = **32 B** | ngẫu nhiên CSPRNG, mỗi yêu cầu một giá trị |
+| `expiry` | `u64` giây Unix | hạn dùng của yêu cầu, do bên gọi đặt |
+| `caller_sig` | hex 128 ký tự = **64 B** | `Ed25519_sign(sk_caller, anchor_req_message)` |
+
+Bốn trường **bắt buộc** khi daemon đang bật xác thực. **Không** có dạng "có thì kiểm, không có
+thì cho qua": một cổng tự tắt theo nội dung gói là cổng do bên gửi gói điều khiển, và vì nó
+không bao giờ vỡ nên không bên nào biết mình chưa di trú.
+
+#### Tiền ảnh — `anchor_req_message`
+
+```text
+anchor_req_message = H_dom("LN/STRATA/anchor-req/v1",
+      u8(len(priority)) ‖ priority            // ASCII ĐÚNG chuỗi trên dây
+    ‖ u32be(n) ‖ ref_id₀ ‖ … ‖ ref_id₍ₙ₋₁₎    // 32 B mỗi cái, đã SẮP TĂNG DẦN, KHÔNG trùng
+    ‖ nonce                                   // 32 B cố định
+    ‖ u64be(expiry) )                         // 8 B
+
+caller_sig = Ed25519_sign(sk_caller, anchor_req_message)   // PureEdDSA TRỰC TIẾP trên 32 byte,
+                                                           // KHÔNG băm thêm lần nữa
+```
+
+| # | Thành phần | Mã hoá | Vì sao không nhập nhằng |
+|---|---|---|---|
+| 1 | `len(priority)` | `u8`, 1 B | tiền tố độ dài |
+| 2 | `priority` | ASCII var (`immediate`·`milestone`·`batch_daily`·`no_anchor`) | đã có tiền tố độ dài |
+| 3 | `n` = số ref | `u32` **BE**, 4 B | tiền tố độ dài cho mảng |
+| 4 | `ref_idᵢ` | **32 B** mỗi phần tử | độ dài CỐ ĐỊNH |
+| 5 | `nonce` | **32 B** | độ dài cố định |
+| 6 | `expiry` | `u64` **BE**, 8 B | độ dài cố định |
+
+Mọi thành phần độ dài biến thiên đều mang tiền tố độ dài, mọi thành phần còn lại có độ dài cố
+định ⇒ ánh xạ `(priority, {ref_id}, nonce, expiry) → tiền ảnh` là **song ánh** — đúng lớp lỗi
+`#39` điểm 1, đóng theo cùng cách: `ref_id` vào tiền ảnh dưới dạng **32 byte đã phân giải**,
+KHÔNG phải chuỗi người gọi gửi. Hệ quả dễ cài sai nhất: thân nhận `ref` ở **hai** dạng
+(bech32m `lnref1…` hoặc hex32), nên ký trên chuỗi là để một lô có hai chữ ký hợp lệ khác nhau
+— và bên bắt được gói chỉ cần đổi dạng mã hoá là có một thông điệp "mới" đi vòng qua sổ nonce.
+
+`u8(len) ‖ …` là cùng thành ngữ với `operator_sig_message` (`anchor-io/src/mosaic_door.rs`),
+`u32be(len) ‖ …` là thành ngữ của `canonical_core` — không phải một quy ước thứ ba.
+
+**Thứ tự ref là CANONICAL, không phải thứ tự gửi lên:** tiền ảnh dùng danh sách đã sắp tăng dần
+và đã khử trùng — cùng danh sách mà cửa đang khoá theo trong `anchor_batch`. Hoán vị danh sách
+không sinh ra một thông điệp khác.
+
+Cố ý **không** có trường `route` trong tiền ảnh: tiền ảnh cam kết **hiệu ứng** (tập ref +
+`priority`), nên một chữ ký `/anchor` cỡ 1 dùng lại ở `_anchor_batch` cho đúng cùng một hiệu
+ứng — không phải một tác hại cần chặn.
+
+#### Thứ tự kiểm — là một phần của đặc tả, không phải chi tiết cài đặt
+
+1. phân giải `refs` → `[u8;32]`; lô rỗng ⇒ `400`
+2. sắp tăng dần + **từ chối trùng** ⇒ `400` (luật đã có, không đổi)
+3. **cửa sổ `expiry`** (rẻ nhất, không mật mã)
+4. **verify `caller_sig`** bằng `verify_strict` (low-S canonical, như INV-E4)
+5. **sổ nonce**: chưa thấy ⇒ ghi; đã thấy ⇒ từ chối
+6. rồi mới tới `store.get` / khoá ref / gác rollback / `publish`
+
+Ba ràng buộc thứ tự này mang, mất một cái là mất một tính chất:
+
+- **bước 4 trước bước 5** — ngược lại thì bên gọi KHÔNG xác thực bơm đầy được sổ nonce;
+- **bước 5 trước bước 6** — ngược lại thì một yêu cầu phát lại vẫn tiêu một lượt đọc chuỗi;
+- **bước 4 trước `store.get`** — ngược lại thì `404 ref` biến cửa thành máy dò **sự tồn tại
+  của hồ sơ**, đúng thứ `_canonical` cố ý tránh.
+
+#### Hai hằng số, KHÔNG dùng chung
+
+```text
+ANCHOR_REQ_TTL_SECS         = 600   // bên gọi được đặt expiry xa nhất bao nhiêu
+ANCHOR_REQ_CLOCK_SKEW_SECS  = 300   // biên lệch đồng hồ bên điều phối ↔ daemon
+
+nhận  ⟺  now < expiry ≤ now + ANCHOR_REQ_TTL_SECS + ANCHOR_REQ_CLOCK_SKEW_SECS
+```
+
+TTL và biên lệch đồng hồ là **hai đại lượng**: một cái là ngân sách của bên gọi, một cái là
+dung sai của hai đồng hồ. Cận trên là `TTL + S`, **KHÔNG phải `2S`** — với `δ = đồng hồ daemon −
+đồng hồ bên gọi ∈ [−S, +S]` và độ trễ `L`, yêu cầu trung thực qua được cận dưới ⟺ `TTL > S + L`;
+đặt cận trên bằng `2S` thì với `S = 300` giao của hai điều kiện là **rỗng**. Kiểm biên với
+`TTL = 600`, `S = 300`: `δ = +300, L = 0` → `900 ≤ 900` ✓ · `δ = −300, L = 120` → `180 > 0` ✓.
+
+⚠️ `ANCHOR_REQ_CLOCK_SKEW_SECS` là hằng **RIÊNG**, dù giá trị trùng `MAX_TS_SKEW_SECS`. Hằng kia
+canh `ts` của **tác giả** ở tầng dữ liệu; hằng này canh đồng hồ **bên điều phối** ở tầng vận
+tải. Hai áp lực ngược dấu — siết cái này để thu hẹp cửa sổ phát lại, nới cái kia để nhận máy
+tác giả lệch giờ. Gộp một hằng là một hằng hai chính sách.
+
+#### Sổ nonce
+
+- Trong tiến trình, khoá = `(caller_vkey, nonce)`, dọn theo `expiry` ⇒ bộ nhớ chặn trên bởi
+  lưu lượng trong `TTL + S` giây.
+- **Không bền vững** — khởi động lại là sổ rỗng. Cố ý: sổ bền vững đòi thêm một bản ghi nhật ký
+  + một lượt `fsync` mỗi yêu cầu, và đẻ ra ca "khởi động lại xong không neo được" — đòn từ chối
+  dịch vụ đắt hơn thứ nó phòng. Lỗ còn lại khai ở cuối mục.
+- **Không phải trần tần suất.** Khoá hợp lệ vẫn gửi được vô hạn lượt hợp lệ.
+
+`nonce` kiếm được chỗ của nó ở nhánh `no_anchor`: nhánh đó trả về **trước** `publish_anchor()`,
+nên INV-E7 không chạm tới, trong khi nó vẫn gọi `resolve_many` = **đọc chuỗi thật**. Một gói
+`no_anchor` bắt được mà phát lại tự do là đòn khuếch đại rẻ tiền lên nhà cung cấp chuỗi. Với
+`immediate`/`milestone`/`batch_daily`, lượt phát lại thứ hai đã bị INV-E7 chặn (`409
+AnchorRollback`) — `nonce` không phải cổng vạn năng và không nên được đọc như thế.
+
+#### Nhận dạng lỗi
+
+| Mã | Tên | Khi nào |
+|---|---|---|
+| `403` | `AnchorAuthRejected` | khoá không trong allow-list **HOẶC** chữ ký sai — **cố ý KHÔNG phân biệt** |
+| `403` | `AnchorAuthStale` | `expiry` ngoài cửa sổ; thân trả `now` của daemon + `expiry` nhận được + hai hằng |
+| `403` | `AnchorAuthReplay` | `nonce` đã dùng trong cửa sổ còn hiệu lực |
+
+`AnchorAuthRejected` gộp hai nguyên nhân vì tách ra là biến cửa thành **máy dò allow-list** —
+cùng lý do cửa Mosaic trả đúng một thông điệp. Hai loại kia **phải** tách và **phải** nói số:
+lệch đồng hồ và phát lại là hai thứ người vận hành sửa được ngay khi đọc, và chúng không rò gì
+về khoá. Lệch giờ là kiểu hỏng câm nhất của mọi lược đồ có hạn dùng; trộn nó vào lỗi chữ ký là
+giấu nó đi.
+
+`AnchorAuthRejected` trả kèm `expected_preimage` (hex) + `expected_msg` (hex32) — **không phải
+rò rỉ**: tiền ảnh suy tất định từ đúng những gì bên gọi vừa gửi, không chạm khoá nào. Đó là dịch
+vụ `_canonical` đang cấp cho `version_hash`, cấp cho đúng lớp lỗi ấy: bên gọi tự cài lại một
+encoding rồi lệch một byte, và một `403` không nhắc tới tiền ảnh không cho họ chỗ nào để bắt đầu.
+
+#### Di trú — vỡ ở ba chỗ, cả ba đều ỒN
+
+**(a) Lúc BIÊN DỊCH, cho tiến trình gắn `router()`.** Cổng khởi động đứng ở `main()` của binary
+nên không phủ bản gắn vào tiến trình chủ. Đóng bằng **kiểu**: `AppState` có thêm một trường
+**bắt buộc, không `Option`, không `Default`**, và `AppState::new` nhận nó làm tham số:
+
+```rust
+pub enum AnchorAuth {
+    Keys(Vec<ed25519_dalek::VerifyingKey>),
+    /// Tắt có KHAI — chuỗi là câu người vận hành đã khai, đi vào nhật ký khởi động.
+    Disabled { declared: String },
+}
+```
+
+Mọi nơi dựng `AppState` — kể cả tiến trình chủ ngoài kho — **đỏ lúc biên dịch** và phải gõ ra
+lựa chọn của mình. Một lỗi biên dịch ở đó đáng giá hơn một daemon gắn-vào chạy xanh không xác thực.
+
+**(b) Lúc KHỞI ĐỘNG, cho người vận hành.** Thiếu `STRATA_ANCHOR_CALLER_KEYS` ⇒ **từ chối khởi
+động**, trừ khi khai một **câu khẳng định**, không phải một cờ:
+
+```
+STRATA_ANCHOR_AUTH = no-caller-auth-trusted-loopback-only
+```
+
+Thông điệp từ chối nói **hệ quả**, cùng giọng với cổng `STRATA_NODE_EXPOSED`: bất cứ ai với tới
+cổng này đều bắt được daemon tiêu tiền và chốt `last_anchor_seq`, và `publish_anchor()` tiến lên
+là việc không hoàn tác được. Không ai *trôi* vào chế độ không xác thực; muốn ở đó thì phải gõ ra.
+
+**(c) Lúc GỌI, cho bên điều phối.** Từ lượt người vận hành đặt allow-list, yêu cầu thiếu/sai chữ
+ký nhận `403` **trước mọi lượt ghi** — không có ca vỡ nửa chừng, vì bước 4/5 đứng trước `publish`.
+Một lượt `no_anchor` đã ký là **bản diễn tập đầy đủ**: chạy đủ tập gác kể cả gác đọc-on-chain mà
+không tiêu tx nào, nên bên điều phối kiểm được toàn bộ đường ký trước lô thật.
+
+**Số byte trên dây:** thêm ~320 byte JSON mỗi yêu cầu — ~6,4% trên một lô 74 ref, ~10× trên một
+lượt `/anchor` lẻ. Đường lẻ trả tỉ lệ xấu ấy, và đó là đường §14.6 đã bảo đừng dùng từ ngoài.
+
+#### Tầng này KHÔNG chặn
+
+1. **Khoá dịch vụ bị chiếm ⇒ mất toàn bộ.** Bên giữ nửa bí mật của một khoá trong allow-list ký
+   được mọi lô, mọi lúc, hợp lệ hoàn toàn. Tầng này **quy trách nhiệm**, không **giới hạn**.
+2. **Ca `seq` khổng lồ trên chuỗi — không giảm chút nào.** Bên chiếm được bí mật của cửa Mosaic
+   nói thẳng với cửa, **không đi qua Strata**. Một `seq` khổng lồ trên chuỗi làm
+   `verify_on_chain_against_local` nhường cho `AnchorRollback` ⇒ lineage chết vĩnh viễn ở phía
+   Strata. Chỗ sửa là validator/cửa ép `seq' = seq + 1` (§4.4), không phải tầng này.
+3. **Phát lại sau khi daemon khởi động lại.** Sổ nonce trong tiến trình ⇒ một gói bắt được, còn
+   trong hạn (≤ `TTL + S`), phát lại qua được. Nhánh `immediate` vẫn bị INV-E7 chặn; nhánh
+   `no_anchor` thì không.
+4. **Không có trần tần suất theo khoá.** Một khoá hợp lệ vẫn gọi được vô hạn lượt `immediate` và
+   đốt ví của người vận hành theo bậc ~100×. Tầng này làm việc đó **có tên**, không làm nó **bất khả**.
+5. **`refs` không có trần ở route.** Một yêu cầu đã ký với 10 000 ref vẫn đi qua xác thực rồi mới
+   gặp trần 8 KiB của metadata — sau khi đã tra store và giữ khoá từng ref. Trần nên đặt ở cửa
+   (~74 ref/tx theo `SinkConfig::max_metadatum_bytes`); việc riêng, không thuộc câu hỏi dây này.
+6. **Đường ĐỌC vẫn mở.** `_dirty` trả `ref_id` + `author_did` + nhịp thời gian của **mọi** lineage
+   đang chờ neo cho bất cứ ai với tới cổng. Nó không đẩy `last_anchor_seq` nên nằm ngoài mục
+   này, nhưng nó là bản đồ để chọn mục tiêu. Nêu để không ai đọc mục này thành "cổng đã kín".
+
+**Đã cân và bỏ:** *bearer token trong header* — bí mật dùng chung, không nói ai soạn lô, không cam
+kết nội dung lô nên không chặn được sửa `refs` trên đường · *mTLS / lớp gác đứng trước* — không
+chạm bản gắn-vào (mục (a)) · *`nonce` 16 byte* — 32 byte để dùng lại bộ giải mã hex32 đang có.
+
 ### POST `/v1/strata/:ref/anchor`  (đẩy anchor on-chain qua adapter §4)
 ```jsonc
-// req  (priority lấy từ Stamp anchor_priority — Stamp-Strata-Mapping §4)
-{ "priority":"immediate" }
+// req  (priority lấy từ Stamp anchor_priority — Stamp-Strata-Mapping §4; bốn trường sau: anchor_auth)
+{ "priority":"immediate",
+  "caller_vkey":"<hex32>", "nonce":"<hex32>", "expiry":1719600900, "caller_sig":"<hex64>" }
 // 200
 { "ref_id":"<hex32>", "head_version_hash":"<hex32>", "mmr_root":"<hex32>", "seq":5,
   "anchor_txid":"<hex>", "backend":"settlement" }     // anchor_txid null nếu no_anchor
@@ -395,8 +622,9 @@ quyết lô và **không** giữ hàng đợi — nó trả lời một câu h�
 #### POST `/v1/strata/_anchor_batch` — neo N ref trong MỘT tx (mối nối B1′)
 
 ```jsonc
-// req
-{ "refs":["<hex32|lnref1…>", ...], "priority":"batch_daily" }
+// req  (bốn trường sau: anchor_auth)
+{ "refs":["<hex32|lnref1…>", ...], "priority":"batch_daily",
+  "caller_vkey":"<hex32>", "nonce":"<hex32>", "expiry":1719600900, "caller_sig":"<hex64>" }
 // 200
 { "anchor_txid":"<hex>", "backend":"settlement", "batch_size":5,
   "anchors":[ { "ref_id":"<hex32>", "head_version_hash":"<hex32>",
@@ -493,6 +721,9 @@ không ai nhầm chúng là `StrataError`:
 |---|---|---|
 | 400 Bad Request | *(Malformed)* | body/param/**tham số path** không giải mã được: hex sai độ dài, enum lạ, **khoá trùng trong `state_fields`** (INV-E6), `limit=0`, cửa sổ rỗng/lùi |
 | 405 Method Not Allowed | `MalformedRequest` | route có nhưng không nhận method đó; `detail = {reason, method, path}` |
+| 403 Forbidden | `AnchorAuthRejected` | `/anchor`·`_anchor_batch`: khoá không trong allow-list **hoặc** chữ ký sai — cố ý không phân biệt; kèm `expected_preimage` + `expected_msg` (xem `anchor_auth`) |
+| 403 | `AnchorAuthStale` | `expiry` ngoài `now < expiry ≤ now + TTL + S`; kèm `now`, `expiry`, hai hằng |
+| 403 | `AnchorAuthReplay` | `(caller_vkey, nonce)` đã dùng trong cửa sổ còn hiệu lực |
 | 409 Conflict | `RefExists` | `create` lần hai trên cùng `(author_did, genesis_nonce)` — **KHÔNG** ghi đè lịch sử |
 | 422 | `TimestampTooFarFuture` | 🔴 gần như chắc chắn client gửi **mili giây** thay vì giây — xem dưới |
 | 501 Not Implemented | `AnchorNotConfigured` | daemon chưa cắm `AnchorSink` |
