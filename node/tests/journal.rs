@@ -746,3 +746,111 @@ fn nhat_ky_tao_moi_quyen_0600_tep_cu_giu_nguyen() {
     let mode = std::fs::metadata(&old).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o640, "tệp cũ không được đổi quyền: {mode:o}");
 }
+
+// ── #119: đối chiếu chuỗi lúc khởi động ────────────────────────────────────────
+
+use lampnet_strata_node::{ChainCheckError, check_against_chain};
+
+/// Node ghi create + 2 version rồi neo seq 2 lên `sink` (dùng chung giữa các lần khởi động,
+/// đóng vai chuỗi). Trả `(ref, đường nhật ký)`.
+async fn node_da_neo_seq_2(sink: Arc<MemorySink>) -> (String, PathBuf) {
+    let path = tmp_path("chain-check");
+    let j = Arc::new(Journal::open(&path).unwrap());
+    let app = router(AppState::new(
+        Arc::new(ChainStore::with_journal(j)),
+        registry(),
+        sink,
+    ));
+    let (r, vh0) = create_ok(&app).await;
+    let vh1 = append_ok(&app, &r, 0, vh0, 1_100).await;
+    append_ok(&app, &r, 1, vh1, 1_200).await;
+    let a = anchor_ok(&app, &r).await;
+    assert_eq!(a["seq"], 2);
+    (r, path)
+}
+
+/// Bản chép giữ `keep` dòng đầu của nhật ký.
+fn ban_chep(path: &PathBuf, keep: usize, tag: &str) -> PathBuf {
+    let raw = std::fs::read_to_string(path).unwrap();
+    let out = tmp_path(tag);
+    let lines: Vec<&str> = raw.lines().take(keep).collect();
+    std::fs::write(&out, format!("{}\n", lines.join("\n"))).unwrap();
+    out
+}
+
+/// Kịch bản của issue: bản chép mất version seq 2 + bản ghi neo ⇒ replay lên xanh (không có
+/// bước nào hỏi chuỗi), nhưng chuỗi đã có anchor seq 2 mà lịch sử local không có ⇒ chặn.
+#[tokio::test]
+async fn ban_chep_tut_sau_chuoi_bi_chan() {
+    let sink = Arc::new(MemorySink::new());
+    let (r, path) = node_da_neo_seq_2(sink.clone()).await;
+    // header · create · append seq1 · append seq2 · anchor ⇒ giữ 3 dòng đầu.
+    let copy = ban_chep(&path, 3, "chain-check-old");
+    let store = replay_fresh(&copy, registry()).expect("replay bản chép cũ vẫn lên — đó là lỗ");
+    match check_against_chain(&store, sink.as_ref()) {
+        Err(ChainCheckError::Diverged(v)) => {
+            assert_eq!(v.len(), 1);
+            assert_eq!(v[0].ref_id, ref_raw(&r));
+            assert_eq!(
+                (v[0].on_chain_seq, v[0].local_head_seq, v[0].mirror_seq),
+                (2, 1, None)
+            );
+        }
+        other => panic!("phải chặn: {other:?}"),
+    }
+}
+
+/// Đối chứng: bản chép đủ ⇒ qua, gương khớp chuỗi.
+#[tokio::test]
+async fn ban_chep_du_thi_qua() {
+    let sink = Arc::new(MemorySink::new());
+    let (_, path) = node_da_neo_seq_2(sink.clone()).await;
+    let store = replay_fresh(&path, registry()).unwrap();
+    let rep = check_against_chain(&store, sink.as_ref()).expect("phải qua");
+    assert_eq!(
+        (rep.checked, rep.anchored_on_chain, rep.mirror_lagging),
+        (1, 1, 0)
+    );
+}
+
+/// Ca hợp lệ mang hình dạng "chuỗi đi trước gương": chết sau khi tx neo lên chuỗi, trước khi
+/// ghi bản ghi `Anchor`. Lịch sử có đủ version ⇒ KHÔNG chặn, chỉ đếm.
+#[tokio::test]
+async fn chet_giua_submit_va_ghi_nhat_ky_thi_qua_va_dem_guong_tut() {
+    let sink = Arc::new(MemorySink::new());
+    let (_, path) = node_da_neo_seq_2(sink.clone()).await;
+    let copy = ban_chep(&path, 4, "chain-check-crash"); // mất đúng dòng Anchor
+    let store = replay_fresh(&copy, registry()).unwrap();
+    let rep = check_against_chain(&store, sink.as_ref()).expect("phải qua");
+    assert_eq!(rep.mirror_lagging, 1);
+}
+
+/// Cùng seq, khác nội dung trên chuỗi ⇒ chặn.
+#[tokio::test]
+async fn cung_seq_khac_noi_dung_bi_chan() {
+    let sink = Arc::new(MemorySink::new());
+    let (r, path) = node_da_neo_seq_2(sink.clone()).await;
+    sink.seed(lampnet_strata::StrataAnchor {
+        ref_id: ref_raw(&r),
+        head_version_hash: [0xAA; 32],
+        mmr_root: [0xBB; 32],
+        seq: 2,
+    });
+    let store = replay_fresh(&path, registry()).unwrap();
+    assert!(matches!(
+        check_against_chain(&store, sink.as_ref()),
+        Err(ChainCheckError::Diverged(_))
+    ));
+}
+
+/// Backend tắt ⇒ `BackendDisabled`, không phải "đã đối chiếu xong".
+#[tokio::test]
+async fn backend_tat_thi_bao_rieng() {
+    let sink = Arc::new(MemorySink::new());
+    let (_, path) = node_da_neo_seq_2(sink).await;
+    let store = replay_fresh(&path, registry()).unwrap();
+    assert!(matches!(
+        check_against_chain(&store, &lampnet_strata_node::DisabledSink),
+        Err(ChainCheckError::BackendDisabled)
+    ));
+}
